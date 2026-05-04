@@ -39,11 +39,90 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
 });
 
+function AppraisalPopup({ appraisal, getSignedUrl }) {
+  const [photoUrl, setPhotoUrl] = useState(null);
+  const [pdfUrl, setPdfUrl] = useState(null);
+
+  useEffect(() => {
+    if (appraisal.photo_url) {
+      getSignedUrl('photos', appraisal.photo_url).then(setPhotoUrl);
+    }
+    if (appraisal.pdf_url) {
+      getSignedUrl('pdfs', appraisal.pdf_url).then(setPdfUrl);
+    }
+  }, [appraisal]);
+
+  return (
+    <div style={{ fontFamily: "'DM Sans', sans-serif", width: '280px' }}>
+      {photoUrl && (
+        <img
+          src={photoUrl}
+          alt={appraisal.address}
+          style={{
+            width: '100%',
+            height: '180px',
+            borderRadius: '8px',
+            marginBottom: '10px',
+            objectFit: 'cover',
+          }}
+        />
+      )}
+      <p style={{ margin: '0 0 3px', fontWeight: '700', color: '#1f2937', fontSize: '16px' }}>
+        {appraisal.address}
+      </p>
+      <p style={{ margin: '0 0 10px', color: '#6b7280', fontSize: '14px' }}>
+        {appraisal.city}
+      </p>
+      {pdfUrl && (
+        <a
+          href={pdfUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'inline-block',
+            padding: '8px 16px',
+            background: '#0d9488',
+            color: 'white',
+            borderRadius: '6px',
+            textDecoration: 'none',
+            fontSize: '13px',
+            fontWeight: '600',
+          }}
+        >
+          View Report (PDF)
+        </a>
+      )}
+    </div>
+  );
+}
+
 function Map() {
   const [appraisals, setAppraisals] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
+  const [suggestions, setSuggestions] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
   const [mapRef, setMapRef] = useState(null);
+  const autocompleteTimer = React.useRef(null);
+
+  const handleAutocomplete = (value) => {
+    if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
+    if (value.length < 3) {
+      setSuggestions([]);
+      return;
+    }
+    autocompleteTimer.current = setTimeout(async () => {
+      try {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(value + ', Ontario, Canada')}&limit=5`,
+          { headers: { 'Accept': 'application/json' } }
+        );
+        const results = await response.json();
+        setSuggestions(results);
+      } catch (err) {
+        console.error('Autocomplete error:', err);
+      }
+    }, 300);
+  };
 
   const fetchAppraisals = async () => {
     const { data, error } = await supabase
@@ -58,25 +137,33 @@ function Map() {
 
   const handleSearch = async () => {
     if (!searchTerm.trim()) return;
-    const response = await fetch(
-      `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchTerm + ', Ontario, Canada')}`
-    );
-    const results = await response.json();
-    if (results.length > 0 && mapRef) {
-      mapRef.flyTo([parseFloat(results[0].lat), parseFloat(results[0].lon)], 13);
+    try {
+      const response = await fetch(
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchTerm + ', Ontario, Canada')}`,
+        { headers: { 'Accept': 'application/json' } }
+      );
+      const results = await response.json();
+      console.log('Search results:', results);
+      if (results.length > 0 && mapRef) {
+        mapRef.flyTo([parseFloat(results[0].lat), parseFloat(results[0].lon)], 17);
+      } else {
+        alert('Location not found. Try a more specific address.');
+      }
+    } catch (err) {
+      console.error('Search error:', err);
+      alert('Search failed. Please try again.');
     }
   };
 
-  const getPhotoUrl = (path) => {
-    if (!path) return null;
-    const { data } = supabase.storage.from('photos').getPublicUrl(path);
-    return data.publicUrl;
-  };
+  const [fileUrls, setFileUrls] = useState({});
 
-  const getPdfUrl = (path) => {
-    if (!path) return null;
-    const { data } = supabase.storage.from('pdfs').getPublicUrl(path);
-    return data.publicUrl;
+  const getSignedUrl = async (bucket, path) => {
+    const key = `${bucket}/${path}`;
+    if (fileUrls[key]) return fileUrls[key];
+    const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 3600);
+    if (error || !data) return null;
+    setFileUrls((prev) => ({ ...prev, [key]: data.signedUrl }));
+    return data.signedUrl;
   };
 
   return (
@@ -99,8 +186,8 @@ function Map() {
         boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
       }}>
 
-        {/* Search */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, maxWidth: '500px' }}>
+        {/* Search with autocomplete */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, maxWidth: '500px', position: 'relative' }}>
           <div style={{
             display: 'flex',
             alignItems: 'center',
@@ -108,13 +195,16 @@ function Map() {
             borderRadius: '8px',
             padding: '0 12px',
             flex: 1,
+            position: 'relative',
           }}>
-            <span style={{ color: '#9ca3af', marginRight: '8px', fontSize: '16px' }}>🔍</span>
             <input
               type="text"
-              placeholder="Search city or area..."
+              placeholder="Search address, city, or area..."
               value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
+              onChange={(e) => {
+                setSearchTerm(e.target.value);
+                handleAutocomplete(e.target.value);
+              }}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
               style={{
                 border: 'none',
@@ -126,6 +216,43 @@ function Map() {
                 color: '#374151',
               }}
             />
+            {suggestions.length > 0 && (
+              <div style={{
+                position: 'absolute',
+                top: '42px',
+                left: 0,
+                right: 0,
+                background: 'white',
+                borderRadius: '8px',
+                boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
+                overflow: 'hidden',
+                zIndex: 2000,
+              }}>
+                {suggestions.map((s, i) => (
+                  <div
+                    key={i}
+                    onClick={() => {
+                      setSearchTerm(s.display_name);
+                      setSuggestions([]);
+                      if (mapRef) {
+                        mapRef.flyTo([parseFloat(s.lat), parseFloat(s.lon)], 17);
+                      }
+                    }}
+                    style={{
+                      padding: '10px 14px',
+                      cursor: 'pointer',
+                      fontSize: '13px',
+                      color: '#374151',
+                      borderBottom: '1px solid #f3f4f6',
+                    }}
+                    onMouseEnter={(e) => e.target.style.background = '#f0fdfa'}
+                    onMouseLeave={(e) => e.target.style.background = 'white'}
+                  >
+                    {s.display_name}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
           <button
             onClick={handleSearch}
@@ -194,61 +321,20 @@ function Map() {
       {/* Map */}
       <div style={{ paddingTop: '56px', height: '100%' }}>
         <MapContainer
-          center={[50.0, -85.0]}
-          zoom={6}
+          center={[44.0, -79.5]}
+          zoom={7}
           style={{ height: '100%', width: '100%' }}
           ref={setMapRef}
-          minZoom={6}
-          maxBounds={[[41.5, -95.5], [57.0, -74.0]]}
-          maxBoundsViscosity={1.0}
+          minZoom={5}
         >
           <TileLayer
-            attribution='&copy; OpenStreetMap contributors'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution='&copy; <a href="https://carto.com/">CARTO</a>'
+            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
           />
           {appraisals.map((a) => (
             <Marker key={a.id} position={[a.latitude, a.longitude]} icon={customIcon}>
               <Popup>
-                <div style={{ fontFamily: "'DM Sans', sans-serif", minWidth: '200px' }}>
-                  {a.photo_url && (
-                    <img
-                      src={getPhotoUrl(a.photo_url)}
-                      alt={a.address}
-                      style={{
-                        width: '100%',
-                        borderRadius: '6px',
-                        marginBottom: '8px',
-                        objectFit: 'cover',
-                        maxHeight: '150px',
-                      }}
-                    />
-                  )}
-                  <p style={{ margin: '0 0 2px', fontWeight: '600', color: '#1f2937', fontSize: '14px' }}>
-                    {a.address}
-                  </p>
-                  <p style={{ margin: '0 0 8px', color: '#6b7280', fontSize: '13px' }}>
-                    {a.city}
-                  </p>
-                  {a.pdf_url && (
-                    <a
-                      href={getPdfUrl(a.pdf_url)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      style={{
-                        display: 'inline-block',
-                        padding: '6px 12px',
-                        background: '#0d9488',
-                        color: 'white',
-                        borderRadius: '6px',
-                        textDecoration: 'none',
-                        fontSize: '12px',
-                        fontWeight: '600',
-                      }}
-                    >
-                      View Report (PDF)
-                    </a>
-                  )}
-                </div>
+                <AppraisalPopup appraisal={a} getSignedUrl={getSignedUrl} />
               </Popup>
             </Marker>
           ))}
