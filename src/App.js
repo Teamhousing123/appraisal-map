@@ -31,15 +31,22 @@ function App() {
         onClick={() => supabase.auth.signOut()}
         style={{
           position: 'fixed',
-          top: '10px',
-          right: '10px',
-          padding: '8px 16px',
+          top: '12px',
+          right: '18px',
+          padding: '10px 16px',
           backgroundColor: '#e74c3c',
           color: 'white',
           border: 'none',
-          borderRadius: '5px',
+          borderRadius: '8px',
           cursor: 'pointer',
           zIndex: 1000,
+          fontSize: '13px',
+          fontWeight: '600',
+          fontFamily: "'DM Sans', sans-serif",
+          lineHeight: '1',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
         }}
       >
         Log Out

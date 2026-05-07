@@ -5,7 +5,7 @@ function AddAppraisal({ onAdded }) {
   const [address, setAddress] = useState('');
   const [city, setCity] = useState('');
   const [photo, setPhoto] = useState(null);
-  const [pdf, setPdf] = useState(null);
+  const [folderFiles, setFolderFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -37,17 +37,27 @@ function AddAppraisal({ onAdded }) {
         photoPath = photoName;
       }
 
-      let pdfPath = null;
-      if (pdf) {
-        const pdfName = `${Date.now()}_${pdf.name}`;
-        const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, pdf);
-        if (pdfError) throw pdfError;
-        pdfPath = pdfName;
+      let folderPaths = [];
+      if (folderFiles.length > 0) {
+        const timestamp = Date.now();
+        for (const file of folderFiles) {
+          const filePath = `${timestamp}_${file.webkitRelativePath.replace(/\//g, '_')}`;
+          const { error: fileError } = await supabase.storage.from('appraisal-folders').upload(filePath, file);
+          if (fileError) throw fileError;
+          folderPaths.push(filePath);
+        }
       }
 
       const { error: insertError } = await supabase
         .from('appraisals')
-        .insert([{ address, city, latitude: lat, longitude: lon, photo_url: photoPath, pdf_url: pdfPath }]);
+        .insert([{
+          address,
+          city,
+          latitude: lat,
+          longitude: lon,
+          photo_url: photoPath,
+          folder_files: folderPaths,
+        }]);
 
       if (insertError) throw insertError;
       onAdded();
@@ -67,6 +77,34 @@ function AddAppraisal({ onAdded }) {
     boxSizing: 'border-box',
     outline: 'none',
     color: '#374151',
+  };
+
+  const fileInputWrapperStyle = {
+    width: '100%',
+    padding: '8px 12px',
+    marginBottom: '10px',
+    borderRadius: '8px',
+    border: '1px solid #d1d5db',
+    fontSize: '13px',
+    boxSizing: 'border-box',
+    color: '#374151',
+    backgroundColor: 'white',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '10px',
+    cursor: 'pointer',
+  };
+
+  const fileButtonStyle = {
+    padding: '4px 10px',
+    backgroundColor: '#f3f4f6',
+    border: '1px solid #d1d5db',
+    borderRadius: '6px',
+    fontSize: '12px',
+    color: '#374151',
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    fontFamily: "'DM Sans', sans-serif",
   };
 
   return (
@@ -103,11 +141,38 @@ function AddAppraisal({ onAdded }) {
         <input type="text" placeholder="Address" value={address} onChange={(e) => setAddress(e.target.value)} required style={inputStyle} />
         <input type="text" placeholder="City (e.g. Vaughan)" value={city} onChange={(e) => setCity(e.target.value)} required style={inputStyle} />
 
+        {/* House Photo */}
         <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>House Photo</label>
-        <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files[0])} style={{ marginBottom: '10px', fontSize: '12px' }} />
+        <label style={fileInputWrapperStyle}>
+          <span style={fileButtonStyle}>Choose File</span>
+          <span style={{ color: photo ? '#374151' : '#9ca3af', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {photo ? photo.name : 'No file chosen'}
+          </span>
+          <input
+            type="file"
+            accept="image/*"
+            onChange={(e) => setPhoto(e.target.files[0])}
+            style={{ display: 'none' }}
+          />
+        </label>
 
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Appraisal PDF</label>
-        <input type="file" accept=".pdf" onChange={(e) => setPdf(e.target.files[0])} style={{ marginBottom: '14px', fontSize: '12px' }} />
+        {/* Appraisal Folder */}
+        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Appraisal Folder</label>
+        <label style={fileInputWrapperStyle}>
+          <span style={fileButtonStyle}>Choose Folder</span>
+          <span style={{ color: folderFiles.length > 0 ? '#374151' : '#9ca3af', fontSize: '12px' }}>
+            {folderFiles.length > 0 ? `${folderFiles.length} file${folderFiles.length !== 1 ? 's' : ''} selected` : 'No folder chosen'}
+          </span>
+          <input
+            type="file"
+            webkitdirectory=""
+            mozdirectory=""
+            directory=""
+            multiple
+            onChange={(e) => setFolderFiles(Array.from(e.target.files))}
+            style={{ display: 'none' }}
+          />
+        </label>
 
         <button
           type="submit"
@@ -122,6 +187,7 @@ function AddAppraisal({ onAdded }) {
             cursor: 'pointer',
             fontSize: '14px',
             fontWeight: '600',
+            marginTop: '4px',
           }}
         >
           {loading ? 'Saving...' : 'Save Appraisal'}
