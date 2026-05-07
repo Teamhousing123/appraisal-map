@@ -39,9 +39,16 @@ L.Icon.Default.mergeOptions({
   shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
 });
 
-function AppraisalPopup({ appraisal, getSignedUrl }) {
+function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [photoUrl, setPhotoUrl] = useState(null);
   const [pdfUrl, setPdfUrl] = useState(null);
+  const [editing, setEditing] = useState(false);
+  const [editAddress, setEditAddress] = useState(appraisal.address);
+  const [editCity, setEditCity] = useState(appraisal.city);
+  const [newPhoto, setNewPhoto] = useState(null);
+  const [newPdf, setNewPdf] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     if (appraisal.photo_url) {
@@ -52,6 +59,115 @@ function AppraisalPopup({ appraisal, getSignedUrl }) {
     }
   }, [appraisal]);
 
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const updates = { address: editAddress, city: editCity };
+
+      if (editAddress !== appraisal.address || editCity !== appraisal.city) {
+        const response = await fetch(
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(editAddress + ', ' + editCity + ', Ontario, Canada')}`,
+          { headers: { 'Accept': 'application/json' } }
+        );
+        const results = await response.json();
+        if (results.length > 0) {
+          updates.latitude = parseFloat(results[0].lat);
+          updates.longitude = parseFloat(results[0].lon);
+        }
+      }
+
+      if (newPhoto) {
+        const photoName = `${Date.now()}_${newPhoto.name}`;
+        const { error: photoError } = await supabase.storage.from('photos').upload(photoName, newPhoto);
+        if (photoError) throw photoError;
+        updates.photo_url = photoName;
+      }
+
+      if (newPdf) {
+        const pdfName = `${Date.now()}_${newPdf.name}`;
+        const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, newPdf);
+        if (pdfError) throw pdfError;
+        updates.pdf_url = pdfName;
+      }
+
+      const { error } = await supabase
+        .from('appraisals')
+        .update(updates)
+        .eq('id', appraisal.id);
+
+      if (error) throw error;
+      setEditing(false);
+      onUpdated();
+    } catch (err) {
+      alert('Error saving: ' + err.message);
+    }
+    setSaving(false);
+  };
+
+  const handleDelete = async () => {
+    try {
+      const { error } = await supabase
+        .from('appraisals')
+        .delete()
+        .eq('id', appraisal.id);
+      if (error) throw error;
+      onDeleted();
+    } catch (err) {
+      alert('Error deleting: ' + err.message);
+    }
+  };
+
+  if (editing) {
+    return (
+      <div style={{ fontFamily: "'DM Sans', sans-serif", width: '280px' }}>
+        <p style={{ margin: '0 0 10px', fontWeight: '700', fontSize: '15px', color: '#1f2937' }}>Edit Appraisal</p>
+        <input
+          type="text"
+          value={editAddress}
+          onChange={(e) => setEditAddress(e.target.value)}
+          style={{
+            width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
+            border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
+          }}
+        />
+        <input
+          type="text"
+          value={editCity}
+          onChange={(e) => setEditCity(e.target.value)}
+          style={{
+            width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
+            border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
+          }}
+        />
+        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace Photo</label>
+        <input type="file" accept="image/*" onChange={(e) => setNewPhoto(e.target.files[0])} style={{ marginBottom: '8px', fontSize: '11px' }} />
+        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace PDF</label>
+        <input type="file" accept=".pdf" onChange={(e) => setNewPdf(e.target.files[0])} style={{ marginBottom: '12px', fontSize: '11px' }} />
+        <div style={{ display: 'flex', gap: '6px' }}>
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            style={{
+              flex: 1, padding: '8px', backgroundColor: '#0d9488', color: 'white',
+              border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+            }}
+          >
+            {saving ? 'Saving...' : 'Save'}
+          </button>
+          <button
+            onClick={() => setEditing(false)}
+            style={{
+              flex: 1, padding: '8px', backgroundColor: 'transparent', color: '#6b7280',
+              border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer', fontSize: '12px',
+            }}
+          >
+            Cancel
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ fontFamily: "'DM Sans', sans-serif", width: '280px' }}>
       {photoUrl && (
@@ -59,11 +175,8 @@ function AppraisalPopup({ appraisal, getSignedUrl }) {
           src={photoUrl}
           alt={appraisal.address}
           style={{
-            width: '100%',
-            height: '180px',
-            borderRadius: '8px',
-            marginBottom: '10px',
-            objectFit: 'cover',
+            width: '100%', height: '180px', borderRadius: '8px',
+            marginBottom: '10px', objectFit: 'cover',
           }}
         />
       )}
@@ -73,25 +186,54 @@ function AppraisalPopup({ appraisal, getSignedUrl }) {
       <p style={{ margin: '0 0 10px', color: '#6b7280', fontSize: '14px' }}>
         {appraisal.city}
       </p>
-      {pdfUrl && (
-        <a
-          href={pdfUrl}
-          target="_blank"
-          rel="noopener noreferrer"
+      <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+        {pdfUrl && (
+          <a
+            href={pdfUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              padding: '8px 14px', background: '#0d9488', color: 'white',
+              borderRadius: '6px', textDecoration: 'none', fontSize: '12px', fontWeight: '600',
+            }}
+          >
+            View Report
+          </a>
+        )}
+        <button
+          onClick={() => setEditing(true)}
           style={{
-            display: 'inline-block',
-            padding: '8px 16px',
-            background: '#0d9488',
-            color: 'white',
-            borderRadius: '6px',
-            textDecoration: 'none',
-            fontSize: '13px',
-            fontWeight: '600',
+            padding: '8px 14px', background: 'transparent', color: '#374151',
+            border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
+            fontSize: '12px', fontWeight: '500',
           }}
         >
-          View Report (PDF)
-        </a>
-      )}
+          Edit
+        </button>
+        {!confirmDelete ? (
+          <button
+            onClick={() => setConfirmDelete(true)}
+            style={{
+              padding: '8px 14px', background: 'transparent', color: '#dc2626',
+              border: '1px solid #fecaca', borderRadius: '6px', cursor: 'pointer',
+              fontSize: '12px', fontWeight: '500',
+            }}
+          >
+            Delete
+          </button>
+        ) : (
+          <button
+            onClick={handleDelete}
+            style={{
+              padding: '8px 14px', background: '#dc2626', color: 'white',
+              border: 'none', borderRadius: '6px', cursor: 'pointer',
+              fontSize: '12px', fontWeight: '600',
+            }}
+          >
+            Confirm Delete
+          </button>
+        )}
+      </div>
     </div>
   );
 }
@@ -113,11 +255,11 @@ function Map() {
     autocompleteTimer.current = setTimeout(async () => {
       try {
         const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(value + ', Ontario, Canada')}&limit=5`,
+          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(value + ', Ontario, Canada')}&limit=10&viewbox=-81.5,44.8,-77.0,42.8&bounded=1`,
           { headers: { 'Accept': 'application/json' } }
         );
         const results = await response.json();
-        setSuggestions(results);
+        setSuggestions(results.slice(0, 5));
       } catch (err) {
         console.error('Autocomplete error:', err);
       }
@@ -139,7 +281,7 @@ function Map() {
     if (!searchTerm.trim()) return;
     try {
       const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchTerm + ', Ontario, Canada')}`,
+        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchTerm + ', Ontario, Canada')}&viewbox=-81.5,44.8,-77.0,42.8&bounded=1`,
         { headers: { 'Accept': 'application/json' } }
       );
       const results = await response.json();
@@ -147,7 +289,7 @@ function Map() {
       if (results.length > 0 && mapRef) {
         mapRef.flyTo([parseFloat(results[0].lat), parseFloat(results[0].lon)], 17);
       } else {
-        alert('Location not found. Try a more specific address.');
+        alert('Location not found in this area. Try a different address.');
       }
     } catch (err) {
       console.error('Search error:', err);
@@ -321,11 +463,13 @@ function Map() {
       {/* Map */}
       <div style={{ paddingTop: '56px', height: '100%' }}>
         <MapContainer
-          center={[44.0, -79.5]}
-          zoom={7}
+          center={[43.7, -79.4]}
+          zoom={9}
           style={{ height: '100%', width: '100%' }}
           ref={setMapRef}
-          minZoom={5}
+          minZoom={8}
+          maxBounds={[[42.8, -81.5], [44.8, -77.0]]}
+          maxBoundsViscosity={0.8}
         >
           <TileLayer
             attribution='&copy; <a href="https://carto.com/">CARTO</a>'
@@ -334,7 +478,12 @@ function Map() {
           {appraisals.map((a) => (
             <Marker key={a.id} position={[a.latitude, a.longitude]} icon={customIcon}>
               <Popup>
-                <AppraisalPopup appraisal={a} getSignedUrl={getSignedUrl} />
+                <AppraisalPopup
+                  appraisal={a}
+                  getSignedUrl={getSignedUrl}
+                  onUpdated={fetchAppraisals}
+                  onDeleted={fetchAppraisals}
+                />
               </Popup>
             </Marker>
           ))}
