@@ -1,70 +1,104 @@
-# Getting Started with Create React App
+# Appraisal Map
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+An internal tool for viewing and managing property appraisals on an interactive map. Staff can search locations, add new appraisals with photos and documents, and access reports by clicking map pins.
 
-## Available Scripts
+## Features
 
-In the project directory, you can run:
+- Interactive map centered on southern Ontario with search and autocomplete
+- Add appraisals with address, house photo, and a folder of documents (PDFs, images, etc.)
+- Click a map pin to view the house photo, address, and download associated files
+- Edit or delete existing appraisals directly from the map
+- Login-protected — only authorized staff can access data
+- All files stored in private cloud storage with signed URLs
 
-### `npm start`
+## Tech Stack
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in your browser.
+- **Frontend:** React, Leaflet.js (via react-leaflet), CARTO Voyager map tiles
+- **Backend/Database:** Supabase (PostgreSQL with Row Level Security)
+- **File Storage:** Supabase Storage (private buckets)
+- **Authentication:** Supabase Auth (email/password)
+- **Geocoding:** OpenStreetMap Nominatim API
+- **Hosting:** Vercel
 
-The page will reload when you make changes.\
-You may also see any lint errors in the console.
+## Project Structure
 
-### `npm test`
+```
+src/
+  supabaseClient.js   - Supabase connection config
+  App.js              - Auth routing (login vs map)
+  Login.js            - Login page with map background
+  Map.js              - Main map view, search, popups, edit/delete
+  AddAppraisal.js     - Form for adding new appraisals
+```
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+## Setup
 
-### `npm run build`
+### Prerequisites
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+- Node.js installed
+- A Supabase project with:
+  - An `appraisals` table (address, city, latitude, longitude, photo_url, folder_files)
+  - Row Level Security enabled with policies for authenticated users
+  - Storage buckets: `photos`, `appraisal-folders` (both private)
+  - User accounts created manually in Supabase Auth
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+### Install and Run
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+```bash
+git clone https://github.com/YOUR_USERNAME/appraisal-map.git
+cd appraisal-map
+npm install
+```
 
-### `npm run eject`
+Create a `.env` file in the project root:
 
-**Note: this is a one-way operation. Once you `eject`, you can't go back!**
+```
+REACT_APP_SUPABASE_URL=your_supabase_project_url
+REACT_APP_SUPABASE_ANON_KEY=your_supabase_publishable_key
+```
 
-If you aren't satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+Start the development server:
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you're on your own.
+```bash
+npm start
+```
 
-You don't have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn't feel obligated to use this feature. However we understand that this tool wouldn't be useful if you couldn't customize it when you are ready for it.
+### Deploy
 
-## Learn More
+The project is hosted on Vercel. Pushing to `main` triggers an automatic deploy. Environment variables are configured in the Vercel dashboard.
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+## Database Schema
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+```sql
+CREATE TABLE appraisals (
+  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
+  address TEXT NOT NULL,
+  city TEXT NOT NULL,
+  latitude DOUBLE PRECISION NOT NULL,
+  longitude DOUBLE PRECISION NOT NULL,
+  photo_url TEXT,
+  folder_files TEXT[],
+  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+```
 
-### Code Splitting
+## Security
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/code-splitting](https://facebook.github.io/create-react-app/docs/code-splitting)
+- Row Level Security restricts all database access to authenticated users
+- Storage buckets are private with access policies for authenticated users only
+- File access uses signed URLs that expire after 1 hour
+- No public signup — user accounts are created manually in Supabase
+- Environment variables are excluded from version control via .gitignore
 
-### Analyzing the Bundle Size
+## Adding an Appraisal
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size](https://facebook.github.io/create-react-app/docs/analyzing-the-bundle-size)
+1. Log in with your staff credentials
+2. Click the "+ Add" button in the top navigation
+3. Enter the property address and city
+4. Upload a house photo
+5. Select the appraisal folder containing all related documents
+6. Click "Save Appraisal" — the address is geocoded automatically and a pin appears on the map
 
-### Making a Progressive Web App
+## Editing or Deleting
 
-This section has moved here: [https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app](https://facebook.github.io/create-react-app/docs/making-a-progressive-web-app)
-
-### Advanced Configuration
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/advanced-configuration](https://facebook.github.io/create-react-app/docs/advanced-configuration)
-
-### Deployment
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/deployment](https://facebook.github.io/create-react-app/docs/deployment)
-
-### `npm run build` fails to minify
-
-This section has moved here: [https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify](https://facebook.github.io/create-react-app/docs/troubleshooting#npm-run-build-fails-to-minify)
+Click any pin on the map, then use the "Edit" or "Delete" buttons in the popup. Editing allows you to change the address, replace the photo, or replace the document folder. Deleting requires a confirmation click.
