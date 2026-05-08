@@ -41,12 +41,12 @@ L.Icon.Default.mergeOptions({
 
 function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [photoUrl, setPhotoUrl] = useState(null);
-  const [pdfUrl, setPdfUrl] = useState(null);
+  const [fileUrls, setFileUrls] = useState([]);
   const [editing, setEditing] = useState(false);
   const [editAddress, setEditAddress] = useState(appraisal.address);
   const [editCity, setEditCity] = useState(appraisal.city);
   const [newPhoto, setNewPhoto] = useState(null);
-  const [newPdf, setNewPdf] = useState(null);
+  const [newFolderFiles, setNewFolderFiles] = useState([]);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
@@ -54,9 +54,16 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
     if (appraisal.photo_url) {
       getSignedUrl('photos', appraisal.photo_url).then(setPhotoUrl);
     }
-    if (appraisal.pdf_url) {
-      getSignedUrl('pdfs', appraisal.pdf_url).then(setPdfUrl);
+    if (appraisal.folder_files && appraisal.folder_files.length > 0) {
+      Promise.all(
+        appraisal.folder_files.map(async (filePath) => {
+          const url = await getSignedUrl('appraisal-folders', filePath);
+          const name = filePath.split('_').slice(1).join('_');
+          return { name, url, path: filePath };
+        })
+      ).then(setFileUrls);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appraisal]);
 
   const handleSave = async () => {
@@ -83,11 +90,16 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
         updates.photo_url = photoName;
       }
 
-      if (newPdf) {
-        const pdfName = `${Date.now()}_${newPdf.name}`;
-        const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, newPdf);
-        if (pdfError) throw pdfError;
-        updates.pdf_url = pdfName;
+      if (newFolderFiles.length > 0) {
+        const timestamp = Date.now();
+        const paths = [];
+        for (const file of newFolderFiles) {
+          const filePath = `${timestamp}_${file.webkitRelativePath.replace(/\//g, '_')}`;
+          const { error: fileError } = await supabase.storage.from('appraisal-folders').upload(filePath, file);
+          if (fileError) throw fileError;
+          paths.push(filePath);
+        }
+        updates.folder_files = paths;
       }
 
       const { error } = await supabase
@@ -117,6 +129,14 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
     }
   };
 
+  const getFileIcon = (name) => {
+    if (name.match(/\.(pdf)$/i)) return '📄';
+    if (name.match(/\.(jpg|jpeg|png|gif|webp)$/i)) return '🖼️';
+    if (name.match(/\.(doc|docx)$/i)) return '📝';
+    if (name.match(/\.(xls|xlsx)$/i)) return '📊';
+    return '📎';
+  };
+
   if (editing) {
     return (
       <div style={{ fontFamily: "'DM Sans', sans-serif", width: '280px' }}>
@@ -140,9 +160,40 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
           }}
         />
         <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace Photo</label>
-        <input type="file" accept="image/*" onChange={(e) => setNewPhoto(e.target.files[0])} style={{ marginBottom: '8px', fontSize: '11px' }} />
-        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace PDF</label>
-        <input type="file" accept=".pdf" onChange={(e) => setNewPdf(e.target.files[0])} style={{ marginBottom: '12px', fontSize: '11px' }} />
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
+          border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white',
+        }}>
+          <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose File</span>
+          <span style={{ fontSize: '11px', color: newPhoto ? '#374151' : '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {newPhoto ? newPhoto.name : 'No file chosen'}
+          </span>
+          <input type="file" accept="image/*" onChange={(e) => setNewPhoto(e.target.files[0])} style={{ display: 'none' }} />
+        </label>
+        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace Folder</label>
+        <label style={{
+          display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
+          border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '12px', cursor: 'pointer', background: 'white',
+        }}>
+          <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose Folder</span>
+          <span style={{ fontSize: '11px', color: newFolderFiles.length > 0 ? '#374151' : '#9ca3af' }}>
+            {newFolderFiles.length > 0 ? `${newFolderFiles.length} file${newFolderFiles.length !== 1 ? 's' : ''} selected` : 'No folder chosen'}
+          </span>
+          <input
+            type="file"
+            webkitdirectory=""
+            mozdirectory=""
+            directory=""
+            multiple
+            onChange={(e) => setNewFolderFiles(Array.from(e.target.files))}
+            style={{ display: 'none' }}
+          />
+        </label>
+        {newFolderFiles.length > 0 && (
+          <p style={{ fontSize: '11px', color: '#6b7280', margin: '0 0 8px' }}>
+            {newFolderFiles.length} file{newFolderFiles.length !== 1 ? 's' : ''} selected
+          </p>
+        )}
         <div style={{ display: 'flex', gap: '6px' }}>
           <button
             onClick={handleSave}
@@ -186,20 +237,42 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       <p style={{ margin: '0 0 10px', color: '#6b7280', fontSize: '14px' }}>
         {appraisal.city}
       </p>
+
+      {fileUrls.length > 0 && (
+        <div style={{
+          marginBottom: '10px',
+          maxHeight: '120px',
+          overflowY: 'auto',
+          border: '1px solid #e5e7eb',
+          borderRadius: '6px',
+        }}>
+          {fileUrls.map((file, i) => (
+            <a
+              key={i}
+              href={file.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '6px 10px',
+                fontSize: '12px',
+                color: '#374151',
+                textDecoration: 'none',
+                borderBottom: i < fileUrls.length - 1 ? '1px solid #f3f4f6' : 'none',
+              }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = '#f0fdfa'; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; }}
+            >
+              <span>{getFileIcon(file.name)}</span>
+              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{file.name}</span>
+            </a>
+          ))}
+        </div>
+      )}
+
       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-        {pdfUrl && (
-          <a
-            href={pdfUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              padding: '8px 14px', background: '#0d9488', color: 'white',
-              borderRadius: '6px', textDecoration: 'none', fontSize: '12px', fontWeight: '600',
-            }}
-          >
-            View Report
-          </a>
-        )}
         <button
           onClick={() => setEditing(true)}
           style={{
@@ -245,6 +318,7 @@ function Map() {
   const [showAdd, setShowAdd] = useState(false);
   const [mapRef, setMapRef] = useState(null);
   const autocompleteTimer = React.useRef(null);
+  const [fileUrls, setFileUrls] = useState({});
 
   const handleAutocomplete = (value) => {
     if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
@@ -285,9 +359,9 @@ function Map() {
         { headers: { 'Accept': 'application/json' } }
       );
       const results = await response.json();
-      console.log('Search results:', results);
       if (results.length > 0 && mapRef) {
         mapRef.flyTo([parseFloat(results[0].lat), parseFloat(results[0].lon)], 17);
+        setSuggestions([]);
       } else {
         alert('Location not found in this area. Try a different address.');
       }
@@ -296,8 +370,6 @@ function Map() {
       alert('Search failed. Please try again.');
     }
   };
-
-  const [fileUrls, setFileUrls] = useState({});
 
   const getSignedUrl = async (bucket, path) => {
     const key = `${bucket}/${path}`;
@@ -387,8 +459,8 @@ function Map() {
                       color: '#374151',
                       borderBottom: '1px solid #f3f4f6',
                     }}
-                    onMouseEnter={(e) => e.target.style.background = '#f0fdfa'}
-                    onMouseLeave={(e) => e.target.style.background = 'white'}
+                    onMouseEnter={(e) => { e.target.style.background = '#f0fdfa'; }}
+                    onMouseLeave={(e) => { e.target.style.background = 'white'; }}
                   >
                     {s.display_name}
                   </div>
