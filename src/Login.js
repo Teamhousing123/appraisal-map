@@ -74,7 +74,7 @@ const allLocations = [
 ];
 
 function AnimatedMarker({ position, onRemove }) {
-  const [animClass, setAnimClass] = useState('pin-bounce-in');
+  const [, setAnimClass] = useState('pin-bounce-in');
   const [icon, setIcon] = useState(createPinIcon('pin-bounce-in'));
 
   useEffect(() => {
