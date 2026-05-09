@@ -47,6 +47,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [editing, setEditing] = useState(false);
   const [editAddress, setEditAddress] = useState(appraisal.address);
   const [editCity, setEditCity] = useState(appraisal.city);
+  const [editDate, setEditDate] = useState(appraisal.appraisal_date || '');
   const [newPhoto, setNewPhoto] = useState(null);
   const [newFolderFiles, setNewFolderFiles] = useState([]);
   const [newPdf, setNewPdf] = useState(null);
@@ -76,7 +77,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const handleSave = async () => {
     setSaving(true);
     try {
-      const updates = { address: editAddress, city: editCity };
+      const updates = { address: editAddress, city: editCity, appraisal_date: editDate || null };
 
       if (editAddress !== appraisal.address || editCity !== appraisal.city) {
         const response = await fetch(
@@ -170,6 +171,16 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
           type="text"
           value={editCity}
           onChange={(e) => setEditCity(e.target.value)}
+          style={{
+            width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
+            border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
+          }}
+        />
+        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Report Date</label>
+        <input
+          type="date"
+          value={editDate}
+          onChange={(e) => setEditDate(e.target.value)}
           style={{
             width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
             border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
@@ -273,9 +284,14 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       <p style={{ margin: '0 0 3px', fontWeight: '700', color: '#1f2937', fontSize: '16px' }}>
         {appraisal.address}
       </p>
-      <p style={{ margin: '0 0 10px', color: '#6b7280', fontSize: '14px' }}>
+      <p style={{ margin: '0 0 3px', color: '#6b7280', fontSize: '14px' }}>
         {appraisal.city}
       </p>
+      {appraisal.appraisal_date && (
+        <p style={{ margin: '0 0 10px', color: '#9ca3af', fontSize: '12px' }}>
+          Report: {new Date(appraisal.appraisal_date).toLocaleDateString('en-CA', { year: 'numeric', month: 'short', day: 'numeric' })}
+        </p>
+      )}
 
       {pdfUrl && (
         <a

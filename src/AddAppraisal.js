@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 function AddAppraisal({ onAdded }) {
   const [address, setAddress] = useState('');
   const [city, setCity] = useState('');
+  const [appraisalDate, setAppraisalDate] = useState('');
   const [photo, setPhoto] = useState(null);
   const [uploadType, setUploadType] = useState('pdf');
   const [pdf, setPdf] = useState(null);
@@ -69,6 +70,7 @@ function AddAppraisal({ onAdded }) {
           city,
           latitude: lat,
           longitude: lon,
+          appraisal_date: appraisalDate || null,
           photo_url: photoPath,
           pdf_url: pdfPath,
           folder_files: folderPaths.length > 0 ? folderPaths : null,
@@ -170,7 +172,10 @@ function AddAppraisal({ onAdded }) {
         <input type="text" placeholder="Address" value={address} onChange={(e) => setAddress(e.target.value)} required style={inputStyle} />
         <input type="text" placeholder="City (e.g. Vaughan)" value={city} onChange={(e) => setCity(e.target.value)} required style={inputStyle} />
 
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>House Photo</label>
+        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Report Date (optional)</label>
+        <input type="date" value={appraisalDate} onChange={(e) => setAppraisalDate(e.target.value)} style={inputStyle} />
+
+        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>House Photo (optional)</label>
         <label style={fileInputWrapperStyle}>
           <span style={fileButtonStyle}>Choose File</span>
           <span style={{ color: photo ? '#374151' : '#9ca3af', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -179,7 +184,7 @@ function AddAppraisal({ onAdded }) {
           <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files[0])} style={{ display: 'none' }} />
         </label>
 
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '6px' }}>Appraisal Documents</label>
+        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '6px' }}>Appraisal Documents (optional)</label>
         <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
           <button type="button" onClick={() => setUploadType('pdf')} style={toggleStyle(uploadType === 'pdf')}>
             Single PDF
