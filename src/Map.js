@@ -387,7 +387,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   );
 }
 
-function Map() {
+function Map({ showToast }) {
   const [appraisals, setAppraisals] = useState([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [suggestions, setSuggestions] = useState([]);
@@ -629,8 +629,8 @@ function Map() {
                 <AppraisalPopup
                   appraisal={a}
                   getSignedUrl={getSignedUrl}
-                  onUpdated={fetchAppraisals}
-                  onDeleted={fetchAppraisals}
+                  onUpdated={() => { fetchAppraisals(); showToast('Appraisal updated'); }}
+                  onDeleted={() => { fetchAppraisals(); showToast('Appraisal deleted'); }}
                 />
               </Popup>
             </Marker>
