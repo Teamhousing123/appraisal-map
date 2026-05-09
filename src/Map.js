@@ -3,6 +3,7 @@ import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
 import L from 'leaflet';
 import { supabase } from './supabaseClient';
 import AddAppraisal from './AddAppraisal';
+import JSZip from 'jszip';
 import 'leaflet/dist/leaflet.css';
 
 // Custom pin icon - high contrast teal marker
@@ -41,18 +42,24 @@ L.Icon.Default.mergeOptions({
 
 function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [photoUrl, setPhotoUrl] = useState(null);
+  const [pdfUrl, setPdfUrl] = useState(null);
   const [fileUrls, setFileUrls] = useState([]);
   const [editing, setEditing] = useState(false);
   const [editAddress, setEditAddress] = useState(appraisal.address);
   const [editCity, setEditCity] = useState(appraisal.city);
   const [newPhoto, setNewPhoto] = useState(null);
   const [newFolderFiles, setNewFolderFiles] = useState([]);
+  const [newPdf, setNewPdf] = useState(null);
+  const [editUploadType, setEditUploadType] = useState('pdf');
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
     if (appraisal.photo_url) {
       getSignedUrl('photos', appraisal.photo_url).then(setPhotoUrl);
+    }
+    if (appraisal.pdf_url) {
+      getSignedUrl('pdfs', appraisal.pdf_url).then(setPdfUrl);
     }
     if (appraisal.folder_files && appraisal.folder_files.length > 0) {
       Promise.all(
@@ -90,16 +97,25 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
         updates.photo_url = photoName;
       }
 
+      if (newPdf) {
+        const pdfName = `${Date.now()}_${newPdf.name}`;
+        const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, newPdf);
+        if (pdfError) throw pdfError;
+        updates.pdf_url = pdfName;
+        updates.folder_files = null;
+      }
+
       if (newFolderFiles.length > 0) {
-        const timestamp = Date.now();
-        const paths = [];
+        const zip = new JSZip();
         for (const file of newFolderFiles) {
-          const filePath = `${timestamp}_${file.webkitRelativePath.replace(/\//g, '_')}`;
-          const { error: fileError } = await supabase.storage.from('appraisal-folders').upload(filePath, file);
-          if (fileError) throw fileError;
-          paths.push(filePath);
+          zip.file(file.webkitRelativePath || file.name, file);
         }
-        updates.folder_files = paths;
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipName = `${Date.now()}_${editAddress.replace(/\s+/g, '_')}.zip`;
+        const { error: zipError } = await supabase.storage.from('appraisal-folders').upload(zipName, zipBlob);
+        if (zipError) throw zipError;
+        updates.folder_files = [zipName];
+        updates.pdf_url = null;
       }
 
       const { error } = await supabase
@@ -170,30 +186,53 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
           </span>
           <input type="file" accept="image/*" onChange={(e) => setNewPhoto(e.target.files[0])} style={{ display: 'none' }} />
         </label>
-        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace Folder</label>
-        <label style={{
-          display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
-          border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '12px', cursor: 'pointer', background: 'white',
-        }}>
-          <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose Folder</span>
-          <span style={{ fontSize: '11px', color: newFolderFiles.length > 0 ? '#374151' : '#9ca3af' }}>
-            {newFolderFiles.length > 0 ? `${newFolderFiles.length} file${newFolderFiles.length !== 1 ? 's' : ''} selected` : 'No folder chosen'}
-          </span>
-          <input
-            type="file"
-            webkitdirectory=""
-            mozdirectory=""
-            directory=""
-            multiple
-            onChange={(e) => setNewFolderFiles(Array.from(e.target.files))}
-            style={{ display: 'none' }}
-          />
-        </label>
-        {newFolderFiles.length > 0 && (
-          <p style={{ fontSize: '11px', color: '#6b7280', margin: '0 0 8px' }}>
-            {newFolderFiles.length} file{newFolderFiles.length !== 1 ? 's' : ''} selected
-          </p>
+
+        <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Replace Documents</label>
+        <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
+          <button type="button" onClick={() => setEditUploadType('pdf')} style={{
+            flex: 1, padding: '5px', fontSize: '11px', fontWeight: '600', borderRadius: '4px', cursor: 'pointer',
+            backgroundColor: editUploadType === 'pdf' ? '#0d9488' : 'white',
+            color: editUploadType === 'pdf' ? 'white' : '#374151',
+            border: '1px solid ' + (editUploadType === 'pdf' ? '#0d9488' : '#d1d5db'),
+          }}>
+            Single PDF
+          </button>
+          <button type="button" onClick={() => setEditUploadType('folder')} style={{
+            flex: 1, padding: '5px', fontSize: '11px', fontWeight: '600', borderRadius: '4px', cursor: 'pointer',
+            backgroundColor: editUploadType === 'folder' ? '#0d9488' : 'white',
+            color: editUploadType === 'folder' ? 'white' : '#374151',
+            border: '1px solid ' + (editUploadType === 'folder' ? '#0d9488' : '#d1d5db'),
+          }}>
+            Folder
+          </button>
+        </div>
+
+        {editUploadType === 'pdf' && (
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
+            border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white',
+          }}>
+            <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose PDF</span>
+            <span style={{ fontSize: '11px', color: newPdf ? '#374151' : '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {newPdf ? newPdf.name : 'No file chosen'}
+            </span>
+            <input type="file" accept=".pdf" onChange={(e) => setNewPdf(e.target.files[0])} style={{ display: 'none' }} />
+          </label>
         )}
+
+        {editUploadType === 'folder' && (
+          <label style={{
+            display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
+            border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white',
+          }}>
+            <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose Folder</span>
+            <span style={{ fontSize: '11px', color: newFolderFiles.length > 0 ? '#374151' : '#9ca3af' }}>
+              {newFolderFiles.length > 0 ? `${newFolderFiles.length} files` : 'No folder chosen'}
+            </span>
+            <input type="file" webkitdirectory="" mozdirectory="" directory="" multiple onChange={(e) => setNewFolderFiles(Array.from(e.target.files))} style={{ display: 'none' }} />
+          </label>
+        )}
+
         <div style={{ display: 'flex', gap: '6px' }}>
           <button
             onClick={handleSave}
@@ -237,6 +276,27 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       <p style={{ margin: '0 0 10px', color: '#6b7280', fontSize: '14px' }}>
         {appraisal.city}
       </p>
+
+      {pdfUrl && (
+        <a
+          href={pdfUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          style={{
+            display: 'inline-block',
+            padding: '8px 14px',
+            background: '#0d9488',
+            color: 'white',
+            borderRadius: '6px',
+            textDecoration: 'none',
+            fontSize: '12px',
+            fontWeight: '600',
+            marginBottom: '10px',
+          }}
+        >
+          View Report (PDF)
+        </a>
+      )}
 
       {fileUrls.length > 0 && (
         <div style={{

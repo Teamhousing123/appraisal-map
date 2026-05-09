@@ -1,10 +1,13 @@
 import React, { useState } from 'react';
 import { supabase } from './supabaseClient';
+import JSZip from 'jszip';
 
 function AddAppraisal({ onAdded }) {
   const [address, setAddress] = useState('');
   const [city, setCity] = useState('');
   const [photo, setPhoto] = useState(null);
+  const [uploadType, setUploadType] = useState('pdf');
+  const [pdf, setPdf] = useState(null);
   const [folderFiles, setFolderFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -37,15 +40,26 @@ function AddAppraisal({ onAdded }) {
         photoPath = photoName;
       }
 
+      let pdfPath = null;
       let folderPaths = [];
-      if (folderFiles.length > 0) {
-        const timestamp = Date.now();
+
+      if (uploadType === 'pdf' && pdf) {
+        const pdfName = `${Date.now()}_${pdf.name}`;
+        const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, pdf);
+        if (pdfError) throw pdfError;
+        pdfPath = pdfName;
+      }
+
+      if (uploadType === 'folder' && folderFiles.length > 0) {
+        const zip = new JSZip();
         for (const file of folderFiles) {
-          const filePath = `${timestamp}_${file.webkitRelativePath.replace(/\//g, '_')}`;
-          const { error: fileError } = await supabase.storage.from('appraisal-folders').upload(filePath, file);
-          if (fileError) throw fileError;
-          folderPaths.push(filePath);
+          zip.file(file.webkitRelativePath || file.name, file);
         }
+        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipName = `${Date.now()}_${address.replace(/\s+/g, '_')}.zip`;
+        const { error: zipError } = await supabase.storage.from('appraisal-folders').upload(zipName, zipBlob);
+        if (zipError) throw zipError;
+        folderPaths = [zipName];
       }
 
       const { error: insertError } = await supabase
@@ -56,7 +70,8 @@ function AddAppraisal({ onAdded }) {
           latitude: lat,
           longitude: lon,
           photo_url: photoPath,
-          folder_files: folderPaths,
+          pdf_url: pdfPath,
+          folder_files: folderPaths.length > 0 ? folderPaths : null,
         }]);
 
       if (insertError) throw insertError;
@@ -107,6 +122,20 @@ function AddAppraisal({ onAdded }) {
     fontFamily: "'DM Sans', sans-serif",
   };
 
+  const toggleStyle = (active) => ({
+    flex: 1,
+    padding: '8px',
+    backgroundColor: active ? '#0d9488' : 'white',
+    color: active ? 'white' : '#374151',
+    border: '1px solid ' + (active ? '#0d9488' : '#d1d5db'),
+    borderRadius: '6px',
+    cursor: 'pointer',
+    fontSize: '12px',
+    fontWeight: '600',
+    fontFamily: "'DM Sans', sans-serif",
+    transition: 'all 0.2s',
+  });
+
   return (
     <div style={{
       position: 'fixed',
@@ -141,38 +170,52 @@ function AddAppraisal({ onAdded }) {
         <input type="text" placeholder="Address" value={address} onChange={(e) => setAddress(e.target.value)} required style={inputStyle} />
         <input type="text" placeholder="City (e.g. Vaughan)" value={city} onChange={(e) => setCity(e.target.value)} required style={inputStyle} />
 
-        {/* House Photo */}
         <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>House Photo</label>
         <label style={fileInputWrapperStyle}>
           <span style={fileButtonStyle}>Choose File</span>
           <span style={{ color: photo ? '#374151' : '#9ca3af', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {photo ? photo.name : 'No file chosen'}
           </span>
-          <input
-            type="file"
-            accept="image/*"
-            onChange={(e) => setPhoto(e.target.files[0])}
-            style={{ display: 'none' }}
-          />
+          <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files[0])} style={{ display: 'none' }} />
         </label>
 
-        {/* Appraisal Folder */}
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Appraisal Folder</label>
-        <label style={fileInputWrapperStyle}>
-          <span style={fileButtonStyle}>Choose Folder</span>
-          <span style={{ color: folderFiles.length > 0 ? '#374151' : '#9ca3af', fontSize: '12px' }}>
-            {folderFiles.length > 0 ? `${folderFiles.length} file${folderFiles.length !== 1 ? 's' : ''} selected` : 'No folder chosen'}
-          </span>
-          <input
-            type="file"
-            webkitdirectory=""
-            mozdirectory=""
-            directory=""
-            multiple
-            onChange={(e) => setFolderFiles(Array.from(e.target.files))}
-            style={{ display: 'none' }}
-          />
-        </label>
+        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '6px' }}>Appraisal Documents</label>
+        <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
+          <button type="button" onClick={() => setUploadType('pdf')} style={toggleStyle(uploadType === 'pdf')}>
+            Single PDF
+          </button>
+          <button type="button" onClick={() => setUploadType('folder')} style={toggleStyle(uploadType === 'folder')}>
+            Folder
+          </button>
+        </div>
+
+        {uploadType === 'pdf' && (
+          <label style={fileInputWrapperStyle}>
+            <span style={fileButtonStyle}>Choose PDF</span>
+            <span style={{ color: pdf ? '#374151' : '#9ca3af', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {pdf ? pdf.name : 'No file chosen'}
+            </span>
+            <input type="file" accept=".pdf" onChange={(e) => setPdf(e.target.files[0])} style={{ display: 'none' }} />
+          </label>
+        )}
+
+        {uploadType === 'folder' && (
+          <label style={fileInputWrapperStyle}>
+            <span style={fileButtonStyle}>Choose Folder</span>
+            <span style={{ color: folderFiles.length > 0 ? '#374151' : '#9ca3af', fontSize: '12px' }}>
+              {folderFiles.length > 0 ? `${folderFiles.length} file${folderFiles.length !== 1 ? 's' : ''} selected` : 'No folder chosen'}
+            </span>
+            <input
+              type="file"
+              webkitdirectory=""
+              mozdirectory=""
+              directory=""
+              multiple
+              onChange={(e) => setFolderFiles(Array.from(e.target.files))}
+              style={{ display: 'none' }}
+            />
+          </label>
+        )}
 
         <button
           type="submit"
