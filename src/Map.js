@@ -420,7 +420,21 @@ function Map({ showToast }) {
     const { data, error } = await supabase
       .from('appraisals')
       .select('*');
-    if (!error) setAppraisals(data);
+    if (!error) {
+      // Offset pins that share the same coordinates so they don't stack
+      const seen = {};
+      const adjusted = data.map((a) => {
+        const key = `${a.latitude.toFixed(5)},${a.longitude.toFixed(5)}`;
+        if (seen[key]) {
+          seen[key]++;
+          const offset = seen[key] * 0.0002;
+          return { ...a, latitude: a.latitude + offset, longitude: a.longitude + offset };
+        }
+        seen[key] = 0;
+        return a;
+      });
+      setAppraisals(adjusted);
+    }
   };
 
   useEffect(() => {
