@@ -421,17 +421,23 @@ function Map({ showToast }) {
       .from('appraisals')
       .select('*');
     if (!error) {
-      // Offset pins that share the same coordinates so they don't stack
+      // Spiral offset using golden angle so overlapping pins fan out and stay individually clickable
       const seen = {};
       const adjusted = data.map((a) => {
-        const key = `${a.latitude.toFixed(5)},${a.longitude.toFixed(5)}`;
-        if (seen[key]) {
-          seen[key]++;
-          const offset = seen[key] * 0.0002;
-          return { ...a, latitude: a.latitude + offset, longitude: a.longitude + offset };
+        const key = `${a.latitude.toFixed(4)},${a.longitude.toFixed(4)}`;
+        if (seen[key] === undefined) {
+          seen[key] = 0;
+          return a;
         }
-        seen[key] = 0;
-        return a;
+        seen[key]++;
+        const count = seen[key];
+        const angle = (count - 1) * (137.5 * Math.PI / 180); // golden angle spread
+        const radius = 0.0004 * Math.ceil(count / 8);         // grow radius every 8 pins
+        return {
+          ...a,
+          latitude: a.latitude + radius * Math.cos(angle),
+          longitude: a.longitude + radius * Math.sin(angle),
+        };
       });
       setAppraisals(adjusted);
     }
