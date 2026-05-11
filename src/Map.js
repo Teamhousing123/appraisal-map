@@ -22,6 +22,7 @@ const APPRAISAL_COLUMNS = [
 ].join(',');
 const PAGE_SIZE = 500;
 const MAX_PAGES = 100;
+const MAX_RECORDS_PER_FETCH = 5000;
 const MAP_IDLE_DEBOUNCE_MS = 250;
 const AUTOCOMPLETE_DEBOUNCE_MS = 300;
 
@@ -359,10 +360,11 @@ function Map({ showToast }) {
           .lte('longitude', bounds.east);
       }
 
-      const { data: firstPage, count, error: firstPageError } = await baseQuery.range(0, PAGE_SIZE - 1);
-      if (firstPageError) throw firstPageError;
+      const { data: firstPage, count, error } = await baseQuery.range(0, PAGE_SIZE - 1);
+      if (error) throw error;
       const allData = firstPage || [];
-      const totalPages = Math.min(Math.ceil((count || 0) / PAGE_SIZE), MAX_PAGES);
+      const limitedCount = Math.min(count || 0, MAX_RECORDS_PER_FETCH);
+      const totalPages = Math.min(Math.ceil(limitedCount / PAGE_SIZE), MAX_PAGES);
 
       for (let page = 1; page < totalPages; page += 1) {
         const from = page * PAGE_SIZE;

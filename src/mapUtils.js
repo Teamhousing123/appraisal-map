@@ -1,7 +1,9 @@
+const COORDINATE_PRECISION = 4;
+
 export function applySpiralOffset(appraisals) {
   const seen = {};
   return appraisals.map((appraisal) => {
-    const key = `${appraisal.latitude.toFixed(4)},${appraisal.longitude.toFixed(4)}`;
+    const key = `${appraisal.latitude.toFixed(COORDINATE_PRECISION)},${appraisal.longitude.toFixed(COORDINATE_PRECISION)}`;
     if (seen[key] === undefined) {
       seen[key] = 0;
       return appraisal;
