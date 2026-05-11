@@ -22,6 +22,8 @@ const APPRAISAL_COLUMNS = [
 ].join(',');
 const PAGE_SIZE = 500;
 const MAX_PAGES = 100;
+const MAP_IDLE_DEBOUNCE_MS = 250;
+const AUTOCOMPLETE_DEBOUNCE_MS = 300;
 
 const MARKER_ICON = {
   path: 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z',
@@ -344,10 +346,25 @@ function Map({ showToast }) {
 
   const fetchAppraisals = useCallback(async (bounds = null) => {
     try {
-      let allData = [];
-      let page = 0;
+      let baseQuery = supabase
+        .from('appraisals')
+        .select(APPRAISAL_COLUMNS, { count: 'exact' })
+        .order('created_at', { ascending: false });
 
-      while (page < MAX_PAGES) {
+      if (bounds) {
+        baseQuery = baseQuery
+          .gte('latitude', bounds.south)
+          .lte('latitude', bounds.north)
+          .gte('longitude', bounds.west)
+          .lte('longitude', bounds.east);
+      }
+
+      const { data: firstPage, count, error: firstPageError } = await baseQuery.range(0, PAGE_SIZE - 1);
+      if (firstPageError) throw firstPageError;
+      const allData = firstPage || [];
+      const totalPages = Math.min(Math.ceil((count || 0) / PAGE_SIZE), MAX_PAGES);
+
+      for (let page = 1; page < totalPages; page += 1) {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
         let query = supabase
@@ -367,10 +384,7 @@ function Map({ showToast }) {
         const { data, error } = await query;
         if (error) throw error;
         if (!data || data.length === 0) break;
-
-        allData = allData.concat(data);
-        if (data.length < PAGE_SIZE) break;
-        page += 1;
+        allData.push(...data);
       }
 
       setAppraisals(applySpiralOffset(allData));
@@ -402,19 +416,17 @@ function Map({ showToast }) {
         east: ne.lng(),
         west: sw.lng(),
       };
-      const zoom = mapRef.current.getZoom();
       const fetchKey = [
         nextBounds.north.toFixed(4),
         nextBounds.south.toFixed(4),
         nextBounds.east.toFixed(4),
         nextBounds.west.toFixed(4),
-        zoom,
       ].join('|');
       if (lastFetchKeyRef.current === fetchKey) return;
       lastFetchKeyRef.current = fetchKey;
       lastBoundsRef.current = nextBounds;
       fetchAppraisals(nextBounds);
-    }, 250);
+    }, MAP_IDLE_DEBOUNCE_MS);
   }, [fetchAppraisals]);
 
   const handleAutocomplete = useCallback((value) => {
@@ -438,7 +450,7 @@ function Map({ showToast }) {
       } catch (err) {
         if (err.name !== 'AbortError') console.error('Autocomplete error:', err);
       }
-    }, 300);
+    }, AUTOCOMPLETE_DEBOUNCE_MS);
   }, []);
 
   const handleSearch = useCallback(async () => {
