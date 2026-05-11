@@ -8,8 +8,20 @@ const AddAppraisal = lazy(() => import('./AddAppraisal'));
 const MAP_CONTAINER_STYLE = { height: '100%', width: '100%' };
 const DEFAULT_CENTER = { lat: 43.7, lng: -79.4 };
 const DEFAULT_ZOOM = 9;
-const APPRAISAL_COLUMNS = 'id,address,city,latitude,longitude,appraisal_date,photo_url,pdf_url,folder_files,created_at';
+const APPRAISAL_COLUMNS = [
+  'id',
+  'address',
+  'city',
+  'latitude',
+  'longitude',
+  'appraisal_date',
+  'photo_url',
+  'pdf_url',
+  'folder_files',
+  'created_at',
+].join(',');
 const PAGE_SIZE = 500;
+const MAX_PAGES = 100;
 
 const MARKER_ICON = {
   path: 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z',
@@ -308,6 +320,7 @@ function Map({ showToast }) {
   const mapIdleTimer = useRef(null);
   const fileUrlCacheRef = useRef(new Map());
   const lastBoundsRef = useRef(null);
+  const lastFetchKeyRef = useRef(null);
 
   const { isLoaded, loadError } = useJsApiLoader({
     googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
@@ -334,7 +347,7 @@ function Map({ showToast }) {
       let allData = [];
       let page = 0;
 
-      while (true) {
+      while (page < MAX_PAGES) {
         const from = page * PAGE_SIZE;
         const to = from + PAGE_SIZE - 1;
         let query = supabase
@@ -389,6 +402,16 @@ function Map({ showToast }) {
         east: ne.lng(),
         west: sw.lng(),
       };
+      const zoom = mapRef.current.getZoom();
+      const fetchKey = [
+        nextBounds.north.toFixed(4),
+        nextBounds.south.toFixed(4),
+        nextBounds.east.toFixed(4),
+        nextBounds.west.toFixed(4),
+        zoom,
+      ].join('|');
+      if (lastFetchKeyRef.current === fetchKey) return;
+      lastFetchKeyRef.current = fetchKey;
       lastBoundsRef.current = nextBounds;
       fetchAppraisals(nextBounds);
     }, 250);
@@ -588,4 +611,3 @@ function Map({ showToast }) {
 }
 
 export default Map;
-
