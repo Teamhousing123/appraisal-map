@@ -1,44 +1,23 @@
-import React, { useState, useEffect } from 'react';
-import { MapContainer, TileLayer, Marker, Popup } from 'react-leaflet';
-import L from 'leaflet';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { GoogleMap, useJsApiLoader, Marker, InfoWindow } from '@react-google-maps/api';
 import { supabase } from './supabaseClient';
 import AddAppraisal from './AddAppraisal';
 import JSZip from 'jszip';
-import 'leaflet/dist/leaflet.css';
 
-// Custom pin icon - high contrast teal marker
-const customIcon = new L.DivIcon({
-  className: 'custom-pin',
-  html: `<div style="
-    width: 28px;
-    height: 28px;
-    background: #0d9488;
-    border: 3px solid #fff;
-    border-radius: 50% 50% 50% 0;
-    transform: rotate(-45deg);
-    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-  "><div style="
-    width: 10px;
-    height: 10px;
-    background: white;
-    border-radius: 50%;
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-  "></div></div>`,
-  iconSize: [28, 28],
-  iconAnchor: [14, 28],
-  popupAnchor: [0, -30],
-});
+const MAP_CONTAINER_STYLE = { height: '100%', width: '100%' };
+const DEFAULT_CENTER = { lat: 43.7, lng: -79.4 };
+const DEFAULT_ZOOM = 9;
 
-// Fix default marker icon
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon-2x.png',
-  iconUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-icon.png',
-  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/images/marker-shadow.png',
-});
+// Custom teal pin marker using Google Maps marker options
+const MARKER_ICON = {
+  path: 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z',
+  fillColor: '#0d9488',
+  fillOpacity: 1,
+  strokeColor: '#ffffff',
+  strokeWeight: 2,
+  scale: 1.6,
+  anchor: { x: 12, y: 22 },
+};
 
 function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [photoUrl, setPhotoUrl] = useState(null);
@@ -154,43 +133,22 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
     return '📎';
   };
 
+  const inputStyle = {
+    width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
+    border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
+  };
+
   if (editing) {
     return (
       <div style={{ fontFamily: "'DM Sans', sans-serif", width: '280px' }}>
         <p style={{ margin: '0 0 10px', fontWeight: '700', fontSize: '15px', color: '#1f2937' }}>Edit Appraisal</p>
-        <input
-          type="text"
-          value={editAddress}
-          onChange={(e) => setEditAddress(e.target.value)}
-          style={{
-            width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
-            border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
-          }}
-        />
-        <input
-          type="text"
-          value={editCity}
-          onChange={(e) => setEditCity(e.target.value)}
-          style={{
-            width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
-            border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
-          }}
-        />
+        <input type="text" value={editAddress} onChange={(e) => setEditAddress(e.target.value)} style={inputStyle} placeholder="Address" />
+        <input type="text" value={editCity} onChange={(e) => setEditCity(e.target.value)} style={inputStyle} placeholder="City" />
         <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Report Date</label>
-        <input
-          type="date"
-          value={editDate}
-          onChange={(e) => setEditDate(e.target.value)}
-          style={{
-            width: '100%', padding: '8px 10px', marginBottom: '8px', borderRadius: '6px',
-            border: '1px solid #d1d5db', fontSize: '13px', boxSizing: 'border-box', outline: 'none',
-          }}
-        />
+        <input type="date" value={editDate} onChange={(e) => setEditDate(e.target.value)} style={inputStyle} />
+
         <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '3px' }}>Replace Photo</label>
-        <label style={{
-          display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
-          border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white',
-        }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white' }}>
           <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose File</span>
           <span style={{ fontSize: '11px', color: newPhoto ? '#374151' : '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {newPhoto ? newPhoto.name : 'No file chosen'}
@@ -200,29 +158,20 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
 
         <label style={{ fontSize: '11px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Replace Documents</label>
         <div style={{ display: 'flex', gap: '4px', marginBottom: '6px' }}>
-          <button type="button" onClick={() => setEditUploadType('pdf')} style={{
-            flex: 1, padding: '5px', fontSize: '11px', fontWeight: '600', borderRadius: '4px', cursor: 'pointer',
-            backgroundColor: editUploadType === 'pdf' ? '#0d9488' : 'white',
-            color: editUploadType === 'pdf' ? 'white' : '#374151',
-            border: '1px solid ' + (editUploadType === 'pdf' ? '#0d9488' : '#d1d5db'),
-          }}>
-            Single PDF
-          </button>
-          <button type="button" onClick={() => setEditUploadType('folder')} style={{
-            flex: 1, padding: '5px', fontSize: '11px', fontWeight: '600', borderRadius: '4px', cursor: 'pointer',
-            backgroundColor: editUploadType === 'folder' ? '#0d9488' : 'white',
-            color: editUploadType === 'folder' ? 'white' : '#374151',
-            border: '1px solid ' + (editUploadType === 'folder' ? '#0d9488' : '#d1d5db'),
-          }}>
-            Folder
-          </button>
+          {['pdf', 'folder'].map((type) => (
+            <button key={type} type="button" onClick={() => setEditUploadType(type)} style={{
+              flex: 1, padding: '5px', fontSize: '11px', fontWeight: '600', borderRadius: '4px', cursor: 'pointer',
+              backgroundColor: editUploadType === type ? '#0d9488' : 'white',
+              color: editUploadType === type ? 'white' : '#374151',
+              border: '1px solid ' + (editUploadType === type ? '#0d9488' : '#d1d5db'),
+            }}>
+              {type === 'pdf' ? 'Single PDF' : 'Folder'}
+            </button>
+          ))}
         </div>
 
         {editUploadType === 'pdf' && (
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
-            border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white',
-          }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white' }}>
             <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose PDF</span>
             <span style={{ fontSize: '11px', color: newPdf ? '#374151' : '#9ca3af', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {newPdf ? newPdf.name : 'No file chosen'}
@@ -232,10 +181,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
         )}
 
         {editUploadType === 'folder' && (
-          <label style={{
-            display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px',
-            border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white',
-          }}>
+          <label style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 10px', border: '1px solid #d1d5db', borderRadius: '6px', marginBottom: '8px', cursor: 'pointer', background: 'white' }}>
             <span style={{ padding: '2px 8px', backgroundColor: '#f3f4f6', border: '1px solid #d1d5db', borderRadius: '4px', fontSize: '11px' }}>Choose Folder</span>
             <span style={{ fontSize: '11px', color: newFolderFiles.length > 0 ? '#374151' : '#9ca3af' }}>
               {newFolderFiles.length > 0 ? `${newFolderFiles.length} files` : 'No folder chosen'}
@@ -245,23 +191,10 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
         )}
 
         <div style={{ display: 'flex', gap: '6px' }}>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            style={{
-              flex: 1, padding: '8px', backgroundColor: '#0d9488', color: 'white',
-              border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
-            }}
-          >
+          <button onClick={handleSave} disabled={saving} style={{ flex: 1, padding: '8px', backgroundColor: '#0d9488', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
             {saving ? 'Saving...' : 'Save'}
           </button>
-          <button
-            onClick={() => setEditing(false)}
-            style={{
-              flex: 1, padding: '8px', backgroundColor: 'transparent', color: '#6b7280',
-              border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer', fontSize: '12px',
-            }}
-          >
+          <button onClick={() => setEditing(false)} style={{ flex: 1, padding: '8px', backgroundColor: 'transparent', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer', fontSize: '12px' }}>
             Cancel
           </button>
         </div>
@@ -272,21 +205,10 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   return (
     <div style={{ fontFamily: "'DM Sans', sans-serif", width: '280px' }}>
       {photoUrl && (
-        <img
-          src={photoUrl}
-          alt={appraisal.address}
-          style={{
-            width: '100%', height: '180px', borderRadius: '8px',
-            marginBottom: '10px', objectFit: 'cover',
-          }}
-        />
+        <img src={photoUrl} alt={appraisal.address} style={{ width: '100%', height: '180px', borderRadius: '8px', marginBottom: '10px', objectFit: 'cover' }} />
       )}
-      <p style={{ margin: '0 0 3px', fontWeight: '700', color: '#1f2937', fontSize: '16px' }}>
-        {appraisal.address}
-      </p>
-      <p style={{ margin: '0 0 3px', color: '#6b7280', fontSize: '14px' }}>
-        {appraisal.city}
-      </p>
+      <p style={{ margin: '0 0 3px', fontWeight: '700', color: '#1f2937', fontSize: '16px' }}>{appraisal.address}</p>
+      <p style={{ margin: '0 0 3px', color: '#6b7280', fontSize: '14px' }}>{appraisal.city}</p>
       {appraisal.appraisal_date && (
         <p style={{ margin: '0 0 10px', color: '#9ca3af', fontSize: '12px' }}>
           Report: {new Date(appraisal.appraisal_date).toLocaleDateString('en-CA', { year: 'numeric', month: 'short', day: 'numeric' })}
@@ -294,50 +216,16 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       )}
 
       {pdfUrl && (
-        <a
-          href={pdfUrl}
-          target="_blank"
-          rel="noopener noreferrer"
-          style={{
-            display: 'inline-block',
-            padding: '8px 14px',
-            background: '#0d9488',
-            color: 'white',
-            borderRadius: '6px',
-            textDecoration: 'none',
-            fontSize: '12px',
-            fontWeight: '600',
-            marginBottom: '10px',
-          }}
-        >
+        <a href={pdfUrl} target="_blank" rel="noopener noreferrer" style={{ display: 'inline-block', padding: '8px 14px', background: '#0d9488', color: 'white', borderRadius: '6px', textDecoration: 'none', fontSize: '12px', fontWeight: '600', marginBottom: '10px' }}>
           View Report (PDF)
         </a>
       )}
 
       {fileUrls.length > 0 && (
-        <div style={{
-          marginBottom: '10px',
-          maxHeight: '120px',
-          overflowY: 'auto',
-          border: '1px solid #e5e7eb',
-          borderRadius: '6px',
-        }}>
+        <div style={{ marginBottom: '10px', maxHeight: '120px', overflowY: 'auto', border: '1px solid #e5e7eb', borderRadius: '6px' }}>
           {fileUrls.map((file, i) => (
-            <a
-              key={i}
-              href={file.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '6px',
-                padding: '6px 10px',
-                fontSize: '12px',
-                color: '#374151',
-                textDecoration: 'none',
-                borderBottom: i < fileUrls.length - 1 ? '1px solid #f3f4f6' : 'none',
-              }}
+            <a key={i} href={file.url} target="_blank" rel="noopener noreferrer"
+              style={{ display: 'flex', alignItems: 'center', gap: '6px', padding: '6px 10px', fontSize: '12px', color: '#374151', textDecoration: 'none', borderBottom: i < fileUrls.length - 1 ? '1px solid #f3f4f6' : 'none' }}
               onMouseEnter={(e) => { e.currentTarget.style.background = '#f0fdfa'; }}
               onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; }}
             >
@@ -349,36 +237,15 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       )}
 
       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
-        <button
-          onClick={() => setEditing(true)}
-          style={{
-            padding: '8px 14px', background: 'transparent', color: '#374151',
-            border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer',
-            fontSize: '12px', fontWeight: '500',
-          }}
-        >
+        <button onClick={() => setEditing(true)} style={{ padding: '8px 14px', background: 'transparent', color: '#374151', border: '1px solid #d1d5db', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '500' }}>
           Edit
         </button>
         {!confirmDelete ? (
-          <button
-            onClick={() => setConfirmDelete(true)}
-            style={{
-              padding: '8px 14px', background: 'transparent', color: '#dc2626',
-              border: '1px solid #fecaca', borderRadius: '6px', cursor: 'pointer',
-              fontSize: '12px', fontWeight: '500',
-            }}
-          >
+          <button onClick={() => setConfirmDelete(true)} style={{ padding: '8px 14px', background: 'transparent', color: '#dc2626', border: '1px solid #fecaca', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '500' }}>
             Delete
           </button>
         ) : (
-          <button
-            onClick={handleDelete}
-            style={{
-              padding: '8px 14px', background: '#dc2626', color: 'white',
-              border: 'none', borderRadius: '6px', cursor: 'pointer',
-              fontSize: '12px', fontWeight: '600',
-            }}
-          >
+          <button onClick={handleDelete} style={{ padding: '8px 14px', background: '#dc2626', color: 'white', border: 'none', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: '600' }}>
             Confirm Delete
           </button>
         )}
@@ -389,19 +256,25 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
 
 function Map({ showToast }) {
   const [appraisals, setAppraisals] = useState([]);
+  const [selectedAppraisal, setSelectedAppraisal] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [mapRef, setMapRef] = useState(null);
-  const autocompleteTimer = React.useRef(null);
   const [fileUrls, setFileUrls] = useState({});
+  const mapRef = useRef(null);
+  const autocompleteTimer = useRef(null);
+
+  const { isLoaded, loadError } = useJsApiLoader({
+    googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
+  });
+
+  const onMapLoad = useCallback((map) => {
+    mapRef.current = map;
+  }, []);
 
   const handleAutocomplete = (value) => {
     if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
-    if (value.length < 3) {
-      setSuggestions([]);
-      return;
-    }
+    if (value.length < 3) { setSuggestions([]); return; }
     autocompleteTimer.current = setTimeout(async () => {
       try {
         const response = await fetch(
@@ -417,35 +290,24 @@ function Map({ showToast }) {
   };
 
   const fetchAppraisals = async () => {
-    const { data, error } = await supabase
-      .from('appraisals')
-      .select('*');
+    const { data, error } = await supabase.from('appraisals').select('*');
     if (!error) {
-      // Spiral offset using golden angle so overlapping pins fan out and stay individually clickable
+      // Spiral offset using golden angle so overlapping pins fan out
       const seen = {};
       const adjusted = data.map((a) => {
         const key = `${a.latitude.toFixed(4)},${a.longitude.toFixed(4)}`;
-        if (seen[key] === undefined) {
-          seen[key] = 0;
-          return a;
-        }
+        if (seen[key] === undefined) { seen[key] = 0; return a; }
         seen[key]++;
         const count = seen[key];
-        const angle = (count - 1) * (137.5 * Math.PI / 180); // golden angle spread
-        const radius = 0.0004 * Math.ceil(count / 8);         // grow radius every 8 pins
-        return {
-          ...a,
-          latitude: a.latitude + radius * Math.cos(angle),
-          longitude: a.longitude + radius * Math.sin(angle),
-        };
+        const angle = (count - 1) * (137.5 * Math.PI / 180);
+        const radius = 0.0004 * Math.ceil(count / 8);
+        return { ...a, latitude: a.latitude + radius * Math.cos(angle), longitude: a.longitude + radius * Math.sin(angle) };
       });
       setAppraisals(adjusted);
     }
   };
 
-  useEffect(() => {
-    fetchAppraisals();
-  }, []);
+  useEffect(() => { fetchAppraisals(); }, []);
 
   const handleSearch = async () => {
     if (!searchTerm.trim()) return;
@@ -455,8 +317,9 @@ function Map({ showToast }) {
         { headers: { 'Accept': 'application/json' } }
       );
       const results = await response.json();
-      if (results.length > 0 && mapRef) {
-        mapRef.flyTo([parseFloat(results[0].lat), parseFloat(results[0].lon)], 17);
+      if (results.length > 0 && mapRef.current) {
+        mapRef.current.panTo({ lat: parseFloat(results[0].lat), lng: parseFloat(results[0].lon) });
+        mapRef.current.setZoom(17);
         setSuggestions([]);
       } else {
         alert('Location not found in this area. Try a different address.');
@@ -476,87 +339,45 @@ function Map({ showToast }) {
     return data.signedUrl;
   };
 
+  if (loadError) return <div style={{ padding: '20px', color: '#dc2626' }}>Error loading Google Maps. Check your API key.</div>;
+
   return (
     <div style={{ height: '100vh', width: '100%', fontFamily: "'DM Sans', sans-serif" }}>
 
       {/* Top Nav Bar */}
       <div style={{
-        position: 'fixed',
-        top: 0,
-        left: 0,
-        right: 0,
-        height: '56px',
-        background: '#ffffff',
-        borderBottom: '1px solid #e5e7eb',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        padding: '0 20px',
-        zIndex: 1000,
-        boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
+        position: 'fixed', top: 0, left: 0, right: 0, height: '56px',
+        background: '#ffffff', borderBottom: '1px solid #e5e7eb',
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '0 20px', zIndex: 1000, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
       }}>
 
         {/* Search with autocomplete */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, maxWidth: '500px', position: 'relative' }}>
-          <div style={{
-            display: 'flex',
-            alignItems: 'center',
-            background: '#f3f4f6',
-            borderRadius: '8px',
-            padding: '0 12px',
-            flex: 1,
-            position: 'relative',
-          }}>
+          <div style={{ display: 'flex', alignItems: 'center', background: '#f3f4f6', borderRadius: '8px', padding: '0 12px', flex: 1, position: 'relative' }}>
             <input
               type="text"
               placeholder="Search address, city, or area..."
               value={searchTerm}
-              onChange={(e) => {
-                setSearchTerm(e.target.value);
-                handleAutocomplete(e.target.value);
-              }}
+              onChange={(e) => { setSearchTerm(e.target.value); handleAutocomplete(e.target.value); }}
               onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              style={{
-                border: 'none',
-                background: 'none',
-                padding: '10px 0',
-                fontSize: '14px',
-                outline: 'none',
-                width: '100%',
-                color: '#374151',
-              }}
+              style={{ border: 'none', background: 'none', padding: '10px 0', fontSize: '14px', outline: 'none', width: '100%', color: '#374151' }}
             />
             {suggestions.length > 0 && (
-              <div style={{
-                position: 'absolute',
-                top: '42px',
-                left: 0,
-                right: 0,
-                background: 'white',
-                borderRadius: '8px',
-                boxShadow: '0 4px 16px rgba(0,0,0,0.12)',
-                overflow: 'hidden',
-                zIndex: 2000,
-              }}>
+              <div style={{ position: 'absolute', top: '42px', left: 0, right: 0, background: 'white', borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)', overflow: 'hidden', zIndex: 2000 }}>
                 {suggestions.map((s, i) => (
-                  <div
-                    key={i}
+                  <div key={i}
                     onClick={() => {
                       setSearchTerm(s.display_name);
                       setSuggestions([]);
-                      if (mapRef) {
-                        mapRef.flyTo([parseFloat(s.lat), parseFloat(s.lon)], 17);
+                      if (mapRef.current) {
+                        mapRef.current.panTo({ lat: parseFloat(s.lat), lng: parseFloat(s.lon) });
+                        mapRef.current.setZoom(17);
                       }
                     }}
-                    style={{
-                      padding: '10px 14px',
-                      cursor: 'pointer',
-                      fontSize: '13px',
-                      color: '#374151',
-                      borderBottom: '1px solid #f3f4f6',
-                    }}
-                    onMouseEnter={(e) => { e.target.style.background = '#f0fdfa'; }}
-                    onMouseLeave={(e) => { e.target.style.background = 'white'; }}
+                    style={{ padding: '10px 14px', cursor: 'pointer', fontSize: '13px', color: '#374151', borderBottom: '1px solid #f3f4f6' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = '#f0fdfa'; }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; }}
                   >
                     {s.display_name}
                   </div>
@@ -564,20 +385,7 @@ function Map({ showToast }) {
               </div>
             )}
           </div>
-          <button
-            onClick={handleSearch}
-            style={{
-              padding: '10px 18px',
-              backgroundColor: '#0d9488',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '13px',
-              fontWeight: '600',
-              whiteSpace: 'nowrap',
-            }}
-          >
+          <button onClick={handleSearch} style={{ padding: '10px 18px', backgroundColor: '#0d9488', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '600', whiteSpace: 'nowrap' }}>
             Search
           </button>
         </div>
@@ -586,32 +394,13 @@ function Map({ showToast }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <button
             onClick={() => setShowAdd(!showAdd)}
-            style={{
-              padding: '9px 16px',
-              backgroundColor: showAdd ? '#dc2626' : '#0d9488',
-              color: 'white',
-              border: 'none',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '13px',
-              fontWeight: '600',
-              transition: 'background 0.2s',
-            }}
+            style={{ padding: '9px 16px', backgroundColor: showAdd ? '#dc2626' : '#0d9488', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '600', transition: 'background 0.2s' }}
           >
             {showAdd ? '✕ Close' : '+ Add'}
           </button>
           <button
             onClick={() => supabase.auth.signOut()}
-            style={{
-              padding: '9px 16px',
-              backgroundColor: 'transparent',
-              color: '#6b7280',
-              border: '1px solid #d1d5db',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              fontSize: '13px',
-              fontWeight: '500',
-            }}
+            style={{ padding: '9px 16px', backgroundColor: 'transparent', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}
           >
             Log out
           </button>
@@ -620,42 +409,58 @@ function Map({ showToast }) {
 
       {/* Add Appraisal Form */}
       {showAdd && (
-        <AddAppraisal
-          onAdded={() => {
-            fetchAppraisals();
-            setShowAdd(false);
-          }}
-        />
+        <AddAppraisal onAdded={() => { fetchAppraisals(); setShowAdd(false); }} />
       )}
 
       {/* Map */}
       <div style={{ paddingTop: '56px', height: '100%' }}>
-        <MapContainer
-          center={[43.7, -79.4]}
-          zoom={9}
-          style={{ height: '100%', width: '100%' }}
-          ref={setMapRef}
-          minZoom={8}
-          maxBounds={[[42.8, -81.5], [44.8, -77.0]]}
-          maxBoundsViscosity={0.8}
-        >
-          <TileLayer
-            attribution='&copy; <a href="https://carto.com/">CARTO</a>'
-            url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png"
-          />
-          {appraisals.map((a) => (
-            <Marker key={a.id} position={[a.latitude, a.longitude]} icon={customIcon}>
-              <Popup>
+        {!isLoaded ? (
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#6b7280', fontSize: '14px' }}>
+            Loading map...
+          </div>
+        ) : (
+          <GoogleMap
+            mapContainerStyle={MAP_CONTAINER_STYLE}
+            center={DEFAULT_CENTER}
+            zoom={DEFAULT_ZOOM}
+            onLoad={onMapLoad}
+            options={{
+              restriction: {
+                latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
+                strictBounds: false,
+              },
+              minZoom: 8,
+              streetViewControl: false,
+              mapTypeControlOptions: {
+                mapTypeIds: ['roadmap', 'satellite', 'hybrid'],
+              },
+            }}
+          >
+            {appraisals.map((a) => (
+              <Marker
+                key={a.id}
+                position={{ lat: a.latitude, lng: a.longitude }}
+                icon={MARKER_ICON}
+                onClick={() => setSelectedAppraisal(a)}
+              />
+            ))}
+
+            {selectedAppraisal && (
+              <InfoWindow
+                position={{ lat: selectedAppraisal.latitude, lng: selectedAppraisal.longitude }}
+                onCloseClick={() => setSelectedAppraisal(null)}
+                options={{ pixelOffset: { width: 0, height: -28 } }}
+              >
                 <AppraisalPopup
-                  appraisal={a}
+                  appraisal={selectedAppraisal}
                   getSignedUrl={getSignedUrl}
-                  onUpdated={() => { fetchAppraisals(); showToast('Appraisal updated'); }}
-                  onDeleted={() => { fetchAppraisals(); showToast('Appraisal deleted'); }}
+                  onUpdated={() => { fetchAppraisals(); setSelectedAppraisal(null); showToast('Appraisal updated'); }}
+                  onDeleted={() => { fetchAppraisals(); setSelectedAppraisal(null); showToast('Appraisal deleted'); }}
                 />
-              </Popup>
-            </Marker>
-          ))}
-        </MapContainer>
+              </InfoWindow>
+            )}
+          </GoogleMap>
+        )}
       </div>
     </div>
   );
