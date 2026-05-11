@@ -311,7 +311,7 @@ const AppraisalPopup = React.memo(function AppraisalPopup({ appraisal, getSigned
   );
 });
 
-function Map({ showToast }) {
+function MapView({ showToast = () => {} }) {
   const [appraisals, setAppraisals] = useState([]);
   const [selectedAppraisal, setSelectedAppraisal] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -624,4 +624,4 @@ function Map({ showToast }) {
   );
 }
 
-export default Map;
+export default MapView;
