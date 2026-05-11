@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
 import { GoogleMap, useJsApiLoader, Marker, InfoWindow, MarkerClusterer } from '@react-google-maps/api';
 import { supabase } from './supabaseClient';
-import { applySpiralOffset } from './mapUtils';
+import { applySpiralOffset, COORDINATE_PRECISION } from './mapUtils';
 
 const AddAppraisal = lazy(() => import('./AddAppraisal'));
 
@@ -363,8 +363,8 @@ function Map({ showToast }) {
       const { data: firstPage, count, error } = await baseQuery.range(0, PAGE_SIZE - 1);
       if (error) throw error;
       const allData = firstPage || [];
-      const limitedCount = Math.min(count || 0, MAX_RECORDS_PER_FETCH);
-      const totalPages = Math.min(Math.ceil(limitedCount / PAGE_SIZE), MAX_PAGES);
+      const cappedTotalCount = Math.min(count || 0, MAX_RECORDS_PER_FETCH);
+      const totalPages = Math.min(Math.ceil(cappedTotalCount / PAGE_SIZE), MAX_PAGES);
 
       for (let page = 1; page < totalPages; page += 1) {
         const from = page * PAGE_SIZE;
@@ -419,10 +419,10 @@ function Map({ showToast }) {
         west: sw.lng(),
       };
       const fetchKey = [
-        nextBounds.north.toFixed(4),
-        nextBounds.south.toFixed(4),
-        nextBounds.east.toFixed(4),
-        nextBounds.west.toFixed(4),
+        nextBounds.north.toFixed(COORDINATE_PRECISION),
+        nextBounds.south.toFixed(COORDINATE_PRECISION),
+        nextBounds.east.toFixed(COORDINATE_PRECISION),
+        nextBounds.west.toFixed(COORDINATE_PRECISION),
       ].join('|');
       if (lastFetchKeyRef.current === fetchKey) return;
       lastFetchKeyRef.current = fetchKey;

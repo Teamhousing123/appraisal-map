@@ -1,4 +1,4 @@
-const COORDINATE_PRECISION = 4;
+export const COORDINATE_PRECISION = 4;
 
 export function applySpiralOffset(appraisals) {
   const seen = {};
