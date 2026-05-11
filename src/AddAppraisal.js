@@ -17,20 +17,35 @@ function AddAppraisal({ onAdded }) {
     setLoading(true);
     setError('');
 
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(address + ', ' + city + ', Ontario, Canada')}`
-      );
-      const results = await response.json();
+    const geocodeQuery = (query) => new Promise((resolve, reject) => {
+      const geocoder = new window.google.maps.Geocoder();
+      geocoder.geocode({ address: query }, (results, status) => {
+        if (status === 'OK' && results[0]) resolve(results[0]);
+        else reject(new Error('not found'));
+      });
+    });
 
-      if (results.length === 0) {
+    let lat, lon;
+    try {
+      // Try full address first
+      const result = await geocodeQuery(`${address}, ${city}, Ontario, Canada`);
+      lat = result.geometry.location.lat();
+      lon = result.geometry.location.lng();
+    } catch {
+      try {
+        // Strip house number, retry with street name only
+        const streetOnly = address.replace(/^\d+\s*/, '');
+        const result = await geocodeQuery(`${streetOnly}, ${city}, Ontario, Canada`);
+        lat = result.geometry.location.lat();
+        lon = result.geometry.location.lng();
+      } catch {
         setError('Address not found. Please check the spelling.');
         setLoading(false);
         return;
       }
+    }
 
-      const lat = parseFloat(results[0].lat);
-      const lon = parseFloat(results[0].lon);
+    try {
 
       let photoPath = null;
       if (photo) {

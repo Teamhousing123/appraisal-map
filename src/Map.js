@@ -319,7 +319,6 @@ function MapView({ showToast = () => {} }) {
   const [showAdd, setShowAdd] = useState(false);
   const mapRef = useRef(null);
   const autocompleteTimer = useRef(null);
-  const autocompleteAbort = useRef(null);
   const mapIdleTimer = useRef(null);
   const fileUrlCacheRef = useRef(new Map());
   const lastBoundsRef = useRef(null);
@@ -327,17 +326,18 @@ function MapView({ showToast = () => {} }) {
 
   const { isLoaded, loadError } = useJsApiLoader({
     googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
+    libraries: ['places'],
   });
 
   const mapOptions = useMemo(() => ({
-  restriction: {
-    latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
-    strictBounds: false,
-  },
-  minZoom: 8,
-  streetViewControl: false,
-  mapTypeControl: false,
-}), []);
+    restriction: {
+      latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
+      strictBounds: false,
+    },
+    minZoom: 8,
+    streetViewControl: false,
+    mapTypeControl: false,
+  }), []);
 
   const onMapLoad = useCallback((map) => {
     mapRef.current = map;
@@ -398,7 +398,6 @@ function MapView({ showToast = () => {} }) {
     return () => {
       if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
       if (mapIdleTimer.current) clearTimeout(mapIdleTimer.current);
-      if (autocompleteAbort.current) autocompleteAbort.current.abort();
     };
   }, [fetchAppraisals]);
 
@@ -431,47 +430,51 @@ function MapView({ showToast = () => {} }) {
 
   const handleAutocomplete = useCallback((value) => {
     if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
-    if (autocompleteAbort.current) autocompleteAbort.current.abort();
     if (value.length < 3) {
       setSuggestions([]);
       return;
     }
 
-    autocompleteTimer.current = setTimeout(async () => {
-      const controller = new AbortController();
-      autocompleteAbort.current = controller;
-      try {
-        const response = await fetch(
-          `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(value + ', Ontario, Canada')}&limit=10&viewbox=-81.5,44.8,-77.0,42.8&bounded=1`,
-          { headers: { Accept: 'application/json' }, signal: controller.signal }
-        );
-        const results = await response.json();
-        setSuggestions(results.slice(0, 5));
-      } catch (err) {
-        if (err.name !== 'AbortError') console.error('Autocomplete error:', err);
-      }
+    autocompleteTimer.current = setTimeout(() => {
+      const service = new window.google.maps.places.AutocompleteService();
+      service.getPlacePredictions(
+        {
+          input: value,
+          componentRestrictions: { country: 'ca' },
+          bounds: new window.google.maps.LatLngBounds(
+            { lat: 42.8, lng: -81.5 },
+            { lat: 44.8, lng: -77.0 }
+          ),
+        },
+        (predictions, status) => {
+          if (status === window.google.maps.places.PlacesServiceStatus.OK && predictions) {
+            setSuggestions(predictions.slice(0, 5));
+          } else {
+            setSuggestions([]);
+          }
+        }
+      );
     }, AUTOCOMPLETE_DEBOUNCE_MS);
   }, []);
 
   const handleSearch = useCallback(async () => {
     if (!searchTerm.trim()) return;
-    try {
-      const response = await fetch(
-        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchTerm + ', Ontario, Canada')}&viewbox=-81.5,44.8,-77.0,42.8&bounded=1`,
-        { headers: { Accept: 'application/json' } }
-      );
-      const results = await response.json();
-      if (results.length > 0 && mapRef.current) {
-        mapRef.current.panTo({ lat: parseFloat(results[0].lat), lng: parseFloat(results[0].lon) });
-        mapRef.current.setZoom(17);
-        setSuggestions([]);
-      } else {
-        alert('Location not found in this area. Try a different address.');
+    const geocoder = new window.google.maps.Geocoder();
+    geocoder.geocode(
+      {
+        address: searchTerm + ', Ontario, Canada',
+        componentRestrictions: { country: 'ca' },
+      },
+      (results, status) => {
+        if (status === 'OK' && results[0] && mapRef.current) {
+          mapRef.current.panTo(results[0].geometry.location);
+          mapRef.current.setZoom(17);
+          setSuggestions([]);
+        } else {
+          alert('Location not found. Try a different address.');
+        }
       }
-    } catch (err) {
-      console.error('Search error:', err);
-      alert('Search failed. Please try again.');
-    }
+    );
   }, [searchTerm]);
 
   const getSignedUrl = useCallback(async (bucket, path) => {
@@ -488,12 +491,15 @@ function MapView({ showToast = () => {} }) {
   }, []);
 
   const handleSuggestionClick = useCallback((suggestion) => {
-    setSearchTerm(suggestion.display_name);
+    setSearchTerm(suggestion.description);
     setSuggestions([]);
-    if (mapRef.current) {
-      mapRef.current.panTo({ lat: parseFloat(suggestion.lat), lng: parseFloat(suggestion.lon) });
-      mapRef.current.setZoom(17);
-    }
+    const geocoder = new window.google.maps.Geocoder();
+    geocoder.geocode({ placeId: suggestion.place_id }, (results, status) => {
+      if (status === 'OK' && results[0] && mapRef.current) {
+        mapRef.current.panTo(results[0].geometry.location);
+        mapRef.current.setZoom(17);
+      }
+    });
   }, []);
 
   const handleAddToggle = useCallback(() => {
@@ -552,7 +558,7 @@ function MapView({ showToast = () => {} }) {
                     onMouseEnter={(e) => { e.currentTarget.style.background = '#f0fdfa'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; }}
                   >
-                    {s.display_name}
+                    {s.description}
                   </div>
                 ))}
               </div>
