@@ -330,16 +330,14 @@ function MapView({ showToast = () => {} }) {
   });
 
   const mapOptions = useMemo(() => ({
-    restriction: {
-      latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
-      strictBounds: false,
-    },
-    minZoom: 8,
-    streetViewControl: false,
-    mapTypeControlOptions: {
-      mapTypeIds: ['roadmap', 'satellite', 'hybrid'],
-    },
-  }), []);
+  restriction: {
+    latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
+    strictBounds: false,
+  },
+  minZoom: 8,
+  streetViewControl: false,
+  mapTypeControl: false,
+}), []);
 
   const onMapLoad = useCallback((map) => {
     mapRef.current = map;
