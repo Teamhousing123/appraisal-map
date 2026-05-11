@@ -1,12 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { supabase } from './supabaseClient';
-import Login from './Login';
-import Map from './Map';
+
+const Login = lazy(() => import('./Login'));
+const Map = lazy(() => import('./Map'));
 
 function App() {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState(null);
+  const toastTimerRef = useRef(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -18,21 +20,33 @@ function App() {
       setSession(session);
     });
 
-    return () => subscription.unsubscribe();
+    return () => {
+      if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+      subscription.unsubscribe();
+    };
   }, []);
 
-  const showToast = (message) => {
+  const showToast = useCallback((message) => {
     setToast(message);
-    setTimeout(() => setToast(null), 2500);
-  };
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
+  }, []);
 
   if (loading) return null;
 
-  if (!session) return <Login />;
+  if (!session) {
+    return (
+      <Suspense fallback={null}>
+        <Login />
+      </Suspense>
+    );
+  }
 
   return (
     <div>
-      <Map showToast={showToast} />
+      <Suspense fallback={null}>
+        <Map showToast={showToast} />
+      </Suspense>
       <button
         onClick={() => supabase.auth.signOut()}
         style={{

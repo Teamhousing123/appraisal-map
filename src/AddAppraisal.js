@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import { supabase } from './supabaseClient';
-import JSZip from 'jszip';
 
 function AddAppraisal({ onAdded }) {
   const [address, setAddress] = useState('');
@@ -52,6 +51,7 @@ function AddAppraisal({ onAdded }) {
       }
 
       if (uploadType === 'folder' && folderFiles.length > 0) {
+        const { default: JSZip } = await import('jszip');
         const zip = new JSZip();
         for (const file of folderFiles) {
           zip.file(file.webkitRelativePath || file.name, file);

@@ -1,14 +1,31 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { GoogleMap, useJsApiLoader, Marker, InfoWindow } from '@react-google-maps/api';
+import React, { useState, useEffect, useRef, useCallback, useMemo, lazy, Suspense } from 'react';
+import { GoogleMap, useJsApiLoader, Marker, InfoWindow, MarkerClusterer } from '@react-google-maps/api';
 import { supabase } from './supabaseClient';
-import AddAppraisal from './AddAppraisal';
-import JSZip from 'jszip';
+import { applySpiralOffset, COORDINATE_PRECISION } from './mapUtils';
+
+const AddAppraisal = lazy(() => import('./AddAppraisal'));
 
 const MAP_CONTAINER_STYLE = { height: '100%', width: '100%' };
 const DEFAULT_CENTER = { lat: 43.7, lng: -79.4 };
 const DEFAULT_ZOOM = 9;
+const APPRAISAL_COLUMNS = [
+  'id',
+  'address',
+  'city',
+  'latitude',
+  'longitude',
+  'appraisal_date',
+  'photo_url',
+  'pdf_url',
+  'folder_files',
+  'created_at',
+].join(',');
+const PAGE_SIZE = 500;
+const MAX_PAGES = 100;
+const MAX_RECORDS_PER_FETCH = 5000;
+const MAP_IDLE_DEBOUNCE_MS = 250;
+const AUTOCOMPLETE_DEBOUNCE_MS = 300;
 
-// Custom teal pin marker using Google Maps marker options
 const MARKER_ICON = {
   path: 'M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z',
   fillColor: '#0d9488',
@@ -19,7 +36,27 @@ const MARKER_ICON = {
   anchor: { x: 12, y: 22 },
 };
 
-function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
+const MarkerLayer = React.memo(function MarkerLayer({ appraisals, onMarkerClick }) {
+  return (
+    <MarkerClusterer>
+      {(clusterer) => (
+        <>
+          {appraisals.map((appraisal) => (
+            <Marker
+              key={appraisal.id}
+              clusterer={clusterer}
+              position={{ lat: appraisal.latitude, lng: appraisal.longitude }}
+              icon={MARKER_ICON}
+              onClick={() => onMarkerClick(appraisal)}
+            />
+          ))}
+        </>
+      )}
+    </MarkerClusterer>
+  );
+});
+
+const AppraisalPopup = React.memo(function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [photoUrl, setPhotoUrl] = useState(null);
   const [pdfUrl, setPdfUrl] = useState(null);
   const [fileUrls, setFileUrls] = useState([]);
@@ -35,23 +72,42 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
-    if (appraisal.photo_url) {
-      getSignedUrl('photos', appraisal.photo_url).then(setPhotoUrl);
-    }
-    if (appraisal.pdf_url) {
-      getSignedUrl('pdfs', appraisal.pdf_url).then(setPdfUrl);
-    }
-    if (appraisal.folder_files && appraisal.folder_files.length > 0) {
-      Promise.all(
-        appraisal.folder_files.map(async (filePath) => {
-          const url = await getSignedUrl('appraisal-folders', filePath);
-          const name = filePath.split('_').slice(1).join('_');
-          return { name, url, path: filePath };
-        })
-      ).then(setFileUrls);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [appraisal]);
+    let active = true;
+
+    const loadSignedUrls = async () => {
+      if (appraisal.photo_url) {
+        const url = await getSignedUrl('photos', appraisal.photo_url);
+        if (active) setPhotoUrl(url);
+      } else if (active) {
+        setPhotoUrl(null);
+      }
+
+      if (appraisal.pdf_url) {
+        const url = await getSignedUrl('pdfs', appraisal.pdf_url);
+        if (active) setPdfUrl(url);
+      } else if (active) {
+        setPdfUrl(null);
+      }
+
+      if (appraisal.folder_files && appraisal.folder_files.length > 0) {
+        const urls = await Promise.all(
+          appraisal.folder_files.map(async (filePath) => {
+            const url = await getSignedUrl('appraisal-folders', filePath);
+            const name = filePath.split('_').slice(1).join('_');
+            return { name, url, path: filePath };
+          })
+        );
+        if (active) setFileUrls(urls);
+      } else if (active) {
+        setFileUrls([]);
+      }
+    };
+
+    loadSignedUrls();
+    return () => {
+      active = false;
+    };
+  }, [appraisal, getSignedUrl]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -61,7 +117,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       if (editAddress !== appraisal.address || editCity !== appraisal.city) {
         const response = await fetch(
           `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(editAddress + ', ' + editCity + ', Ontario, Canada')}`,
-          { headers: { 'Accept': 'application/json' } }
+          { headers: { Accept: 'application/json' } }
         );
         const results = await response.json();
         if (results.length > 0) {
@@ -86,6 +142,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       }
 
       if (newFolderFiles.length > 0) {
+        const { default: JSZip } = await import('jszip');
         const zip = new JSZip();
         for (const file of newFolderFiles) {
           zip.file(file.webkitRelativePath || file.name, file);
@@ -252,7 +309,7 @@ function AppraisalPopup({ appraisal, getSignedUrl, onUpdated, onDeleted }) {
       </div>
     </div>
   );
-}
+});
 
 function Map({ showToast }) {
   const [appraisals, setAppraisals] = useState([]);
@@ -260,61 +317,150 @@ function Map({ showToast }) {
   const [searchTerm, setSearchTerm] = useState('');
   const [suggestions, setSuggestions] = useState([]);
   const [showAdd, setShowAdd] = useState(false);
-  const [fileUrls, setFileUrls] = useState({});
   const mapRef = useRef(null);
   const autocompleteTimer = useRef(null);
+  const autocompleteAbort = useRef(null);
+  const mapIdleTimer = useRef(null);
+  const fileUrlCacheRef = useRef(new Map());
+  const lastBoundsRef = useRef(null);
+  const lastFetchKeyRef = useRef(null);
 
   const { isLoaded, loadError } = useJsApiLoader({
     googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
   });
 
+  const mapOptions = useMemo(() => ({
+    restriction: {
+      latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
+      strictBounds: false,
+    },
+    minZoom: 8,
+    streetViewControl: false,
+    mapTypeControlOptions: {
+      mapTypeIds: ['roadmap', 'satellite', 'hybrid'],
+    },
+  }), []);
+
   const onMapLoad = useCallback((map) => {
     mapRef.current = map;
   }, []);
 
-  const handleAutocomplete = (value) => {
+  const fetchAppraisals = useCallback(async (bounds = null) => {
+    try {
+      let baseQuery = supabase
+        .from('appraisals')
+        .select(APPRAISAL_COLUMNS, { count: 'exact' })
+        .order('created_at', { ascending: false });
+
+      if (bounds) {
+        baseQuery = baseQuery
+          .gte('latitude', bounds.south)
+          .lte('latitude', bounds.north)
+          .gte('longitude', bounds.west)
+          .lte('longitude', bounds.east);
+      }
+
+      const { data: firstPage, count, error } = await baseQuery.range(0, PAGE_SIZE - 1);
+      if (error) throw error;
+      const allData = firstPage || [];
+      const cappedTotalCount = Math.min(count || 0, MAX_RECORDS_PER_FETCH);
+      const totalPages = Math.min(Math.ceil(cappedTotalCount / PAGE_SIZE), MAX_PAGES);
+
+      for (let page = 1; page < totalPages; page += 1) {
+        const from = page * PAGE_SIZE;
+        const to = from + PAGE_SIZE - 1;
+        let query = supabase
+          .from('appraisals')
+          .select(APPRAISAL_COLUMNS)
+          .order('created_at', { ascending: false })
+          .range(from, to);
+
+        if (bounds) {
+          query = query
+            .gte('latitude', bounds.south)
+            .lte('latitude', bounds.north)
+            .gte('longitude', bounds.west)
+            .lte('longitude', bounds.east);
+        }
+
+        const { data, error } = await query;
+        if (error) throw error;
+        if (!data || data.length === 0) break;
+        allData.push(...data);
+      }
+
+      setAppraisals(applySpiralOffset(allData));
+    } catch (error) {
+      console.error('Error loading appraisals:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAppraisals();
+    return () => {
+      if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
+      if (mapIdleTimer.current) clearTimeout(mapIdleTimer.current);
+      if (autocompleteAbort.current) autocompleteAbort.current.abort();
+    };
+  }, [fetchAppraisals]);
+
+  const handleMapIdle = useCallback(() => {
+    if (mapIdleTimer.current) clearTimeout(mapIdleTimer.current);
+    mapIdleTimer.current = setTimeout(() => {
+      if (!mapRef.current) return;
+      const bounds = mapRef.current.getBounds();
+      if (!bounds) return;
+      const ne = bounds.getNorthEast();
+      const sw = bounds.getSouthWest();
+      const nextBounds = {
+        north: ne.lat(),
+        south: sw.lat(),
+        east: ne.lng(),
+        west: sw.lng(),
+      };
+      const fetchKey = [
+        nextBounds.north.toFixed(COORDINATE_PRECISION),
+        nextBounds.south.toFixed(COORDINATE_PRECISION),
+        nextBounds.east.toFixed(COORDINATE_PRECISION),
+        nextBounds.west.toFixed(COORDINATE_PRECISION),
+      ].join('|');
+      if (lastFetchKeyRef.current === fetchKey) return;
+      lastFetchKeyRef.current = fetchKey;
+      lastBoundsRef.current = nextBounds;
+      fetchAppraisals(nextBounds);
+    }, MAP_IDLE_DEBOUNCE_MS);
+  }, [fetchAppraisals]);
+
+  const handleAutocomplete = useCallback((value) => {
     if (autocompleteTimer.current) clearTimeout(autocompleteTimer.current);
-    if (value.length < 3) { setSuggestions([]); return; }
+    if (autocompleteAbort.current) autocompleteAbort.current.abort();
+    if (value.length < 3) {
+      setSuggestions([]);
+      return;
+    }
+
     autocompleteTimer.current = setTimeout(async () => {
+      const controller = new AbortController();
+      autocompleteAbort.current = controller;
       try {
         const response = await fetch(
           `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(value + ', Ontario, Canada')}&limit=10&viewbox=-81.5,44.8,-77.0,42.8&bounded=1`,
-          { headers: { 'Accept': 'application/json' } }
+          { headers: { Accept: 'application/json' }, signal: controller.signal }
         );
         const results = await response.json();
         setSuggestions(results.slice(0, 5));
       } catch (err) {
-        console.error('Autocomplete error:', err);
+        if (err.name !== 'AbortError') console.error('Autocomplete error:', err);
       }
-    }, 300);
-  };
+    }, AUTOCOMPLETE_DEBOUNCE_MS);
+  }, []);
 
-  const fetchAppraisals = async () => {
-    const { data, error } = await supabase.from('appraisals').select('*');
-    if (!error) {
-      // Spiral offset using golden angle so overlapping pins fan out
-      const seen = {};
-      const adjusted = data.map((a) => {
-        const key = `${a.latitude.toFixed(4)},${a.longitude.toFixed(4)}`;
-        if (seen[key] === undefined) { seen[key] = 0; return a; }
-        seen[key]++;
-        const count = seen[key];
-        const angle = (count - 1) * (137.5 * Math.PI / 180);
-        const radius = 0.0004 * Math.ceil(count / 8);
-        return { ...a, latitude: a.latitude + radius * Math.cos(angle), longitude: a.longitude + radius * Math.sin(angle) };
-      });
-      setAppraisals(adjusted);
-    }
-  };
-
-  useEffect(() => { fetchAppraisals(); }, []);
-
-  const handleSearch = async () => {
+  const handleSearch = useCallback(async () => {
     if (!searchTerm.trim()) return;
     try {
       const response = await fetch(
         `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(searchTerm + ', Ontario, Canada')}&viewbox=-81.5,44.8,-77.0,42.8&bounded=1`,
-        { headers: { 'Accept': 'application/json' } }
+        { headers: { Accept: 'application/json' } }
       );
       const results = await response.json();
       if (results.length > 0 && mapRef.current) {
@@ -328,23 +474,60 @@ function Map({ showToast }) {
       console.error('Search error:', err);
       alert('Search failed. Please try again.');
     }
-  };
+  }, [searchTerm]);
 
-  const getSignedUrl = async (bucket, path) => {
+  const getSignedUrl = useCallback(async (bucket, path) => {
     const key = `${bucket}/${path}`;
-    if (fileUrls[key]) return fileUrls[key];
+    if (fileUrlCacheRef.current.has(key)) return fileUrlCacheRef.current.get(key);
     const { data, error } = await supabase.storage.from(bucket).createSignedUrl(path, 3600);
     if (error || !data) return null;
-    setFileUrls((prev) => ({ ...prev, [key]: data.signedUrl }));
+    fileUrlCacheRef.current.set(key, data.signedUrl);
     return data.signedUrl;
-  };
+  }, []);
+
+  const handleMarkerClick = useCallback((appraisal) => {
+    setSelectedAppraisal(appraisal);
+  }, []);
+
+  const handleSuggestionClick = useCallback((suggestion) => {
+    setSearchTerm(suggestion.display_name);
+    setSuggestions([]);
+    if (mapRef.current) {
+      mapRef.current.panTo({ lat: parseFloat(suggestion.lat), lng: parseFloat(suggestion.lon) });
+      mapRef.current.setZoom(17);
+    }
+  }, []);
+
+  const handleAddToggle = useCallback(() => {
+    setShowAdd((prev) => !prev);
+  }, []);
+
+  const handleSignOut = useCallback(() => {
+    supabase.auth.signOut();
+  }, []);
+
+  const handleAppraisalAdded = useCallback(() => {
+    fetchAppraisals(lastBoundsRef.current);
+    setShowAdd(false);
+  }, [fetchAppraisals]);
+
+  const handleAppraisalUpdated = useCallback(() => {
+    fetchAppraisals(lastBoundsRef.current);
+    setSelectedAppraisal(null);
+    showToast('Appraisal updated');
+  }, [fetchAppraisals, showToast]);
+
+  const handleAppraisalDeleted = useCallback(() => {
+    fetchAppraisals(lastBoundsRef.current);
+    setSelectedAppraisal(null);
+    showToast('Appraisal deleted');
+  }, [fetchAppraisals, showToast]);
 
   if (loadError) return <div style={{ padding: '20px', color: '#dc2626' }}>Error loading Google Maps. Check your API key.</div>;
 
   return (
     <div style={{ height: '100vh', width: '100%', fontFamily: "'DM Sans', sans-serif" }}>
 
-      {/* Top Nav Bar */}
       <div style={{
         position: 'fixed', top: 0, left: 0, right: 0, height: '56px',
         background: '#ffffff', borderBottom: '1px solid #e5e7eb',
@@ -352,7 +535,6 @@ function Map({ showToast }) {
         padding: '0 20px', zIndex: 1000, boxShadow: '0 1px 4px rgba(0,0,0,0.06)',
       }}>
 
-        {/* Search with autocomplete */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flex: 1, maxWidth: '500px', position: 'relative' }}>
           <div style={{ display: 'flex', alignItems: 'center', background: '#f3f4f6', borderRadius: '8px', padding: '0 12px', flex: 1, position: 'relative' }}>
             <input
@@ -367,14 +549,7 @@ function Map({ showToast }) {
               <div style={{ position: 'absolute', top: '42px', left: 0, right: 0, background: 'white', borderRadius: '8px', boxShadow: '0 4px 16px rgba(0,0,0,0.12)', overflow: 'hidden', zIndex: 2000 }}>
                 {suggestions.map((s, i) => (
                   <div key={i}
-                    onClick={() => {
-                      setSearchTerm(s.display_name);
-                      setSuggestions([]);
-                      if (mapRef.current) {
-                        mapRef.current.panTo({ lat: parseFloat(s.lat), lng: parseFloat(s.lon) });
-                        mapRef.current.setZoom(17);
-                      }
-                    }}
+                    onClick={() => handleSuggestionClick(s)}
                     style={{ padding: '10px 14px', cursor: 'pointer', fontSize: '13px', color: '#374151', borderBottom: '1px solid #f3f4f6' }}
                     onMouseEnter={(e) => { e.currentTarget.style.background = '#f0fdfa'; }}
                     onMouseLeave={(e) => { e.currentTarget.style.background = 'white'; }}
@@ -390,16 +565,15 @@ function Map({ showToast }) {
           </button>
         </div>
 
-        {/* Right side buttons */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           <button
-            onClick={() => setShowAdd(!showAdd)}
+            onClick={handleAddToggle}
             style={{ padding: '9px 16px', backgroundColor: showAdd ? '#dc2626' : '#0d9488', color: 'white', border: 'none', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '600', transition: 'background 0.2s' }}
           >
             {showAdd ? '✕ Close' : '+ Add'}
           </button>
           <button
-            onClick={() => supabase.auth.signOut()}
+            onClick={handleSignOut}
             style={{ padding: '9px 16px', backgroundColor: 'transparent', color: '#6b7280', border: '1px solid #d1d5db', borderRadius: '8px', cursor: 'pointer', fontSize: '13px', fontWeight: '500' }}
           >
             Log out
@@ -407,12 +581,12 @@ function Map({ showToast }) {
         </div>
       </div>
 
-      {/* Add Appraisal Form */}
       {showAdd && (
-        <AddAppraisal onAdded={() => { fetchAppraisals(); setShowAdd(false); }} />
+        <Suspense fallback={null}>
+          <AddAppraisal onAdded={handleAppraisalAdded} />
+        </Suspense>
       )}
 
-      {/* Map */}
       <div style={{ paddingTop: '56px', height: '100%' }}>
         {!isLoaded ? (
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: '#6b7280', fontSize: '14px' }}>
@@ -424,26 +598,10 @@ function Map({ showToast }) {
             center={DEFAULT_CENTER}
             zoom={DEFAULT_ZOOM}
             onLoad={onMapLoad}
-            options={{
-              restriction: {
-                latLngBounds: { north: 44.8, south: 42.8, east: -77.0, west: -81.5 },
-                strictBounds: false,
-              },
-              minZoom: 8,
-              streetViewControl: false,
-              mapTypeControlOptions: {
-                mapTypeIds: ['roadmap', 'satellite', 'hybrid'],
-              },
-            }}
+            onIdle={handleMapIdle}
+            options={mapOptions}
           >
-            {appraisals.map((a) => (
-              <Marker
-                key={a.id}
-                position={{ lat: a.latitude, lng: a.longitude }}
-                icon={MARKER_ICON}
-                onClick={() => setSelectedAppraisal(a)}
-              />
-            ))}
+            <MarkerLayer appraisals={appraisals} onMarkerClick={handleMarkerClick} />
 
             {selectedAppraisal && (
               <InfoWindow
@@ -454,8 +612,8 @@ function Map({ showToast }) {
                 <AppraisalPopup
                   appraisal={selectedAppraisal}
                   getSignedUrl={getSignedUrl}
-                  onUpdated={() => { fetchAppraisals(); setSelectedAppraisal(null); showToast('Appraisal updated'); }}
-                  onDeleted={() => { fetchAppraisals(); setSelectedAppraisal(null); showToast('Appraisal deleted'); }}
+                  onUpdated={handleAppraisalUpdated}
+                  onDeleted={handleAppraisalDeleted}
                 />
               </InfoWindow>
             )}
