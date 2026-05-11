@@ -47,24 +47,6 @@ function App() {
       <Suspense fallback={null}>
         <Map showToast={showToast} />
       </Suspense>
-      <button
-        onClick={() => supabase.auth.signOut()}
-        style={{
-          position: 'fixed',
-          top: '11.3px',
-          right: '18px',
-          padding: '10px 16px',
-          backgroundColor: '#e74c3c',
-          color: 'white',
-          border: 'none',
-          borderRadius: '5px',
-          cursor: 'pointer',
-          zIndex: 1000,
-        }}
-      >
-        Log Out
-      </button>
-
       {toast && (
         <div style={{
           position: 'fixed',
