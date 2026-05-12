@@ -11,6 +11,8 @@ function AddAppraisal({ onAdded }) {
   const [folderFiles, setFolderFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const minAppraisalDate = '2024-01-01';
+  const maxAppraisalDate = '2028-12-31';
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -188,7 +190,14 @@ function AddAppraisal({ onAdded }) {
         <input type="text" placeholder="City (e.g. Vaughan)" value={city} onChange={(e) => setCity(e.target.value)} required style={inputStyle} />
 
         <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Report Date (optional)</label>
-        <input type="date" value={appraisalDate} onChange={(e) => setAppraisalDate(e.target.value)} style={inputStyle} />
+        <input
+          type="date"
+          value={appraisalDate}
+          min={minAppraisalDate}
+          max={maxAppraisalDate}
+          onChange={(e) => setAppraisalDate(e.target.value)}
+          style={inputStyle}
+        />
 
         <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>House Photo (optional)</label>
         <label style={fileInputWrapperStyle}>
