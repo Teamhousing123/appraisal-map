@@ -1,107 +1,73 @@
 # Appraisal Map
 
-An internal tool for viewing and managing property appraisals on an interactive map. Staff can search locations, add new appraisals with photos and documents, and access reports by clicking map pins.
+Appraisal Map is a map-first workspace for locating, reviewing, and maintaining property appraisal records. It gives authorized teams a single geographic view of appraisal activity and the documents associated with each property.
 
-## Features
+The application is designed for company-operated environments. This repository contains the product source; it does not provide public access to company systems, data, or infrastructure.
 
-- Interactive map centered on southern Ontario with search and autocomplete
-- Add appraisals with address, house photo, and a folder of documents (PDFs, images, etc.)
-- Click a map pin to view the house photo, address, and download associated files
-- Edit or delete existing appraisals directly from the map
-- Login-protected — only authorized staff can access data
-- All files stored in private cloud storage with signed URLs
+## Overview
 
-## Tech Stack
+Appraisal Map brings the core appraisal workflow into one focused interface:
 
-- **Frontend:** React, Google Maps (main app), Leaflet.js/CARTO Voyager (login screen)
-- **Backend/Database:** Supabase (PostgreSQL with Row Level Security)
-- **File Storage:** Supabase Storage (private buckets)
-- **Authentication:** Supabase Auth (email/password)
-- **Geocoding:** Google Maps Geocoding + Places Autocomplete
-- **Hosting:** Vercel
+- Explore appraisal records on an interactive, clustered map.
+- Search for an address, city, or area with location autocomplete.
+- Review property details, report dates, photos, and supporting documents.
+- Add, update, and remove records without leaving the map.
+- Upload a single report or preserve a related document set as one archive.
+- Restrict application access to authenticated users.
 
-## Project Structure
+Map queries are scoped to the visible region and records are loaded in pages, keeping navigation responsive as the dataset grows. Protected files are requested only when needed and accessed through time-limited links.
 
-```
-src/
-  supabaseClient.js   - Supabase connection config
-  App.js              - Auth routing (login vs map)
-  Login.js            - Login page with map background
-  Map.js              - Main map view, search, popups, edit/delete
-  AddAppraisal.js     - Form for adding new appraisals
-```
+## Technology
 
-## Setup
+The client is built with React and integrates Google Maps for the primary workspace. Authentication, structured data, and protected file storage are provided by Supabase. The sign-in experience uses Leaflet with CARTO basemaps.
+
+## Development
 
 ### Prerequisites
 
-- Node.js installed
-- A Supabase project with:
-  - An `appraisals` table (address, city, latitude, longitude, appraisal_date, photo_url, pdf_url, folder_files)
-  - Row Level Security enabled with policies for authenticated users
-  - Storage buckets: `photos`, `pdfs`, `appraisal-folders` (all private)
-  - User accounts created manually in Supabase Auth
+- A current Node.js LTS release with npm
+- Access to an authorized development environment
+- Provisioned mapping and backend services
 
-### Install and Run
+Install dependencies and start the local development server:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/appraisal-map.git
-cd appraisal-map
-npm install
-```
-
-Create a `.env` file in the project root:
-
-```
-REACT_APP_SUPABASE_URL=your_supabase_project_url
-REACT_APP_SUPABASE_ANON_KEY=your_supabase_publishable_key
-REACT_APP_GOOGLE_MAPS_API_KEY=your_google_maps_api_key
-```
-
-Start the development server:
-
-```bash
+npm ci
 npm start
 ```
 
-### Deploy
+Useful checks:
 
-The project is hosted on Vercel. Pushing to `main` triggers an automatic deploy. Environment variables are configured in the Vercel dashboard.
-
-## Database Schema
-
-```sql
-CREATE TABLE appraisals (
-  id UUID DEFAULT gen_random_uuid() PRIMARY KEY,
-  address TEXT NOT NULL,
-  city TEXT NOT NULL,
-  latitude DOUBLE PRECISION NOT NULL,
-  longitude DOUBLE PRECISION NOT NULL,
-  appraisal_date DATE,
-  photo_url TEXT,
-  pdf_url TEXT,
-  folder_files TEXT[],
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
+```bash
+npm test -- --watchAll=false
+npm run build
 ```
+
+### Configuration
+
+Runtime configuration is intentionally kept outside this repository. Maintainers provide development credentials and service configuration through the company-approved secrets channel.
+
+Do not commit credentials, privileged service keys, production identifiers, customer records, or copies of production files. Local development should use isolated resources and non-sensitive test data.
 
 ## Security
 
-- Row Level Security restricts all database access to authenticated users
-- Storage buckets are private with access policies for authenticated users only
-- File access uses signed URLs that expire after 1 hour
-- No public signup — user accounts are created manually in Supabase
-- Environment variables are excluded from version control via .gitignore
+Appraisal records and their attachments may contain confidential information. Changes must preserve the following boundaries:
 
-## Adding an Appraisal
+- Authentication in the client controls the user experience; authorization must be enforced by backend access policies.
+- Data and storage access should follow least-privilege rules for authenticated users.
+- Protected files should remain private and be served through short-lived access URLs.
+- Browser-delivered credentials must be publishable, appropriately restricted, and safe to expose to an untrusted client. Privileged keys must never be included in a client build.
+- Production configuration and data must not be used for local development or automated tests.
 
-1. Log in with your staff credentials
-2. Click the "+ Add" button in the top navigation
-3. Enter the property address and city
-4. Upload a house photo
-5. Select the appraisal folder containing all related documents
-6. Click "Save Appraisal" — the address is geocoded automatically and a pin appears on the map
+If you discover a vulnerability, do not open a public issue with exploit details, credentials, or customer data. Report it privately to the repository maintainers through an approved company channel.
 
-## Editing or Deleting
+## Contributing
 
-Click any pin on the map, then use the "Edit" or "Delete" buttons in the popup. Editing allows you to change the address, replace the photo, or replace the document folder. Deleting requires a confirmation click.
+Keep changes focused, reviewable, and free of operational or customer-specific information. Before opening a pull request:
+
+1. Run the test suite and create a production build.
+2. Confirm that no secrets, generated artifacts, or sensitive data were added.
+3. Describe the user impact and any security implications.
+4. Include tests for behavior that can be covered reliably.
+
+Deployment, infrastructure changes, and production access are managed by authorized maintainers outside the public documentation.
