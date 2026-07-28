@@ -2,14 +2,70 @@ name: Keep Supabase Alive
 
 on:
   schedule:
-    - cron: '0 4 */3 * *'
+    # Three off-peak probes per day provide consistent database-backed activity.
+    - cron: '17 3,11,19 * * *'
+    # Public repositories lose scheduled workflows after 60 days without repo activity.
+    - cron: '41 5 1 * *'
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: keep-supabase-alive
+  cancel-in-progress: false
 
 jobs:
   ping:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
-      - name: Ping Supabase
+      - name: Create read-only Supabase database activity
         env:
-          URL: ${{ secrets.REACT_APP_SUPABASE_URL }}
-        run: curl -s -o /dev/null "$URL"
+          SUPABASE_URL: ${{ secrets.REACT_APP_SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.REACT_APP_SUPABASE_ANON_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          : "${SUPABASE_URL:?Missing REACT_APP_SUPABASE_URL repository secret}"
+          : "${SUPABASE_ANON_KEY:?Missing REACT_APP_SUPABASE_ANON_KEY repository secret}"
+
+          curl \
+            --fail-with-body \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-all-errors \
+            --retry-delay 10 \
+            --connect-timeout 15 \
+            --max-time 45 \
+            --request POST \
+            --output /dev/null \
+            "${SUPABASE_URL%/}/storage/v1/object/list/photos" \
+            --header "apikey: ${SUPABASE_ANON_KEY}" \
+            --header "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+            --header "Content-Type: application/json" \
+            --data '{"limit":1,"offset":0,"prefix":""}'
+
+          echo "Supabase read-only database activity probe succeeded."
+
+  keep-schedule-enabled:
+    if: github.event_name == 'schedule' && github.event.schedule == '41 5 1 * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v6
+
+      - name: Record repository activity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "chore: keep scheduled workflows active"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
