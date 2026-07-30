@@ -9,7 +9,9 @@ The application is designed for company-operated environments. This repository c
 Appraisal Map brings the core appraisal workflow into one focused interface:
 
 - Explore appraisal records on an interactive, clustered map.
-- Search for an address, city, or area with location autocomplete.
+- Set a clearly labelled subject property with location autocomplete.
+- Review a synchronized nearby-report list with factual radius, property-type, and reference-date filters.
+- Select up to three candidate reports and compare distance, dates, type, reported living area, and year built without rankings or automated appraisal conclusions.
 - Review property details, report dates, photos, and supporting documents.
 - Add, update, and remove records without leaving the map.
 - Upload a single report or preserve a related document set as one archive.
@@ -39,9 +41,33 @@ npm start
 Useful checks:
 
 ```bash
-npm test -- --watchAll=false
+npm run lint
+npm run test:ci
 npm run build
 ```
+
+### Launching from PyCharm
+
+1. Open this repository as the PyCharm project.
+2. In **Settings → Languages & Frameworks → Node.js**, select a Node.js 22 LTS interpreter and its bundled npm installation.
+3. Open PyCharm's terminal and run `npm ci` once.
+4. Create a local `.env.local` file with the configuration keys listed below. Obtain development values through the approved secrets channel; never use a Supabase service-role key in this browser application.
+5. Open **Run → Edit Configurations**, add an **npm** configuration, select this repository's `package.json`, choose the `run` command, and enter `start` as the script.
+6. Run that configuration and open [http://localhost:3000](http://localhost:3000).
+
+Required local configuration keys:
+
+```dotenv
+REACT_APP_SUPABASE_URL=
+REACT_APP_SUPABASE_ANON_KEY=
+REACT_APP_GOOGLE_MAPS_API_KEY=
+```
+
+The Google Maps browser key should be restricted to the authorized local and deployed origins. The Supabase anon key is a public client credential and must be protected by Row Level Security and private storage-bucket policies.
+
+### Database rollout
+
+The comparison fields use the additive SQL migration in `supabase/migrations`. Apply that migration through the authorized Supabase migration workflow before staff enter effective dates or property details. The UI continues to read legacy records when the migration is not yet present and will not silently discard newly entered metadata.
 
 ### Configuration
 
@@ -54,6 +80,7 @@ Do not commit credentials, privileged service keys, production identifiers, cust
 Appraisal records and their attachments may contain confidential information. Changes must preserve the following boundaries:
 
 - Authentication in the client controls the user experience; authorization must be enforced by backend access policies.
+- UI role visibility uses only server-controlled `app_metadata`; it is not a substitute for Row Level Security.
 - Data and storage access should follow least-privilege rules for authenticated users.
 - Protected files should remain private and be served through short-lived access URLs.
 - Browser-delivered credentials must be publishable, appropriately restricted, and safe to expose to an untrusted client. Privileged keys must never be included in a client build.

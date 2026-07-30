@@ -1,58 +1,217 @@
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import AppraisalFormFields from './components/AppraisalFormFields';
+import {
+  normalizeOptionalInteger,
+  validatePropertyDetails,
+} from './domain/appraisalFields';
+import { validateOptionalDateOrder } from './domain/dates';
+import { addressFingerprint, geocodeFullOntarioAddress } from './domain/geocoding';
+import {
+  cleanupUploadedObjects,
+  createOpaqueStorageKey,
+  PDF_ACCEPT,
+  PHOTO_ACCEPT,
+  UPLOAD_LIMITS,
+  validateAppraisalUploads,
+  validateFolderFiles,
+  validatePdfFile,
+  validatePhotoFile,
+} from './domain/formSafety';
+import { insertAppraisal, isMissingMetadataSchemaError } from './services/appraisalService';
 import { supabase } from './supabaseClient';
 
-function AddAppraisal({ onAdded }) {
+const EMPTY_PROPERTY_DETAILS = {
+  propertyType: '',
+  reportedLivingAreaSqFt: '',
+  yearBuilt: '',
+};
+
+function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChange }) {
   const [address, setAddress] = useState('');
   const [city, setCity] = useState('');
   const [appraisalDate, setAppraisalDate] = useState('');
+  const [effectiveDate, setEffectiveDate] = useState('');
+  const [propertyDetails, setPropertyDetails] = useState(EMPTY_PROPERTY_DETAILS);
   const [photo, setPhoto] = useState(null);
   const [uploadType, setUploadType] = useState('pdf');
   const [pdf, setPdf] = useState(null);
   const [folderFiles, setFolderFiles] = useState([]);
-  const [loading, setLoading] = useState(false);
+  const [phase, setPhase] = useState('idle');
   const [error, setError] = useState('');
-  const minAppraisalDate = '2021-01-01';
-  const maxAppraisalDate = '2028-12-31';
+  const [status, setStatus] = useState('');
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [verifiedAddress, setVerifiedAddress] = useState(null);
 
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    setLoading(true);
+  const isBusy = phase !== 'idle';
+  const currentAddressFingerprint = addressFingerprint(address, city);
+  const addressIsVerified = verifiedAddress?.fingerprint === currentAddressFingerprint;
+  const isDirty = Boolean(
+    address.trim()
+    || city.trim()
+    || appraisalDate
+    || effectiveDate
+    || propertyDetails.propertyType
+    || propertyDetails.reportedLivingAreaSqFt
+    || propertyDetails.yearBuilt
+    || photo
+    || pdf
+    || folderFiles.length
+    || uploadType !== 'pdf'
+  );
+  const dateWarning = useMemo(
+    () => validateOptionalDateOrder(appraisalDate, effectiveDate),
+    [appraisalDate, effectiveDate]
+  );
+
+  useEffect(() => {
+    onWorkspaceStateChange?.({ dirty: isDirty, busy: isBusy });
+  }, [isBusy, isDirty, onWorkspaceStateChange]);
+
+  useEffect(() => () => {
+    onWorkspaceStateChange?.({ dirty: false, busy: false });
+  }, [onWorkspaceStateChange]);
+
+  const invalidateVerifiedAddress = () => {
+    setVerifiedAddress(null);
+    setStatus('');
+  };
+
+  const handleAddressChange = (value) => {
+    setAddress(value);
+    invalidateVerifiedAddress();
+    setFieldErrors((current) => ({ ...current, address: '' }));
+  };
+
+  const handleCityChange = (value) => {
+    setCity(value);
+    invalidateVerifiedAddress();
+    setFieldErrors((current) => ({ ...current, city: '' }));
+  };
+
+  const handlePropertyDetailChange = (field, value) => {
+    setPropertyDetails((current) => ({ ...current, [field]: value }));
+    setFieldErrors((current) => ({ ...current, [field]: '' }));
+  };
+
+  const handlePhotoSelection = (event) => {
+    const selectedPhoto = event.target.files?.[0] || null;
+    const fileError = validatePhotoFile(selectedPhoto);
+    if (fileError) {
+      event.target.value = '';
+      setPhoto(null);
+      setError(fileError);
+      return;
+    }
     setError('');
+    setPhoto(selectedPhoto);
+  };
 
-    const geocodeQuery = (query) => new Promise((resolve, reject) => {
-      const geocoder = new window.google.maps.Geocoder();
-      geocoder.geocode({ address: query }, (results, status) => {
-        if (status === 'OK' && results[0]) resolve(results[0]);
-        else reject(new Error('not found'));
-      });
-    });
+  const handlePdfSelection = (event) => {
+    const selectedPdf = event.target.files?.[0] || null;
+    const fileError = validatePdfFile(selectedPdf);
+    if (fileError) {
+      event.target.value = '';
+      setPdf(null);
+      setError(fileError);
+      return;
+    }
+    setError('');
+    setPdf(selectedPdf);
+  };
 
-    let lat, lon;
-    try {
-      // Try full address first
-      const result = await geocodeQuery(`${address}, ${city}, Ontario, Canada`);
-      lat = result.geometry.location.lat();
-      lon = result.geometry.location.lng();
-    } catch {
-      try {
-        // Strip house number, retry with street name only
-        const streetOnly = address.replace(/^\d+\s*/, '');
-        const result = await geocodeQuery(`${streetOnly}, ${city}, Ontario, Canada`);
-        lat = result.geometry.location.lat();
-        lon = result.geometry.location.lng();
-      } catch {
-        setError('Address not found. Please check the spelling.');
-        setLoading(false);
-        return;
-      }
+  const handleFolderSelection = (event) => {
+    const selectedFiles = Array.from(event.target.files || []);
+    const fileError = validateFolderFiles(selectedFiles);
+    if (fileError) {
+      event.target.value = '';
+      setFolderFiles([]);
+      setError(fileError);
+      return;
+    }
+    setError('');
+    setFolderFiles(selectedFiles);
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setError('');
+    setStatus('');
+
+    const normalizedDetails = {
+      propertyType: propertyDetails.propertyType || null,
+      reportedLivingAreaSqFt: normalizeOptionalInteger(
+        propertyDetails.reportedLivingAreaSqFt
+      ),
+      yearBuilt: normalizeOptionalInteger(propertyDetails.yearBuilt),
+    };
+    const metadataPayload = {
+      effective_date: effectiveDate || null,
+      property_type: normalizedDetails.propertyType,
+      reported_living_area_sq_ft: normalizedDetails.reportedLivingAreaSqFt,
+      year_built: normalizedDetails.yearBuilt,
+    };
+    const hasEnteredMetadata = Object.values(metadataPayload).some((value) => value !== null);
+
+    const nextFieldErrors = {
+      ...validatePropertyDetails(normalizedDetails),
+    };
+
+    if (!address.trim()) nextFieldErrors.address = 'Enter the street address.';
+    if (!city.trim()) nextFieldErrors.city = 'Enter the city.';
+
+    if (Object.values(nextFieldErrors).some(Boolean)) {
+      setFieldErrors(nextFieldErrors);
+      setError('Review the highlighted fields before continuing.');
+      return;
     }
 
-    const uploadedStoragePaths = [];
-    try {
+    const uploadError = validateAppraisalUploads({
+      photo,
+      pdf,
+      folderFiles,
+      uploadType,
+    });
+    if (uploadError) {
+      setError(uploadError);
+      return;
+    }
 
+    if (metadataSupported === false && hasEnteredMetadata) {
+      setError(
+        'Property comparison details are temporarily unavailable. Ask an administrator to enable them. Your files have not been uploaded.'
+      );
+      return;
+    }
+
+    setFieldErrors({});
+
+    if (!addressIsVerified) {
+      setPhase('verifying');
+      try {
+        const geocodedAddress = await geocodeFullOntarioAddress(address, city);
+        setVerifiedAddress({
+          ...geocodedAddress,
+          fingerprint: addressFingerprint(address, city),
+        });
+        setStatus(
+          `Address verified as ${geocodedAddress.formattedAddress}. Review it, then save the appraisal.`
+        );
+      } catch (geocodeError) {
+        setError(geocodeError.message);
+      } finally {
+        setPhase('idle');
+      }
+      return;
+    }
+
+    setPhase('saving');
+    const uploadedStoragePaths = [];
+    let rowCommitted = false;
+
+    try {
       let photoPath = null;
       if (photo) {
-        const photoName = `${Date.now()}_${photo.name}`;
+        const photoName = createOpaqueStorageKey(photo);
         const { error: photoError } = await supabase.storage.from('photos').upload(photoName, photo);
         if (photoError) throw photoError;
         photoPath = photoName;
@@ -63,7 +222,7 @@ function AddAppraisal({ onAdded }) {
       let folderPaths = [];
 
       if (uploadType === 'pdf' && pdf) {
-        const pdfName = `${Date.now()}_${pdf.name}`;
+        const pdfName = createOpaqueStorageKey(pdf);
         const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, pdf);
         if (pdfError) throw pdfError;
         pdfPath = pdfName;
@@ -77,211 +236,270 @@ function AddAppraisal({ onAdded }) {
           zip.file(file.webkitRelativePath || file.name, file);
         }
         const zipBlob = await zip.generateAsync({ type: 'blob' });
-        const zipName = `${Date.now()}_${address.replace(/\s+/g, '_')}.zip`;
-        const { error: zipError } = await supabase.storage.from('appraisal-folders').upload(zipName, zipBlob);
+        const zipName = createOpaqueStorageKey('.zip');
+        const { error: zipError } = await supabase.storage
+          .from('appraisal-folders')
+          .upload(zipName, zipBlob);
         if (zipError) throw zipError;
         folderPaths = [zipName];
         uploadedStoragePaths.push({ bucket: 'appraisal-folders', path: zipName });
       }
 
-      const { error: insertError } = await supabase
-        .from('appraisals')
-        .insert([{
-          address,
-          city,
-          latitude: lat,
-          longitude: lon,
-          appraisal_date: appraisalDate || null,
-          photo_url: photoPath,
-          pdf_url: pdfPath,
-          folder_files: folderPaths.length > 0 ? folderPaths : null,
-        }]);
+      const legacyPayload = {
+        address: address.trim(),
+        city: city.trim(),
+        latitude: verifiedAddress.latitude,
+        longitude: verifiedAddress.longitude,
+        appraisal_date: appraisalDate || null,
+        photo_url: photoPath,
+        pdf_url: pdfPath,
+        folder_files: folderPaths.length > 0 ? folderPaths : null,
+      };
+      let insertError = null;
+      if (metadataSupported === false) {
+        ({ error: insertError } = await insertAppraisal(supabase, legacyPayload));
+      } else {
+        ({ error: insertError } = await insertAppraisal(
+          supabase,
+          { ...legacyPayload, ...metadataPayload }
+        ));
+
+        if (insertError && isMissingMetadataSchemaError(insertError)) {
+          if (hasEnteredMetadata) {
+            const migrationError = new Error(
+              'Property comparison details are temporarily unavailable. Ask an administrator to enable them, then try again.'
+            );
+            migrationError.isUserFacing = true;
+            throw migrationError;
+          }
+
+          const legacyInsert = await insertAppraisal(supabase, legacyPayload);
+          insertError = legacyInsert.error;
+        }
+      }
 
       if (insertError) throw insertError;
-      onAdded();
-    } catch (err) {
-      await Promise.all(
-        uploadedStoragePaths.map(async ({ bucket, path }) => {
-          const { error: removeError } = await supabase.storage.from(bucket).remove([path]);
-          if (removeError) console.error(`Error removing failed ${bucket} upload:`, removeError);
-        })
-      );
-      setError(err.message);
+      rowCommitted = true;
+
+      onAdded({ message: 'Appraisal saved.', tone: 'success' });
+    } catch (saveError) {
+      const cleanupFailures = rowCommitted
+        ? []
+        : await cleanupUploadedObjects(supabase, uploadedStoragePaths);
+      const cleanupFailed = cleanupFailures.length > 0;
+
+      if (rowCommitted) {
+        setError('The appraisal was saved, but the workspace could not refresh. Reopen nearby reports to confirm it.');
+      } else if (saveError.isUserFacing) {
+        setError(
+          `${saveError.message}${
+            cleanupFailed ? ' An administrator may need to remove an incomplete file upload.' : ''
+          }`
+        );
+      } else {
+        setError(
+          `The appraisal could not be saved. No record was added. Check the files and connection, then try again.${
+            cleanupFailed ? ' An administrator may need to remove an incomplete file upload.' : ''
+          }`
+        );
+      }
+    } finally {
+      setPhase('idle');
     }
-    setLoading(false);
   };
-
-  const inputStyle = {
-    width: '100%',
-    padding: '10px 12px',
-    marginBottom: '10px',
-    borderRadius: '8px',
-    border: '1px solid #d1d5db',
-    fontSize: '13px',
-    boxSizing: 'border-box',
-    outline: 'none',
-    color: '#374151',
-  };
-
-  const fileInputWrapperStyle = {
-    width: '100%',
-    padding: '8px 12px',
-    marginBottom: '10px',
-    borderRadius: '8px',
-    border: '1px solid #d1d5db',
-    fontSize: '13px',
-    boxSizing: 'border-box',
-    color: '#374151',
-    backgroundColor: 'white',
-    display: 'flex',
-    alignItems: 'center',
-    gap: '10px',
-    cursor: 'pointer',
-  };
-
-  const fileButtonStyle = {
-    padding: '4px 10px',
-    backgroundColor: '#f3f4f6',
-    border: '1px solid #d1d5db',
-    borderRadius: '6px',
-    fontSize: '12px',
-    color: '#374151',
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
-    fontFamily: "'DM Sans', sans-serif",
-  };
-
-  const toggleStyle = (active) => ({
-    flex: 1,
-    padding: '8px',
-    backgroundColor: active ? '#0d9488' : 'white',
-    color: active ? 'white' : '#374151',
-    border: '1px solid ' + (active ? '#0d9488' : '#d1d5db'),
-    borderRadius: '6px',
-    cursor: 'pointer',
-    fontSize: '12px',
-    fontWeight: '600',
-    fontFamily: "'DM Sans', sans-serif",
-    transition: 'all 0.2s',
-  });
 
   return (
-    <div style={{
-      position: 'fixed',
-      top: '66px',
-      right: '20px',
-      zIndex: 1000,
-      background: 'white',
-      padding: '20px',
-      borderRadius: '12px',
-      boxShadow: '0 4px 20px rgba(0,0,0,0.12)',
-      width: '300px',
-      fontFamily: "'DM Sans', sans-serif",
-    }}>
-      <h3 style={{ marginTop: 0, marginBottom: '16px', color: '#1f2937', fontSize: '16px' }}>
-        Add Appraisal
-      </h3>
+    <section className="add-appraisal-panel" aria-labelledby="add-appraisal-title">
+      <h2 id="add-appraisal-title" className="add-appraisal-title">
+        Add appraisal
+      </h2>
+      <p className="add-appraisal-intro">
+        Verify the full civic address before any files are uploaded. All report and property
+        details are optional.
+      </p>
 
       {error && (
-        <p style={{
-          color: '#dc2626',
-          fontSize: '12px',
-          background: '#fef2f2',
-          padding: '8px 10px',
-          borderRadius: '6px',
-          marginBottom: '10px',
-        }}>
+        <p className="appraisal-alert" role="alert">
           {error}
         </p>
       )}
-
-      <form onSubmit={handleSubmit}>
-        <input type="text" placeholder="Address" value={address} onChange={(e) => setAddress(e.target.value)} required style={inputStyle} />
-        <input type="text" placeholder="City (e.g. Vaughan)" value={city} onChange={(e) => setCity(e.target.value)} required style={inputStyle} />
-
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>Report Date (optional)</label>
-        <input
-          type="date"
-          value={appraisalDate}
-          min={minAppraisalDate}
-          max={maxAppraisalDate}
-          onChange={(e) => setAppraisalDate(e.target.value)}
-          style={inputStyle}
-        />
-
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '4px' }}>House Photo (optional)</label>
-        <label style={fileInputWrapperStyle}>
-          <span style={fileButtonStyle}>Choose File</span>
-          <span style={{ color: photo ? '#374151' : '#9ca3af', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {photo ? photo.name : 'No file chosen'}
-          </span>
-          <input type="file" accept="image/*" onChange={(e) => setPhoto(e.target.files[0])} style={{ display: 'none' }} />
-        </label>
-
-        <label style={{ fontSize: '12px', color: '#6b7280', display: 'block', marginBottom: '6px' }}>Appraisal Documents (optional)</label>
-        <div style={{ display: 'flex', gap: '6px', marginBottom: '10px' }}>
-          <button type="button" onClick={() => {
-            setUploadType('pdf');
-            setFolderFiles([]);
-          }} style={toggleStyle(uploadType === 'pdf')}>
-            Single PDF
-          </button>
-          <button type="button" onClick={() => {
-            setUploadType('folder');
-            setPdf(null);
-          }} style={toggleStyle(uploadType === 'folder')}>
-            Folder
-          </button>
+      {status && (
+        <p className="appraisal-status" role="status">
+          {status}
+        </p>
+      )}
+      <form onSubmit={handleSubmit} aria-busy={isBusy} noValidate>
+        <div className="appraisal-field">
+          <label className="appraisal-label" htmlFor="appraisal-address">
+            Street address
+          </label>
+          <input
+            id="appraisal-address"
+            className="appraisal-input"
+            type="text"
+            autoComplete="street-address"
+            value={address}
+            disabled={isBusy}
+            required
+            aria-invalid={Boolean(fieldErrors.address)}
+            aria-describedby={fieldErrors.address ? 'appraisal-address-error' : undefined}
+            onChange={(event) => handleAddressChange(event.target.value)}
+          />
+          {fieldErrors.address && (
+            <p id="appraisal-address-error" className="appraisal-field-error">
+              {fieldErrors.address}
+            </p>
+          )}
         </div>
 
-        {uploadType === 'pdf' && (
-          <label style={fileInputWrapperStyle}>
-            <span style={fileButtonStyle}>Choose PDF</span>
-            <span style={{ color: pdf ? '#374151' : '#9ca3af', fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {pdf ? pdf.name : 'No file chosen'}
-            </span>
-            <input type="file" accept=".pdf" onChange={(e) => setPdf(e.target.files[0])} style={{ display: 'none' }} />
+        <div className="appraisal-field">
+          <label className="appraisal-label" htmlFor="appraisal-city">
+            City
           </label>
+          <input
+            id="appraisal-city"
+            className="appraisal-input"
+            type="text"
+            autoComplete="address-level2"
+            placeholder="e.g. Vaughan"
+            value={city}
+            disabled={isBusy}
+            required
+            aria-invalid={Boolean(fieldErrors.city)}
+            aria-describedby={fieldErrors.city ? 'appraisal-city-error' : undefined}
+            onChange={(event) => handleCityChange(event.target.value)}
+          />
+          {fieldErrors.city && (
+            <p id="appraisal-city-error" className="appraisal-field-error">
+              {fieldErrors.city}
+            </p>
+          )}
+        </div>
+
+        <AppraisalFormFields
+          reportDate={appraisalDate}
+          effectiveDate={effectiveDate}
+          propertyDetails={propertyDetails}
+          errors={fieldErrors}
+          dateWarning={dateWarning}
+          disabled={isBusy}
+          onReportDateChange={setAppraisalDate}
+          onEffectiveDateChange={setEffectiveDate}
+          onPropertyDetailChange={handlePropertyDetailChange}
+        />
+
+        <div className="appraisal-field">
+          <label className="appraisal-label" htmlFor="appraisal-photo">
+            House photo <span className="appraisal-optional">Optional</span>
+          </label>
+          <label className="appraisal-file-control" htmlFor="appraisal-photo">
+            <span className="appraisal-file-button">Choose photo</span>
+            <span className="appraisal-file-name">{photo ? photo.name : 'No file selected'}</span>
+            <input
+              id="appraisal-photo"
+              className="appraisal-file-input"
+              type="file"
+              accept={PHOTO_ACCEPT}
+              aria-describedby="appraisal-photo-help"
+              disabled={isBusy}
+              onChange={handlePhotoSelection}
+            />
+          </label>
+          <p id="appraisal-photo-help" className="appraisal-field-hint">
+            JPG, PNG, WebP, HEIC, or TIFF. Maximum {UPLOAD_LIMITS.photo.maxFileBytes / 1024 / 1024} MB.
+          </p>
+        </div>
+
+        <fieldset className="appraisal-fieldset" disabled={isBusy}>
+          <legend>
+            Appraisal documents <span className="appraisal-optional">Optional</span>
+          </legend>
+          <div className="appraisal-upload-toggle">
+            <button
+              type="button"
+              aria-pressed={uploadType === 'pdf'}
+              onClick={() => {
+                setUploadType('pdf');
+                setFolderFiles([]);
+              }}
+            >
+              Single PDF
+            </button>
+            <button
+              type="button"
+              aria-pressed={uploadType === 'folder'}
+              onClick={() => {
+                setUploadType('folder');
+                setPdf(null);
+              }}
+            >
+              Folder
+            </button>
+          </div>
+        </fieldset>
+
+        {uploadType === 'pdf' && (
+          <div className="appraisal-field">
+            <label className="appraisal-file-control" htmlFor="appraisal-pdf">
+              <span className="appraisal-file-button">Choose PDF</span>
+              <span className="appraisal-file-name">{pdf ? pdf.name : 'No file selected'}</span>
+              <input
+                id="appraisal-pdf"
+                className="appraisal-file-input"
+                type="file"
+                accept={PDF_ACCEPT}
+                aria-describedby="appraisal-pdf-help"
+                disabled={isBusy}
+                onChange={handlePdfSelection}
+              />
+            </label>
+            <p id="appraisal-pdf-help" className="appraisal-field-hint">
+              PDF only. Maximum {UPLOAD_LIMITS.pdf.maxFileBytes / 1024 / 1024} MB.
+            </p>
+          </div>
         )}
 
         {uploadType === 'folder' && (
-          <label style={fileInputWrapperStyle}>
-            <span style={fileButtonStyle}>Choose Folder</span>
-            <span style={{ color: folderFiles.length > 0 ? '#374151' : '#9ca3af', fontSize: '12px' }}>
-              {folderFiles.length > 0 ? `${folderFiles.length} file${folderFiles.length !== 1 ? 's' : ''} selected` : 'No folder chosen'}
-            </span>
-            <input
-              type="file"
-              webkitdirectory=""
-              mozdirectory=""
-              directory=""
-              multiple
-              onChange={(e) => setFolderFiles(Array.from(e.target.files))}
-              style={{ display: 'none' }}
-            />
-          </label>
+          <div className="appraisal-field">
+            <label className="appraisal-file-control" htmlFor="appraisal-folder">
+              <span className="appraisal-file-button">Choose folder</span>
+              <span className="appraisal-file-name">
+                {folderFiles.length > 0
+                  ? `${folderFiles.length} file${folderFiles.length === 1 ? '' : 's'} selected`
+                  : 'No folder selected'}
+              </span>
+              <input
+                id="appraisal-folder"
+                className="appraisal-file-input"
+                type="file"
+                webkitdirectory=""
+                mozdirectory=""
+                directory=""
+                multiple
+                aria-describedby="appraisal-folder-help"
+                disabled={isBusy}
+                onChange={handleFolderSelection}
+              />
+            </label>
+            <p id="appraisal-folder-help" className="appraisal-field-hint">
+              Up to {UPLOAD_LIMITS.folder.maxFiles} supported document or image files,{' '}
+              {UPLOAD_LIMITS.folder.maxFileBytes / 1024 / 1024} MB each and{' '}
+              {UPLOAD_LIMITS.folder.maxTotalBytes / 1024 / 1024} MB total.
+            </p>
+          </div>
         )}
 
-        <button
-          type="submit"
-          disabled={loading}
-          style={{
-            width: '100%',
-            padding: '10px',
-            backgroundColor: '#0d9488',
-            color: 'white',
-            border: 'none',
-            borderRadius: '8px',
-            cursor: 'pointer',
-            fontSize: '14px',
-            fontWeight: '600',
-            marginTop: '4px',
-          }}
-        >
-          {loading ? 'Saving...' : 'Save Appraisal'}
+        <button className="add-appraisal-submit" type="submit" disabled={isBusy}>
+          {phase === 'verifying'
+            ? 'Verifying address…'
+            : phase === 'saving'
+              ? 'Saving appraisal…'
+              : addressIsVerified
+                ? 'Save appraisal'
+                : 'Verify address'}
         </button>
       </form>
-    </div>
+    </section>
   );
 }
 

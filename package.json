@@ -21,6 +21,8 @@
     "start": "react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
+    "test:ci": "react-scripts test --watchAll=false --no-cache",
+    "lint": "eslint src --no-cache",
     "eject": "react-scripts eject"
   },
   "eslintConfig": {

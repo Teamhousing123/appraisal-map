@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react';
 import { supabase } from './supabaseClient';
+import BrandLogo from './components/BrandLogo';
+import './App.css';
 
 const Login = lazy(() => import('./Login'));
 const Map = lazy(() => import('./Map'));
@@ -32,38 +34,30 @@ function App() {
     toastTimerRef.current = setTimeout(() => setToast(null), 2500);
   }, []);
 
-  if (loading) return null;
+  const appLoader = (
+    <div className="app-loader" role="status" aria-live="polite">
+      <BrandLogo className="app-loader__brand" />
+      <span>Preparing appraisal workspace…</span>
+    </div>
+  );
+
+  if (loading) return appLoader;
 
   if (!session) {
     return (
-      <Suspense fallback={null}>
+      <Suspense fallback={appLoader}>
         <Login />
       </Suspense>
     );
   }
 
   return (
-    <div>
-      <Suspense fallback={null}>
-        <Map showToast={showToast} />
+    <div className="app-root">
+      <Suspense fallback={appLoader}>
+        <Map session={session} showToast={showToast} />
       </Suspense>
       {toast && (
-        <div style={{
-          position: 'fixed',
-          bottom: '30px',
-          left: '50%',
-          transform: 'translateX(-50%)',
-          backgroundColor: '#0d9488',
-          color: 'white',
-          padding: '12px 24px',
-          borderRadius: '8px',
-          fontSize: '14px',
-          fontWeight: '500',
-          fontFamily: "'DM Sans', sans-serif",
-          boxShadow: '0 4px 12px rgba(0,0,0,0.15)',
-          zIndex: 9999,
-          animation: 'fadeInUp 0.3s ease-out',
-        }}>
+        <div className="app-toast" role="status" aria-live="polite">
           {toast}
         </div>
       )}
