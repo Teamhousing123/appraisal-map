@@ -1,8 +1,24 @@
 # Appraisal Map
 
-Appraisal Map is a map-first workspace for locating, reviewing, and maintaining property appraisal records. It gives authorized teams a single geographic view of appraisal activity and the documents associated with each property.
+> **Internal company system**
+>
+> Appraisal Map is private operational software for authorized employees and approved contractors. It is not a public service, customer portal, or general-purpose real estate product. Do not share accounts, production URLs, credentials, appraisal records, or attachments outside approved company channels.
 
-The application is designed for company-operated environments. This repository contains the product source; it does not provide public access to company systems, data, or infrastructure.
+Appraisal Map is a map-first workspace for locating, reviewing, and maintaining company appraisal records. It gives authorized staff one geographic view of appraisal activity and the documents associated with each property.
+
+This repository contains the application source. Access to the source does not grant access to a deployed environment, company data, storage, credentials, or infrastructure.
+
+## Authorized use
+
+The application is intended for:
+
+- Appraisal staff who locate prior reports and review nearby property information.
+- Authorized reviewers and managers who need a geographic view of company appraisal activity.
+- Approved maintainers responsible for configuration, security, support, and deployment.
+
+Production access must be provisioned by a company administrator. There is no public registration or anonymous workspace access. Accounts are individual and must not be shared.
+
+The application supports research and report management. It does not produce an automated valuation, rank comparables, or replace professional appraisal judgment. Nearby reports are factual starting points; an appraiser remains responsible for selecting and interpreting any comparable evidence.
 
 ## Overview
 
@@ -19,11 +35,21 @@ Appraisal Map brings the core appraisal workflow into one focused interface:
 
 Map queries are scoped to the visible region and records are loaded in pages, keeping navigation responsive as the dataset grows. Protected files are requested only when needed and accessed through time-limited links.
 
+## Access model
+
+- Authenticated users can view records only when backend policies allow access.
+- Users without an assigned company role remain view-only.
+- Write access is limited to approved roles stored in server-controlled account metadata.
+- Database Row Level Security and private storage policies remain the source of authority.
+- Archiving is reversible and must never fall back to permanent deletion.
+
+Access changes, production support, and suspected security incidents must go through approved company channels.
+
 ## Technology
 
 The client is built with React and integrates Google Maps for the primary workspace. Authentication, structured data, and protected file storage are provided by Supabase. The sign-in screen has no third-party map or font requests, so it stays fast and private before authentication.
 
-## Development
+## Internal development
 
 ### Prerequisites
 
@@ -117,13 +143,13 @@ Appraisal records and their attachments may contain confidential information. Ch
 
 If you discover a vulnerability, do not open a public issue with exploit details, credentials, or customer data. Report it privately to the repository maintainers through an approved company channel.
 
-## Contributing
+## Change control
 
-Keep changes focused, reviewable, and free of operational or customer-specific information. Before opening a pull request:
+Only authorized maintainers may change or deploy this application. Keep changes focused, reviewable, and free of operational, customer-specific, or production data. Before merging a change:
 
 1. Run the test suite and create a production build.
 2. Confirm that no secrets, generated artifacts, or sensitive data were added.
 3. Describe the user impact and any security implications.
 4. Include tests for behavior that can be covered reliably.
 
-Deployment, infrastructure changes, and production access are managed by authorized maintainers outside the public documentation.
+Deployment, infrastructure changes, production access, and incident response are managed by authorized maintainers through company-approved systems.
