@@ -1,3 +1,5 @@
+import { runBoundedOperation } from './operation';
+
 export const LEGACY_APPRAISAL_COLUMNS = Object.freeze([
   'id', 'address', 'city', 'latitude', 'longitude', 'appraisal_date',
   'photo_url', 'pdf_url', 'folder_files', 'created_at',
@@ -51,6 +53,8 @@ export const DEFAULT_PAGE_SIZE = 500;
 export const MAX_RECORDS_PER_BOUNDS_FETCH = 5000;
 export const APPRAISAL_MUTATION_NOT_APPLIED_CODE = 'APPRAISAL_MUTATION_NOT_APPLIED';
 export const APPRAISAL_VERSION_CONFLICT_CODE = 'APPRAISAL_VERSION_CONFLICT';
+export const APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS = 15000;
+export const APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS = 8000;
 
 const CAPABILITY_UNKNOWN = 'unknown';
 const CAPABILITY_SUPPORTED = 'supported';
@@ -168,9 +172,9 @@ function buildPageQuery(
     .order('created_at', { ascending: false })
     .order('id', { ascending: true });
   if (includeDeletedFilter) query = query.is('deleted_at', null);
-  query = applyBounds(query, bounds).range(from, to);
+  query = applyBounds(query, bounds);
   if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
-  return query;
+  return query.range(from, to);
 }
 
 async function fetchWithColumns(
@@ -259,11 +263,18 @@ export async function fetchAppraisalsInBounds(
     MAX_RECORDS_PER_BOUNDS_FETCH,
     MAX_RECORDS_PER_BOUNDS_FETCH
   );
-  const result = await fetchWithAvailableSchema(supabase, normalizedBounds, {
-    pageSize: Math.min(normalizedPageSize, normalizedMaxRecords),
-    maxRecords: normalizedMaxRecords,
-    signal,
-  });
+  const result = await runBoundedOperation(
+    ({ signal: operationSignal }) => fetchWithAvailableSchema(supabase, normalizedBounds, {
+      pageSize: Math.min(normalizedPageSize, normalizedMaxRecords),
+      maxRecords: normalizedMaxRecords,
+      signal: operationSignal,
+    }),
+    {
+      label: 'Appraisal map refresh',
+      timeoutMs: APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS,
+      signal,
+    }
+  );
   return {
     ...result,
     metadataSupported: capabilityFlag(metadataSchemaCapability),
@@ -309,7 +320,7 @@ async function queryPotentialDuplicates(
   return query.limit(3);
 }
 
-export async function findPotentialAppraisalDuplicates(
+async function findPotentialAppraisalDuplicatesInternal(
   supabase,
   { placeId, address, city, appraisalDate, effectiveDate } = {},
   { signal } = {}
@@ -386,6 +397,25 @@ export async function findPotentialAppraisalDuplicates(
     foundationSupported: capabilityFlag(foundationSchemaCapability),
     skipped: false,
   };
+}
+
+export async function findPotentialAppraisalDuplicates(
+  supabase,
+  candidate = {},
+  { signal } = {}
+) {
+  return runBoundedOperation(
+    ({ signal: operationSignal }) => findPotentialAppraisalDuplicatesInternal(
+      supabase,
+      candidate,
+      { signal: operationSignal }
+    ),
+    {
+      label: 'Duplicate report check',
+      timeoutMs: APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS,
+      signal,
+    }
+  );
 }
 
 function payloadContains(payload, columns) {

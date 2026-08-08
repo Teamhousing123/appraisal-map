@@ -402,6 +402,9 @@ function ReportCard({
       </div>
       <h3>{report.address}</h3>
       <p className="report-card__city">{report.city}</p>
+      {report.address_verification_status === 'manual' && (
+        <p className="address-review-status">Manually placed · needs review</p>
+      )}
       <dl className="report-card__facts">
         <div>
           <dt>{date.label}</dt>

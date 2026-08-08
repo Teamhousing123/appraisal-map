@@ -83,6 +83,14 @@ test('keeps a sparse legacy report useful, explains disabled selection, and clea
   expect(onHoverReport).toHaveBeenLastCalledWith(null);
 });
 
+test('labels a manually placed report as needing location review', () => {
+  renderWorkspace({
+    reports: [{ ...report, address_verification_status: 'manual' }],
+  });
+
+  expect(screen.getByText('Manually placed · needs review')).toBeInTheDocument();
+});
+
 test('renders neutral factual differences in comparison view', () => {
   const candidate = {
     ...report,

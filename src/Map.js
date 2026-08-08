@@ -26,7 +26,7 @@ import {
   filterAndSortReports,
   getReportDistanceKm,
 } from './domain/filters';
-import { fetchAppraisalsInBounds } from './services/appraisalService';
+import { fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
 import { createSupportReference, recordTelemetryEvent } from './services/telemetry';
 import SubjectSearch from './components/SubjectSearch';
 import NearbyWorkspace from './components/NearbyWorkspace';
@@ -256,6 +256,17 @@ function showPendingDocument(windowReference, label) {
   document.body.appendChild(status);
 }
 
+function getAddressFailurePresentation(error, fallbackMessage) {
+  const noMatch = error?.code === GEOCODING_ERROR_CODES.ZERO_RESULTS
+    || error?.googleStatus === 'ZERO_RESULTS';
+  const referenceId = noMatch ? '' : createSupportReference('address');
+  const message = error?.message || fallbackMessage;
+  return {
+    message: referenceId ? `${message} Support reference: ${referenceId}.` : message,
+    referenceId,
+  };
+}
+
 function MapView({ session, showToast = () => {} }) {
   const [appraisals, setAppraisals] = useState([]);
   const [loadingReports, setLoadingReports] = useState(false);
@@ -281,6 +292,7 @@ function MapView({ session, showToast = () => {} }) {
   const [manualPlacement, setManualPlacement] = useState({ active: false, location: null });
   const [signingOut, setSigningOut] = useState(false);
   const [googleAuthFailed, setGoogleAuthFailed] = useState(false);
+  const [googleAuthReference, setGoogleAuthReference] = useState('');
 
   const mapRef = useRef(null);
   const mapIdleTimerRef = useRef(null);
@@ -306,6 +318,7 @@ function MapView({ session, showToast = () => {} }) {
 
   const access = useMemo(() => getAppraisalAccess(session), [session]);
   const canMutate = access.canMutate;
+  const isAdmin = access.role === 'admin';
   const candidateIds = useMemo(() => candidates.map((candidate) => candidate.id), [candidates]);
 
   const focusPanelHeading = useCallback(() => {
@@ -486,11 +499,16 @@ function MapView({ session, showToast = () => {} }) {
 
   useEffect(() => {
     const handleGoogleAuthFailure = () => {
+      const referenceId = createSupportReference('maps');
       setGoogleAuthFailed(true);
+      setGoogleAuthReference(referenceId);
       recordTelemetryEvent('address_lookup', {
         outcome: 'failed',
         errorCode: 'REQUEST_DENIED',
         source: 'google',
+        endpoint: 'google_places',
+        googleStatus: 'REQUEST_DENIED',
+        referenceId,
       });
     };
     window.addEventListener(GOOGLE_AUTH_FAILURE_EVENT, handleGoogleAuthFailure);
@@ -610,12 +628,17 @@ function MapView({ session, showToast = () => {} }) {
           title: `${documentLabel === 'PDF' ? 'PDF' : 'Folder'} ready`,
           message: 'Your browser blocked the new tab. Use the button below to continue.',
           persistent: true,
-          action: { label: isFolder ? 'Download folder' : 'Open PDF', href: url },
+          action: {
+            label: isFolder ? 'Download folder' : 'Open PDF',
+            href: url,
+            target: '_self',
+          },
         });
       }
       recordTelemetryEvent('document_open', {
         outcome: 'success',
         documentType: isFolder ? 'folder' : 'pdf',
+        endpoint: 'supabase_storage',
       });
     } catch (error) {
       pendingWindow?.close();
@@ -631,6 +654,8 @@ function MapView({ session, showToast = () => {} }) {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
         documentType: isFolder ? 'folder' : 'pdf',
+        endpoint: 'supabase_storage',
+        referenceId,
       });
     } finally {
       setOpeningReportId(null);
@@ -675,9 +700,21 @@ function MapView({ session, showToast = () => {} }) {
       } catch (error) {
         if (requestId !== autocompleteRequestRef.current) return;
         setSuggestions([]);
+        const failure = getAddressFailurePresentation(
+          error,
+          'Address suggestions are temporarily unavailable.'
+        );
         if (error?.code !== GEOCODING_ERROR_CODES.ZERO_RESULTS) {
-          setSearchError(error?.message || 'Address suggestions are temporarily unavailable.');
+          setSearchError(failure.message);
         }
+        recordTelemetryEvent('address_lookup', {
+          outcome: 'failed',
+          errorCode: error?.code || 'unknown',
+          source: 'google',
+          endpoint: 'google_places',
+          googleStatus: error?.googleStatus || error?.code,
+          referenceId: failure.referenceId,
+        });
       }
     }, AUTOCOMPLETE_DEBOUNCE_MS);
   }, [getPredictions]);
@@ -725,16 +762,28 @@ function MapView({ session, showToast = () => {} }) {
         setPanelOpen(true);
         fitMapToSubjectRadius(nextSubject, 10);
       });
-      recordTelemetryEvent('address_lookup', { outcome: 'success', source: 'google' });
+      recordTelemetryEvent('address_lookup', {
+        outcome: 'success',
+        source: 'google',
+        endpoint: 'google_places',
+        googleStatus: 'OK',
+      });
     } catch (error) {
       if (requestId !== placeDetailsRequestRef.current) return;
       autocompleteSessionTokenRef.current = null;
       setSearchBusy(false);
-      setSearchError(error?.message || 'That location could not be set. Choose another suggested address.');
+      const failure = getAddressFailurePresentation(
+        error,
+        'That location could not be set. Choose another suggested address.'
+      );
+      setSearchError(failure.message);
       recordTelemetryEvent('address_lookup', {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
         source: 'google',
+        endpoint: 'google_places',
+        googleStatus: error?.googleStatus || error?.code,
+        referenceId: failure.referenceId,
       });
     }
   }, [fitMapToSubjectRadius, resolveSuggestion, runWorkspaceAction]);
@@ -755,11 +804,18 @@ function MapView({ session, showToast = () => {} }) {
       if (requestId !== autocompleteRequestRef.current) return;
       setSearchBusy(false);
       setSuggestions([]);
-      setSearchError(error?.message || 'Address search is temporarily unavailable. Try again.');
+      const failure = getAddressFailurePresentation(
+        error,
+        'Address search is temporarily unavailable. Try again.'
+      );
+      setSearchError(failure.message);
       recordTelemetryEvent('address_lookup', {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
         source: 'google',
+        endpoint: 'google_places',
+        googleStatus: error?.googleStatus || error?.code,
+        referenceId: failure.referenceId,
       });
     }
   }, [getPredictions, searchBusy, searchTerm]);
@@ -844,14 +900,15 @@ function MapView({ session, showToast = () => {} }) {
         created,
         ...current.filter((report) => String(report.id) !== String(created.id)),
       ]));
-      setSelectedAppraisal(created);
-      setPanelMode('detail');
+      setSelectedAppraisal(result.continueAdding ? null : created);
+      setPanelMode(result.continueAdding ? 'add' : 'detail');
       setPanelOpen(true);
       lastSuccessfulBoundsKeyRef.current = null;
       lastSuccessfulQueryBoundsRef.current = null;
       focusReportOnMap(created);
     } else {
-      setPanelMode('nearby');
+      setPanelMode(result.continueAdding ? 'add' : 'nearby');
+      setPanelOpen(true);
       refreshCurrentBounds();
     }
     showToast({ tone: result.tone || 'success', message: result.message || 'Appraisal saved.' });
@@ -878,17 +935,93 @@ function MapView({ session, showToast = () => {} }) {
     recordTelemetryEvent('appraisal_mutation', { outcome: 'success', operation: 'update' });
   }, [refreshCurrentBounds, showToast]);
 
-  const handleDeleted = useCallback((message = 'Report removed') => {
+  const handleRestoreArchived = useCallback(async function restoreArchived(archivedAppraisal) {
+    if (!archivedAppraisal?.id) return;
+    showToast({
+      tone: 'info',
+      message: 'Restoring the archived report…',
+      persistent: true,
+    });
+    try {
+      const restoreOptions = Number.isInteger(archivedAppraisal.version)
+        ? { expectedVersion: archivedAppraisal.version }
+        : undefined;
+      const { data, error } = restoreOptions
+        ? await restoreAppraisal(supabase, archivedAppraisal.id, restoreOptions)
+        : await restoreAppraisal(supabase, archivedAppraisal.id);
+      if (error || !data?.id) throw error || new Error('The restored report was not returned.');
+
+      const restored = { ...archivedAppraisal, ...data, deleted_at: null, deleted_by: null };
+      reportRequestRef.current?.abort();
+      setAppraisals((current) => applySpiralOffset([
+        restored,
+        ...current.filter((report) => String(report.id) !== String(restored.id)),
+      ]));
+      setSelectedAppraisal(restored);
+      setPanelMode('detail');
+      setPanelOpen(true);
+      lastSuccessfulBoundsKeyRef.current = null;
+      lastSuccessfulQueryBoundsRef.current = null;
+      focusReportOnMap(restored);
+      showToast({ tone: 'success', message: 'Report restored.' });
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'success',
+        operation: 'restore',
+        endpoint: 'supabase_database',
+      });
+    } catch (error) {
+      const referenceId = createSupportReference('restore');
+      showToast({
+        tone: 'error',
+        title: 'Report not restored',
+        message: 'The report is still archived. Check your connection and try again.',
+        persistent: true,
+        referenceId,
+        action: {
+          label: 'Try again',
+          busyLabel: 'Restoring…',
+          onClick: () => restoreArchived(archivedAppraisal),
+        },
+      });
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'failed',
+        errorCode: error?.code || 'unknown',
+        operation: 'restore',
+        endpoint: 'supabase_database',
+        referenceId,
+      });
+    }
+  }, [focusReportOnMap, showToast]);
+
+  const handleDeleted = useCallback((message = 'Report removed', archivedRecord = null) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
-    if (selectedAppraisal) {
-      setCandidates((current) => current.filter((candidate) => candidate.id !== selectedAppraisal.id));
+    const archivedAppraisal = archivedRecord || selectedAppraisal;
+    if (archivedAppraisal) {
+      setCandidates((current) => current.filter((candidate) => candidate.id !== archivedAppraisal.id));
+      setAppraisals((current) => current.filter(
+        (report) => String(report.id) !== String(archivedAppraisal.id)
+      ));
     }
     setSelectedAppraisal(null);
     setPanelMode('nearby');
     refreshCurrentBounds();
-    showToast({ tone: 'success', message });
+    showToast({
+      tone: 'success',
+      title: 'Report archived',
+      message: typeof message === 'string'
+        ? message
+        : message?.message || 'The report was archived and removed from active results.',
+      persistent: Boolean(archivedAppraisal?.id && canMutate),
+      action: archivedAppraisal?.id && canMutate
+        ? {
+          label: 'Undo archive',
+          busyLabel: 'Restoring…',
+          onClick: () => handleRestoreArchived(archivedAppraisal),
+        }
+        : null,
+    });
     recordTelemetryEvent('appraisal_mutation', { outcome: 'success', operation: 'archive' });
-  }, [refreshCurrentBounds, selectedAppraisal, showToast]);
+  }, [canMutate, handleRestoreArchived, refreshCurrentBounds, selectedAppraisal, showToast]);
 
   const performSignOut = useCallback(async () => {
     if (signingOut) return;
@@ -900,7 +1033,11 @@ function MapView({ session, showToast = () => {} }) {
         'Sign out took too long.'
       );
       if (error) throw error;
-      recordTelemetryEvent('auth_sign_out', { outcome: 'success', online: navigator.onLine });
+      recordTelemetryEvent('auth_sign_out', {
+        outcome: 'success',
+        online: navigator.onLine,
+        endpoint: 'supabase_auth',
+      });
     } catch (error) {
       const referenceId = createSupportReference('signout');
       showToast({
@@ -914,6 +1051,8 @@ function MapView({ session, showToast = () => {} }) {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
         online: navigator.onLine,
+        endpoint: 'supabase_auth',
+        referenceId,
       });
     } finally {
       setSigningOut(false);
@@ -1014,6 +1153,7 @@ function MapView({ session, showToast = () => {} }) {
             ? 'The Google Maps key was rejected. An administrator needs to check its API and website restrictions.'
             : 'Check the connection and mapping configuration, then reload the page.'}
         </p>
+        {googleAuthReference && <small>Support reference: {googleAuthReference}</small>}
         <button type="button" className="button button--primary" onClick={() => window.location.reload()}>Reload</button>
       </main>
     );
@@ -1024,7 +1164,12 @@ function MapView({ session, showToast = () => {} }) {
       <header className="map-header">
         <div className="map-brand" aria-label="Appraisal Map">
           <BrandLogo className="map-brand__logo" />
-          <strong>Appraisal Map</strong>
+          <span className="map-brand__copy">
+            <strong>Appraisal Map</strong>
+            {isAdmin && (
+              <small>{SERVICE_AREA.name} · {SERVICE_AREA.version}</small>
+            )}
+          </span>
         </div>
         <SubjectSearch
           value={searchTerm}
@@ -1078,6 +1223,17 @@ function MapView({ session, showToast = () => {} }) {
             {signingOut ? 'Signing out…' : 'Sign out'}
           </button>
         </nav>
+        {isAdmin && (
+          <small className="map-service-area-mobile">
+            {SERVICE_AREA.name} · {SERVICE_AREA.version}
+          </small>
+        )}
+        {isAdmin && SERVICE_AREA.configurationError && (
+          <div className="map-admin-config-warning" role="alert">
+            <strong>Service area configuration needs attention.</strong>
+            <span>{SERVICE_AREA.configurationError}</span>
+          </div>
+        )}
       </header>
 
       <div className="map-stage">

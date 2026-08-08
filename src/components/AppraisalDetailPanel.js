@@ -24,12 +24,19 @@ import {
 import {
   deleteAppraisal,
   isAppraisalMutationNotAppliedError,
+  isAppraisalVersionConflictError,
   isMissingMetadataSchemaError,
   updateAppraisal,
 } from '../services/appraisalService';
 import AppraisalFormFields from './AppraisalFormFields';
 import AddressPicker from './AddressPicker';
 import { uploadStorageObject } from '../services/resumableUpload';
+import { isAbortError } from '../services/operation';
+import { createSupportReference, recordTelemetryEvent } from '../services/telemetry';
+
+function withSupportReference(message, referenceId) {
+  return referenceId ? `${message} Support reference: ${referenceId}.` : message;
+}
 
 function BackIcon() {
   return (
@@ -345,7 +352,18 @@ function AppraisalDetailPanel({
       return;
     }
     if (metadataSupported === false && metadataHasValue(formSnapshot)) {
-      setError('Property comparison details are temporarily unavailable. Ask an administrator to enable them.');
+      const referenceId = createSupportReference('update');
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'failed',
+        errorCode: 'metadata_unavailable',
+        operation: 'update',
+        endpoint: 'supabase_database',
+        referenceId,
+      });
+      setError(withSupportReference(
+        'Property comparison details are temporarily unavailable. Ask an administrator to enable them.',
+        referenceId
+      ));
       return;
     }
 
@@ -397,21 +415,40 @@ function AppraisalDetailPanel({
     const uploadedPaths = [];
     const oldPaths = [];
     let rowCommitted = false;
+    let failureReferenceId = '';
     const uploadController = new AbortController();
     uploadControllerRef.current = uploadController;
 
     const uploadObject = async (bucket, path, file, label, contentType) => {
       setStatus(`Uploading ${label}…`);
       setUploadProgress({ label, percent: 0 });
-      const result = await uploadStorageObject(supabase, bucket, path, file, {
-        signal: uploadController.signal,
-        forceResumable: true,
-        contentType,
-        onProgress: ({ percent }) => setUploadProgress({ label, percent }),
-      });
-      if (result.error) throw result.error;
-      setUploadProgress({ label, percent: 100 });
-      return result;
+      try {
+        const result = await uploadStorageObject(supabase, bucket, path, file, {
+          signal: uploadController.signal,
+          forceResumable: true,
+          contentType,
+          onProgress: ({ percent }) => setUploadProgress({ label, percent }),
+        });
+        if (result.error) throw result.error;
+        setUploadProgress({ label, percent: 100 });
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: 'success',
+          operation: 'upload',
+          endpoint: 'supabase_storage',
+        });
+        return result;
+      } catch (uploadError) {
+        const cancelled = isAbortError(uploadError);
+        if (!cancelled) failureReferenceId ||= createSupportReference('upload');
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: cancelled ? 'cancelled' : 'failed',
+          errorCode: uploadError?.code || 'unknown',
+          operation: 'upload',
+          endpoint: 'supabase_storage',
+          referenceId: failureReferenceId,
+        });
+        throw uploadError;
+      }
     };
 
     try {
@@ -522,6 +559,7 @@ function AppraisalDetailPanel({
         if (isMissingMetadataSchemaError(result.error)) {
           const migrationError = new Error('Property comparison details are temporarily unavailable. Ask an administrator to enable them.');
           migrationError.isUserFacing = true;
+          migrationError.isInfrastructureFailure = true;
           throw migrationError;
         }
         throw result.error;
@@ -530,9 +568,16 @@ function AppraisalDetailPanel({
 
       const cleanupFailures = await cleanupUploadedObjects(supabase, oldPaths);
       const updatedAppraisal = { ...appraisal, ...committedUpdates, ...(result.data || {}) };
-      const updateMessage = cleanupFailures.length > 0
-        ? 'Report updated. An old file could not be removed and should be reviewed.'
-        : 'Report updated';
+      const updateMessage = 'Report updated';
+
+      if (cleanupFailures.length > 0) {
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: 'failed',
+          errorCode: 'cleanup_failed',
+          operation: 'cleanup',
+          endpoint: 'supabase_storage',
+        });
+      }
 
       setEditing(false);
       onUpdated(updateMessage, updatedAppraisal);
@@ -540,16 +585,53 @@ function AppraisalDetailPanel({
       const rollbackFailures = rowCommitted
         ? []
         : await cleanupUploadedObjects(supabase, uploadedPaths);
-      const cleanupWarning = rollbackFailures.length > 0
-        ? ' An administrator may need to remove an incomplete file upload.'
+      const cancelled = isAbortError(saveError);
+      const versionConflict = isAppraisalVersionConflictError(saveError);
+      const requiresSupport = !cancelled && !versionConflict && (
+        rowCommitted
+        || failureReferenceId
+        || saveError?.isInfrastructureFailure
+        || isAppraisalMutationNotAppliedError(saveError)
+        || !saveError?.isUserFacing
+      );
+      const referenceId = requiresSupport
+        ? failureReferenceId || createSupportReference('update')
         : '';
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: cancelled ? 'cancelled' : 'failed',
+        errorCode: saveError?.code || 'unknown',
+        operation: rowCommitted ? 'update_refresh' : 'update',
+        endpoint: rowCommitted
+          ? undefined
+          : failureReferenceId
+            ? 'supabase_storage'
+            : 'supabase_database',
+        referenceId,
+      });
+      if (rollbackFailures.length > 0) {
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: 'failed',
+          errorCode: 'cleanup_failed',
+          operation: 'cleanup',
+          endpoint: 'supabase_storage',
+          referenceId,
+        });
+      }
 
-      if (rowCommitted) {
-        setError('The report was updated, but the workspace could not refresh. Reopen nearby reports to confirm it.');
+      if (cancelled) {
+        setError('Upload cancelled. No report changes were confirmed.');
+      } else if (rowCommitted) {
+        setError(withSupportReference(
+          'The report was updated, but the workspace could not refresh. Reopen nearby reports to confirm it.',
+          referenceId
+        ));
       } else if (saveError.isUserFacing || isAppraisalMutationNotAppliedError(saveError)) {
-        setError(`${saveError.message}${cleanupWarning}`);
+        setError(withSupportReference(saveError.message, referenceId));
       } else {
-        setError(`The report could not be updated. No changes were confirmed. Try again.${cleanupWarning}`);
+        setError(withSupportReference(
+          'The report could not be updated. No changes were confirmed, and your form is still here. Try again or contact support.',
+          referenceId
+        ));
       }
     } finally {
       uploadControllerRef.current = null;
@@ -566,21 +648,42 @@ function AppraisalDetailPanel({
       const archiveOptions = Number.isInteger(appraisal.version)
         ? { expectedVersion: appraisal.version }
         : undefined;
-      const { error: rowError, deletedId } = archiveOptions
+      const { error: rowError, deletedId, data: archivedRecord } = archiveOptions
         ? await deleteAppraisal(supabase, appraisal.id, archiveOptions)
         : await deleteAppraisal(supabase, appraisal.id);
       if (rowError || String(deletedId) !== String(appraisal.id)) {
         throw rowError || new Error('The report archive could not be confirmed.');
       }
       rowArchived = true;
-      onDeleted('Report archived. Its files and database record were preserved.');
+      onDeleted('Report archived. Its files and database record were preserved.', archivedRecord);
     } catch (deleteError) {
+      const versionConflict = isAppraisalVersionConflictError(deleteError);
+      const requiresSupport = !versionConflict && (
+        rowArchived
+        || isAppraisalMutationNotAppliedError(deleteError)
+        || !deleteError?.isUserFacing
+      );
+      const referenceId = requiresSupport ? createSupportReference('archive') : '';
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'failed',
+        errorCode: deleteError?.code || 'unknown',
+        operation: rowArchived ? 'archive_refresh' : 'archive',
+        endpoint: rowArchived ? undefined : 'supabase_database',
+        referenceId,
+      });
+
       if (rowArchived) {
-        setError('The report was archived, but the workspace could not refresh. Reload nearby reports to confirm it.');
+        setError(withSupportReference(
+          'The report was archived, but the workspace could not refresh. Reload nearby reports to confirm it.',
+          referenceId
+        ));
       } else if (deleteError?.isUserFacing || isAppraisalMutationNotAppliedError(deleteError)) {
-        setError(deleteError.message);
+        setError(withSupportReference(deleteError.message, referenceId));
       } else {
-        setError('The report could not be archived. It remains visible and unchanged. Check your permission and try again.');
+        setError(withSupportReference(
+          'The report could not be archived. It remains visible and unchanged. Check your permission and try again.',
+          referenceId
+        ));
       }
     } finally {
       setDeleting(false);
@@ -786,6 +889,9 @@ function AppraisalDetailPanel({
         )}
         <h3>{appraisal.address}</h3>
         <p className="detail-panel__city">{appraisal.city}</p>
+        {appraisal.address_verification_status === 'manual' && (
+          <p className="address-review-status">Manually placed · needs review</p>
+        )}
         <dl className="detail-facts">
           <div><dt>{dateLabel}</dt><dd>{formatDateOnly(dateValue)}</dd></div>
           {appraisal.effective_date && appraisal.appraisal_date && (

@@ -387,6 +387,15 @@
   font-weight: 700;
 }
 
+.add-appraisal-actions {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.add-appraisal-repeat {
+  width: 100%;
+}
+
 .detail-document-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

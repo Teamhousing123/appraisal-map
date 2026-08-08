@@ -4,6 +4,7 @@ import AppraisalDetailPanel from './AppraisalDetailPanel';
 import { geocodeFullOntarioAddress } from '../domain/geocoding';
 import { deleteAppraisal, updateAppraisal } from '../services/appraisalService';
 import { supabase } from '../supabaseClient';
+import { configureTelemetrySink } from '../services/telemetry';
 
 let uploadObject;
 let removeObject;
@@ -71,6 +72,16 @@ beforeEach(() => {
   });
 });
 
+afterEach(() => configureTelemetrySink(null));
+
+test('keeps manual address placement visible in report details', () => {
+  renderPanel({
+    appraisal: { ...appraisal, address_verification_status: 'manual' },
+  });
+
+  expect(screen.getByText('Manually placed · needs review')).toBeInTheDocument();
+});
+
 test('uses a real busy form and saves only the matching verified coordinates', async () => {
   updateAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null });
   const view = renderPanel();
@@ -132,6 +143,18 @@ test('does not clean storage when archiving is not confirmed for the exact row',
 });
 
 test('archives a report without deleting its private files', async () => {
+  const telemetrySink = jest.fn();
+  configureTelemetrySink(telemetrySink);
+  const archivedRecord = {
+    id: appraisal.id,
+    deleted_at: '2026-08-07T20:00:00.000Z',
+    version: 2,
+  };
+  deleteAppraisal.mockResolvedValue({
+    data: archivedRecord,
+    error: null,
+    deletedId: appraisal.id,
+  });
   const view = renderPanel({
     appraisal: {
       ...appraisal,
@@ -144,9 +167,40 @@ test('archives a report without deleting its private files', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Archive report' }));
 
   await waitFor(() => expect(view.onDeleted).toHaveBeenCalledWith(
-    'Report archived. Its files and database record were preserved.'
+    'Report archived. Its files and database record were preserved.',
+    archivedRecord
   ));
   expect(supabase.storage.from).not.toHaveBeenCalled();
+  await Promise.resolve();
+  expect(telemetrySink).not.toHaveBeenCalled();
+});
+
+test('adds a privacy-safe support reference when archive infrastructure fails', async () => {
+  const telemetrySink = jest.fn();
+  configureTelemetrySink(telemetrySink);
+  deleteAppraisal.mockRejectedValue(Object.assign(new Error('offline'), {
+    code: 'NETWORK_ERROR',
+  }));
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Archive report' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(/Support reference: ARCHIVE-[A-Z0-9]{8}/i);
+  await waitFor(() => expect(telemetrySink).toHaveBeenCalled());
+  const telemetry = telemetrySink.mock.calls.map(([payload]) => payload);
+  expect(telemetry).toEqual([
+    expect.objectContaining({
+      attributes: expect.objectContaining({
+        outcome: 'failed',
+        errorCode: 'NETWORK_ERROR',
+        operation: 'archive',
+        endpoint: 'supabase_database',
+      }),
+    }),
+  ]);
+  expect(JSON.stringify(telemetry)).not.toMatch(/synthetic-record|Example Road|Aurora/i);
 });
 
 test('exposes every legacy folder with privacy-safe labels', () => {
@@ -174,6 +228,8 @@ test('exposes every legacy folder with privacy-safe labels', () => {
 });
 
 test('rolls back newly uploaded edit assets when the update throws', async () => {
+  const telemetrySink = jest.fn();
+  configureTelemetrySink(telemetrySink);
   updateAppraisal.mockRejectedValue(new Error('offline'));
   renderPanel();
   fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
@@ -185,9 +241,21 @@ test('rolls back newly uploaded edit assets when the update throws', async () =>
 
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent(/No changes were confirmed/i);
+  expect(alert).toHaveTextContent(/Support reference: UPDATE-[A-Z0-9]{8}/i);
   expect(alert).toHaveFocus();
   expect(uploadObject).toHaveBeenCalledTimes(1);
   expect(removeObject).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(telemetrySink).toHaveBeenCalled());
+  const telemetry = telemetrySink.mock.calls.map(([payload]) => payload);
+  expect(telemetry).toEqual(expect.arrayContaining([
+    expect.objectContaining({
+      attributes: expect.objectContaining({ outcome: 'success', operation: 'upload' }),
+    }),
+    expect.objectContaining({
+      attributes: expect.objectContaining({ outcome: 'failed', operation: 'update' }),
+    }),
+  ]));
+  expect(JSON.stringify(telemetry)).not.toMatch(/private-house|synthetic-record|\.jpg/i);
 });
 
 test('explicitly removes existing photo and document attachments on save', async () => {

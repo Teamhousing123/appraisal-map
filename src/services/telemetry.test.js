@@ -2,6 +2,7 @@ import {
   configureTelemetrySink,
   createSupportReference,
   recordTelemetryEvent,
+  sanitizeTelemetryAttributes,
 } from './telemetry';
 
 afterEach(() => configureTelemetrySink(null));
@@ -34,3 +35,39 @@ test('creates opaque support references without user or report data', () => {
   expect(createSupportReference('map')).toMatch(/^MAP-[A-Z0-9]{8}$/);
 });
 
+test('allows only categorical endpoint, Google status, and opaque support references', () => {
+  expect(sanitizeTelemetryAttributes('address_lookup', {
+    endpoint: 'google_geocoding',
+    googleStatus: 'ZERO_RESULTS',
+    referenceId: 'MAP-ABC12345',
+  })).toEqual({
+    endpoint: 'google_geocoding',
+    googleStatus: 'ZERO_RESULTS',
+    referenceId: 'MAP-ABC12345',
+  });
+
+  const rejected = sanitizeTelemetryAttributes('address_lookup', {
+    endpoint: 'https://maps.googleapis.com/geocode?address=56+Private+Street',
+    googleStatus: '56 Private Street',
+    referenceId: 'eyJhbGciOiJIUzI1NiJ9.private-token.signature',
+    address: '56 Private Street',
+    fileName: 'private-report.pdf',
+    token: 'private-access-token',
+  });
+  expect(rejected).toEqual({});
+  expect(JSON.stringify(rejected)).not.toMatch(/Private|pdf|token/i);
+});
+
+test('automatically includes sanitized app version and release metadata', () => {
+  const payload = recordTelemetryEvent('app_boot', {
+    outcome: 'success',
+    appVersion: 'caller-cannot-override',
+    release: 'caller-cannot-override',
+  });
+
+  expect(payload.appVersion).toMatch(/^[a-z0-9_.-]{1,64}$/i);
+  expect(payload.release).toMatch(/^[a-z0-9_.-]{1,64}$/i);
+  expect(payload.appVersion).not.toBe('caller-cannot-override');
+  expect(payload.release).not.toBe('caller-cannot-override');
+  expect(payload.attributes).toEqual({ outcome: 'success' });
+});

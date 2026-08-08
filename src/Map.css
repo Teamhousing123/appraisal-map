@@ -56,10 +56,49 @@
   box-shadow: 0 1px 3px rgba(20, 44, 46, 0.14);
 }
 
+.map-brand__copy {
+  display: grid;
+  gap: 1px;
+}
+
 .map-brand strong {
   font-size: 14px;
   font-weight: 750;
   letter-spacing: -0.015em;
+}
+
+.map-brand small {
+  max-width: 220px;
+  overflow: hidden;
+  color: var(--map-muted);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-admin-config-warning {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: -2px;
+  padding: 7px 9px;
+  border: 1px solid rgba(180, 83, 9, 0.28);
+  border-radius: 7px;
+  color: #78400a;
+  background: var(--map-subject-soft);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.map-admin-config-warning strong {
+  flex: none;
+}
+
+.map-service-area-mobile {
+  display: none;
 }
 
 .map-header__actions {
@@ -245,7 +284,7 @@
   top: 50%;
   right: 11px;
   color: var(--map-muted);
-  font-size: 11px;
+  font-size: 12px;
   transform: translateY(-50%);
 }
 
@@ -317,7 +356,7 @@
 .subject-search__clear-copy {
   display: block;
   min-width: 0;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .subject-search__clear-copy span {
@@ -682,14 +721,14 @@
 .report-filters summary > span:last-child {
   margin-left: auto;
   color: var(--map-faint);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 600;
 }
 
 .subject-facts > p {
   margin: 0 11px 10px;
   color: var(--map-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -779,7 +818,7 @@
   top: 50%;
   right: 9px;
   color: var(--map-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-style: normal;
   transform: translateY(-50%);
 }
@@ -898,7 +937,7 @@
 .report-card__topline p {
   margin: 0;
   color: var(--map-teal);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
   letter-spacing: 0.045em;
   text-transform: uppercase;
@@ -909,7 +948,7 @@
   border-radius: 10px;
   color: var(--map-muted);
   background: var(--map-inset);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -929,6 +968,19 @@
   font-size: 12px;
 }
 
+.address-review-status {
+  width: fit-content;
+  margin: 6px 0 10px;
+  padding: 4px 7px;
+  border: 1px solid rgba(180, 83, 9, 0.22);
+  border-radius: 6px;
+  color: #74420d;
+  background: var(--map-subject-soft);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
 .report-card__facts {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -944,7 +996,7 @@
 .detail-facts dt {
   margin: 0 0 2px;
   color: var(--map-faint);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.045em;
   text-transform: uppercase;
@@ -955,7 +1007,7 @@
   margin: 0;
   overflow: hidden;
   color: var(--map-ink-soft);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -965,7 +1017,7 @@
 .report-card__sparse {
   margin: 0 0 10px;
   color: var(--map-faint);
-  font-size: 11px;
+  font-size: 12px;
   font-style: italic;
 }
 
@@ -1072,7 +1124,7 @@
 
 .compare-tray span {
   color: var(--map-muted);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .compare-tray .button {
@@ -1138,7 +1190,7 @@
 .comparison-caveat {
   margin: 12px 0 16px;
   color: var(--map-muted);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
@@ -1162,7 +1214,7 @@
   border-right: 1px solid rgba(25, 52, 55, 0.08);
   border-bottom: 1px solid rgba(25, 52, 55, 0.08);
   color: var(--map-ink-soft);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.4;
   text-align: left;
   vertical-align: top;
@@ -1187,7 +1239,7 @@
 .comparison-desktop tbody th {
   width: 142px;
   color: var(--map-muted);
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 720;
 }
 
@@ -1197,7 +1249,7 @@
   display: block;
   margin-bottom: 3px;
   color: var(--map-faint);
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -1217,7 +1269,7 @@
   border: 0;
   color: var(--map-muted);
   background: transparent;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 650;
   text-decoration: underline;
   cursor: pointer;
@@ -1226,7 +1278,7 @@
 .comparison-report-row .button {
   min-height: 34px;
   padding: 5px 8px;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .comparison-mobile {
@@ -1250,7 +1302,7 @@
   overflow: hidden;
   color: var(--map-muted);
   background: #e9ede8;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .detail-photo img {
@@ -1406,7 +1458,7 @@
 }
 
 .address-match span {
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 750;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -1687,14 +1739,25 @@
     display: none;
   }
 
+  .map-brand small {
+    max-width: 118px;
+  }
+
+  .map-admin-config-warning {
+    align-items: flex-start;
+    gap: 2px;
+    flex-direction: column;
+  }
+
   .map-header__actions {
     gap: 4px;
   }
 
   .map-header__actions .button {
     min-height: 44px;
-    padding: 7px 8px;
-    font-size: 11px;
+    padding: 7px 6px;
+    font-size: 12px;
+    white-space: nowrap;
   }
 
   .map-header__actions .button svg {
@@ -1737,8 +1800,9 @@
     right: 10px;
   }
 
-  .map-camera-controls button {
-    min-height: 40px;
+  .map-camera-controls button,
+  .manual-placement-guide button {
+    min-height: 44px;
     padding-inline: 9px;
     font-size: 12px;
   }
@@ -1833,7 +1897,7 @@
   .comparison-mobile__card dt {
     grid-column: 1 / -1;
     color: var(--map-faint);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 750;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -1850,7 +1914,7 @@
     display: block;
     margin-bottom: 2px;
     color: var(--map-faint);
-    font-size: 10px;
+    font-size: 12px;
     font-weight: 700;
     text-transform: uppercase;
   }
@@ -1870,6 +1934,22 @@
     grid-column: 2;
     grid-row: 1;
     justify-content: flex-end;
+  }
+
+  .map-brand small {
+    display: none;
+  }
+
+  .map-service-area-mobile {
+    grid-row: 3;
+    grid-column: 1 / -1;
+    display: block;
+    margin-top: -2px;
+    overflow-wrap: anywhere;
+    color: var(--map-muted);
+    font-size: 12px;
+    font-weight: 600;
+    line-height: 1.3;
   }
 
   .subject-search {

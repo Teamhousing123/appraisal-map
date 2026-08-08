@@ -1,6 +1,8 @@
 import {
   APPRAISAL_MUTATION_NOT_APPLIED_CODE,
   APPRAISAL_VERSION_CONFLICT_CODE,
+  APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS,
+  APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS,
   CURRENT_APPRAISAL_SELECT,
   EXTENDED_APPRAISAL_SELECT,
   createAppraisalIdempotencyKey,
@@ -15,6 +17,7 @@ import {
   resetAppraisalSchemaCapabilities,
   updateAppraisal,
 } from './appraisalService';
+import { OPERATION_ERROR_CODES } from './operation';
 
 const bounds = { north: 44, south: 43, east: -78, west: -80 };
 
@@ -42,7 +45,10 @@ function createReadClient(responder) {
           calls.push({ ...state, from, to });
           return responder({ ...state, from, to });
         }),
-        abortSignal: jest.fn(() => builder),
+        abortSignal: jest.fn((signal) => {
+          state.signal = signal;
+          return builder;
+        }),
       };
       return builder;
     }),
@@ -90,7 +96,10 @@ function createDuplicateClient(responder) {
           return query;
         }),
         order: jest.fn(() => query),
-        abortSignal: jest.fn(() => query),
+        abortSignal: jest.fn((signal) => {
+          state.signal = signal;
+          return query;
+        }),
         limit: jest.fn((limit) => {
           const call = { ...state, filters: [...state.filters], limit };
           calls.push(call);
@@ -100,6 +109,18 @@ function createDuplicateClient(responder) {
       return query;
     }),
   };
+}
+
+function pendingUntilAborted(signal) {
+  return new Promise((_resolve, reject) => {
+    const rejectAbort = () => {
+      const error = new Error('request aborted');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    if (signal?.aborted) rejectAbort();
+    else signal?.addEventListener('abort', rejectAbort, { once: true });
+  });
 }
 
 describe('appraisal service schema compatibility', () => {
@@ -247,6 +268,70 @@ describe('appraisal service schema compatibility', () => {
       foundationSupported: false,
       skipped: false,
     });
+  });
+
+  it('bounds report refreshes and forwards parent cancellation to the database query', async () => {
+    const controller = new AbortController();
+    let databaseSignal;
+    const client = createReadClient(({ signal }) => {
+      databaseSignal = signal;
+      return pendingUntilAborted(signal);
+    });
+
+    const pending = fetchAppraisalsInBounds(client, bounds, { signal: controller.signal });
+    await Promise.resolve();
+    controller.abort('map moved');
+
+    await expect(pending).rejects.toMatchObject({ code: OPERATION_ERROR_CODES.ABORTED });
+    expect(databaseSignal).toBeDefined();
+    expect(databaseSignal).not.toBe(controller.signal);
+    expect(databaseSignal.aborted).toBe(true);
+  });
+
+  it('times out a stalled report refresh and aborts its database query', async () => {
+    jest.useFakeTimers();
+    let databaseSignal;
+    const client = createReadClient(({ signal }) => {
+      databaseSignal = signal;
+      return pendingUntilAborted(signal);
+    });
+
+    try {
+      const pending = fetchAppraisalsInBounds(client, bounds);
+      await Promise.resolve();
+      await Promise.resolve();
+      jest.advanceTimersByTime(APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS);
+
+      await expect(pending).rejects.toMatchObject({ code: OPERATION_ERROR_CODES.TIMEOUT });
+      expect(databaseSignal?.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('times out a stalled duplicate check so saving can continue with a warning', async () => {
+    jest.useFakeTimers();
+    let databaseSignal;
+    const client = createDuplicateClient(({ signal }) => {
+      databaseSignal = signal;
+      return pendingUntilAborted(signal);
+    });
+
+    try {
+      const pending = findPotentialAppraisalDuplicates(client, {
+        address: '10 Example Road',
+        city: 'Aurora',
+        appraisalDate: '2026-08-07',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      jest.advanceTimersByTime(APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS);
+
+      await expect(pending).rejects.toMatchObject({ code: OPERATION_ERROR_CODES.TIMEOUT });
+      expect(databaseSignal?.aborted).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

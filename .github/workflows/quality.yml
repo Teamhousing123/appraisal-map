@@ -38,7 +38,7 @@ jobs:
       - name: Lint source
         run: npm run lint
 
-      - name: Run tests
+      - name: Run tests and accessibility checks
         run: npm run test:ci
 
       - name: Build production bundle

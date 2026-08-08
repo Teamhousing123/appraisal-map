@@ -81,7 +81,7 @@
 
 .app-toast__content small {
   opacity: 0.78;
-  font-size: 10px;
+  font-size: 12px;
   font-weight: 600;
 }
 
@@ -94,7 +94,7 @@
   color: inherit;
   background: rgba(255, 255, 255, 0.12);
   font: inherit;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
   line-height: 20px;
   text-decoration: none;

@@ -23,14 +23,25 @@ function normalizeNotice(notice) {
 
   if (!notice?.message) return null;
   const tone = ['error', 'success'].includes(notice.tone) ? notice.tone : 'info';
+  const action = notice.action?.label && typeof notice.action.onClick === 'function'
+    ? {
+      label: notice.action.label,
+      onClick: notice.action.onClick,
+      busyLabel: notice.action.busyLabel || 'Working…',
+    }
+    : notice.action?.href && notice.action?.label
+      ? {
+        href: notice.action.href,
+        label: notice.action.label,
+        target: notice.action.target === '_self' ? '_self' : '_blank',
+      }
+      : null;
   return {
     title: typeof notice.title === 'string' ? notice.title : '',
     message: notice.message,
     tone,
     referenceId: typeof notice.referenceId === 'string' ? notice.referenceId : '',
-    action: notice.action?.href && notice.action?.label
-      ? { href: notice.action.href, label: notice.action.label }
-      : null,
+    action,
     duration: notice.persistent
       ? 0
       : Number.isFinite(notice.duration)
@@ -45,6 +56,7 @@ function App() {
   const [startupIssue, setStartupIssue] = useState('');
   const [sessionAttempt, setSessionAttempt] = useState(0);
   const [notice, setNotice] = useState(null);
+  const [noticeActionBusy, setNoticeActionBusy] = useState(false);
   const [isOnline, setIsOnline] = useState(() => navigator.onLine !== false);
   const [loginMessage, setLoginMessage] = useState('');
   const toastTimerRef = useRef(null);
@@ -116,12 +128,23 @@ function App() {
     const normalizedNotice = normalizeNotice(nextNotice);
     if (!normalizedNotice) return;
 
+    setNoticeActionBusy(false);
     setNotice(normalizedNotice);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     if (normalizedNotice.duration > 0) {
       toastTimerRef.current = setTimeout(() => setNotice(null), normalizedNotice.duration);
     }
   }, []);
+
+  const runNoticeAction = useCallback(async (actionToRun) => {
+    if (noticeActionBusy || typeof actionToRun?.onClick !== 'function') return;
+    setNoticeActionBusy(true);
+    try {
+      await actionToRun.onClick();
+    } finally {
+      setNoticeActionBusy(false);
+    }
+  }, [noticeActionBusy]);
 
   const appLoader = (
     <div className="app-loader" role="status" aria-live="polite">
@@ -192,8 +215,23 @@ function App() {
             <span>{notice.message}</span>
             {notice.referenceId && <small>Support reference: {notice.referenceId}</small>}
           </span>
-          {notice.action && (
-            <a href={notice.action.href} target="_blank" rel="noreferrer">{notice.action.label}</a>
+          {notice.action?.onClick && (
+            <button
+              type="button"
+              onClick={() => runNoticeAction(notice.action)}
+              disabled={noticeActionBusy}
+            >
+              {noticeActionBusy ? notice.action.busyLabel : notice.action.label}
+            </button>
+          )}
+          {notice.action?.href && (
+            <a
+              href={notice.action.href}
+              target={notice.action.target}
+              rel={notice.action.target === '_blank' ? 'noreferrer' : undefined}
+            >
+              {notice.action.label}
+            </a>
           )}
           <button type="button" onClick={() => setNotice(null)} aria-label="Dismiss notification">
             Close

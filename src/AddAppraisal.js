@@ -8,6 +8,7 @@ import {
 import { validateOptionalDateOrder } from './domain/dates';
 import {
   addressFingerprint,
+  GEOCODING_ERROR_CODES,
   geocodeFullOntarioAddress,
   toNormalizedAddressColumns,
 } from './domain/geocoding';
@@ -28,6 +29,8 @@ import {
   insertAppraisal,
   isMissingMetadataSchemaError,
 } from './services/appraisalService';
+import { isAbortError, OPERATION_ERROR_CODES } from './services/operation';
+import { createSupportReference, recordTelemetryEvent } from './services/telemetry';
 import { supabase } from './supabaseClient';
 import { uploadStorageObject } from './services/resumableUpload';
 
@@ -36,6 +39,22 @@ const EMPTY_PROPERTY_DETAILS = {
   reportedLivingAreaSqFt: '',
   yearBuilt: '',
 };
+
+const MANUAL_PLACEMENT_ERROR_CODES = new Set([
+  GEOCODING_ERROR_CODES.ZERO_RESULTS,
+  GEOCODING_ERROR_CODES.RATE_LIMITED,
+  GEOCODING_ERROR_CODES.SERVICE_LOADING,
+  GEOCODING_ERROR_CODES.SERVICE_UNAVAILABLE,
+  OPERATION_ERROR_CODES.TIMEOUT,
+]);
+
+function createCommandId() {
+  return window.crypto?.randomUUID?.() || `create-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function withSupportReference(message, referenceId) {
+  return referenceId ? `${message} Support reference: ${referenceId}.` : message;
+}
 
 function AddAppraisal({
   onAdded,
@@ -63,14 +82,14 @@ function AddAppraisal({
   const [preparationProgress, setPreparationProgress] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [potentialDuplicates, setPotentialDuplicates] = useState([]);
+  const [saveIntent, setSaveIntent] = useState(null);
   const alertRef = useRef(null);
   const photoInputRef = useRef(null);
   const pdfInputRef = useRef(null);
   const folderInputRef = useRef(null);
   const uploadControllerRef = useRef(null);
-  const createCommandIdRef = useRef(
-    window.crypto?.randomUUID?.() || `create-${Date.now()}-${Math.random().toString(36).slice(2)}`
-  );
+  const saveIntentRef = useRef('open');
+  const createCommandIdRef = useRef(createCommandId());
 
   const isBusy = phase !== 'idle';
   const currentAddressFingerprint = addressFingerprint(address, city);
@@ -109,7 +128,12 @@ function AddAppraisal({
   }, [error]);
 
   useEffect(() => {
-    if (!manualPlacement.active || !manualPlacement.location) return;
+    if (
+      !manualPlacement.active
+      || !manualPlacement.location
+      || !address.trim()
+      || !city.trim()
+    ) return;
     const { latitude, longitude } = manualPlacement.location;
     setVerifiedAddress({
       formattedAddress: `${address.trim()}, ${city.trim()}`,
@@ -210,8 +234,38 @@ function AddAppraisal({
     setFolderFiles(selectedFiles);
   };
 
+  const resetForAnotherAppraisal = () => {
+    setAddress('');
+    setCity('');
+    setAppraisalDate('');
+    setEffectiveDate('');
+    setPropertyDetails({ ...EMPTY_PROPERTY_DETAILS });
+    setPhoto(null);
+    setUploadType('pdf');
+    setPdf(null);
+    setFolderFiles([]);
+    setError('');
+    setStatus('Appraisal saved. Add the next address when ready.');
+    setFieldErrors({});
+    setVerifiedAddress(null);
+    setManualPlacementAvailable(false);
+    setPreparationProgress(null);
+    setUploadProgress(null);
+    setPotentialDuplicates([]);
+    createCommandIdRef.current = createCommandId();
+    if (photoInputRef.current) photoInputRef.current.value = '';
+    if (pdfInputRef.current) pdfInputRef.current.value = '';
+    if (folderInputRef.current) folderInputRef.current.value = '';
+    window.requestAnimationFrame(() => {
+      document.getElementById('appraisal-address-street')?.focus();
+    });
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
+    const submittedIntent = event.nativeEvent?.submitter?.value || saveIntentRef.current;
+    const continueAdding = submittedIntent === 'add_another';
+    saveIntentRef.current = 'open';
     setError('');
     setStatus('');
 
@@ -255,13 +309,23 @@ function AddAppraisal({
     }
 
     if (metadataSupported === false && hasEnteredMetadata) {
-      setError(
-        'Property comparison details are temporarily unavailable. Ask an administrator to enable them. Your files have not been uploaded.'
-      );
+      const referenceId = createSupportReference('create');
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'failed',
+        errorCode: 'metadata_unavailable',
+        operation: 'create',
+        endpoint: 'supabase_database',
+        referenceId,
+      });
+      setError(withSupportReference(
+        'Property comparison details are temporarily unavailable. Ask an administrator to enable them. Your files have not been uploaded.',
+        referenceId
+      ));
       return;
     }
 
     setFieldErrors({});
+    setSaveIntent(continueAdding ? 'add_another' : 'open');
 
     let resolvedAddress = addressIsVerified ? verifiedAddress : null;
 
@@ -284,7 +348,8 @@ function AddAppraisal({
       } catch (geocodeError) {
         setError(geocodeError.message);
         setPhase('idle');
-        setManualPlacementAvailable(geocodeError?.code === 'ZERO_RESULTS');
+        setSaveIntent(null);
+        setManualPlacementAvailable(MANUAL_PLACEMENT_ERROR_CODES.has(geocodeError?.code));
         return;
       }
     }
@@ -303,6 +368,7 @@ function AddAppraisal({
           setPotentialDuplicates(duplicateResult.data);
           setStatus('A report may already exist for this property and date. Review the note below before continuing.');
           setPhase('idle');
+          setSaveIntent(null);
           return;
         }
       } catch {
@@ -315,21 +381,40 @@ function AddAppraisal({
     setUploadProgress(null);
     const uploadedStoragePaths = [];
     let rowCommitted = false;
+    let failureReferenceId = '';
     const uploadController = new AbortController();
     uploadControllerRef.current = uploadController;
 
     const uploadObject = async (bucket, path, file, label, contentType) => {
       setStatus(`Uploading ${label}…`);
       setUploadProgress({ label, percent: 0 });
-      const result = await uploadStorageObject(supabase, bucket, path, file, {
-        signal: uploadController.signal,
-        forceResumable: true,
-        contentType,
-        onProgress: ({ percent }) => setUploadProgress({ label, percent }),
-      });
-      if (result.error) throw result.error;
-      setUploadProgress({ label, percent: 100 });
-      return result;
+      try {
+        const result = await uploadStorageObject(supabase, bucket, path, file, {
+          signal: uploadController.signal,
+          forceResumable: true,
+          contentType,
+          onProgress: ({ percent }) => setUploadProgress({ label, percent }),
+        });
+        if (result.error) throw result.error;
+        setUploadProgress({ label, percent: 100 });
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: 'success',
+          operation: 'upload',
+          endpoint: 'supabase_storage',
+        });
+        return result;
+      } catch (uploadError) {
+        const cancelled = isAbortError(uploadError);
+        if (!cancelled) failureReferenceId ||= createSupportReference('upload');
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: cancelled ? 'cancelled' : 'failed',
+          errorCode: uploadError?.code || 'unknown',
+          operation: 'upload',
+          endpoint: 'supabase_storage',
+          referenceId: failureReferenceId,
+        });
+        throw uploadError;
+      }
     };
 
     try {
@@ -419,6 +504,7 @@ function AddAppraisal({
               'Property comparison details are temporarily unavailable. Ask an administrator to enable them, then try again.'
             );
             migrationError.isUserFacing = true;
+            migrationError.isInfrastructureFailure = true;
             throw migrationError;
           }
 
@@ -432,36 +518,75 @@ function AddAppraisal({
       rowCommitted = true;
 
       onCancelManualPlacement?.();
+      const insertedReport = Array.isArray(insertedData) ? insertedData[0] : insertedData;
+      if (continueAdding) resetForAnotherAppraisal();
       onAdded({
-        message: 'Appraisal saved and opened on the map.',
+        message: continueAdding
+          ? 'Appraisal saved. Ready for another.'
+          : 'Appraisal saved and opened on the map.',
         tone: 'success',
         data: insertedData,
-        report: Array.isArray(insertedData) ? insertedData[0] : insertedData,
+        report: insertedReport,
+        continueAdding,
       });
     } catch (saveError) {
       const cleanupFailures = rowCommitted
         ? []
         : await cleanupUploadedObjects(supabase, uploadedStoragePaths);
       const cleanupFailed = cleanupFailures.length > 0;
+      const cancelled = isAbortError(saveError);
+      const requiresSupport = !cancelled && (
+        rowCommitted
+        || failureReferenceId
+        || saveError?.isInfrastructureFailure
+        || !saveError?.isUserFacing
+      );
+      const referenceId = requiresSupport
+        ? failureReferenceId || createSupportReference('create')
+        : '';
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: cancelled ? 'cancelled' : 'failed',
+        errorCode: saveError?.code || 'unknown',
+        operation: rowCommitted ? 'create_refresh' : 'create',
+        endpoint: rowCommitted
+          ? undefined
+          : failureReferenceId
+            ? 'supabase_storage'
+            : 'supabase_database',
+        referenceId,
+      });
+      if (cleanupFailed) {
+        recordTelemetryEvent('appraisal_mutation', {
+          outcome: 'failed',
+          errorCode: 'cleanup_failed',
+          operation: 'cleanup',
+          endpoint: 'supabase_storage',
+          referenceId,
+        });
+      }
 
-      if (rowCommitted) {
-        setError('The appraisal was saved, but the workspace could not refresh. Reopen nearby reports to confirm it.');
+      if (cancelled) {
+        setError('Upload cancelled. No appraisal record was added.');
+      } else if (rowCommitted) {
+        setError(withSupportReference(
+          'The appraisal was saved, but the workspace could not refresh. Reopen nearby reports to confirm it.',
+          referenceId
+        ));
       } else if (saveError.isUserFacing) {
-        setError(
-          `${saveError.message}${
-            cleanupFailed ? ' An administrator may need to remove an incomplete file upload.' : ''
-          }`
-        );
+        setError(withSupportReference(
+          saveError.message,
+          referenceId
+        ));
       } else {
-        setError(
-          `The appraisal could not be saved. No record was added. Check the files and connection, then try again.${
-            cleanupFailed ? ' An administrator may need to remove an incomplete file upload.' : ''
-          }`
-        );
+        setError(withSupportReference(
+          'The appraisal could not be saved. No record was added, and your form is still here. Try again or contact support.',
+          referenceId
+        ));
       }
     } finally {
       uploadControllerRef.current = null;
       setPhase('idle');
+      setSaveIntent(null);
       setPreparationProgress(null);
       setUploadProgress(null);
     }
@@ -702,17 +827,38 @@ function AddAppraisal({
           </div>
         )}
 
-        <button className="add-appraisal-submit" type="submit" disabled={isBusy}>
-          {phase === 'verifying'
-            ? 'Verifying address…'
-            : phase === 'checking'
-              ? 'Checking for duplicates…'
-            : phase === 'saving'
-              ? 'Saving appraisal…'
+        <div className="add-appraisal-actions">
+          <button
+            className="add-appraisal-submit"
+            type="submit"
+            value="open"
+            disabled={isBusy}
+            onClick={() => { saveIntentRef.current = 'open'; }}
+          >
+            {phase === 'verifying'
+              ? 'Verifying address…'
+              : phase === 'checking'
+                ? 'Checking for duplicates…'
+              : phase === 'saving'
+                ? 'Saving appraisal…'
+                : potentialDuplicates.length > 0
+                  ? 'Save anyway'
+                  : 'Save appraisal'}
+          </button>
+          <button
+            className="button button--secondary add-appraisal-repeat"
+            type="submit"
+            value="add_another"
+            disabled={isBusy}
+            onClick={() => { saveIntentRef.current = 'add_another'; }}
+          >
+            {isBusy && saveIntent === 'add_another'
+              ? 'Saving and preparing another…'
               : potentialDuplicates.length > 0
-                ? 'Save anyway'
-                : 'Save appraisal'}
-        </button>
+                ? 'Save anyway and add another'
+                : 'Save and add another'}
+          </button>
+        </div>
       </form>
     </section>
   );
