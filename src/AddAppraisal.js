@@ -1,11 +1,16 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import AddressPicker from './components/AddressPicker';
 import AppraisalFormFields from './components/AppraisalFormFields';
 import {
   normalizeOptionalInteger,
   validatePropertyDetails,
 } from './domain/appraisalFields';
 import { validateOptionalDateOrder } from './domain/dates';
-import { addressFingerprint, geocodeFullOntarioAddress } from './domain/geocoding';
+import {
+  addressFingerprint,
+  geocodeFullOntarioAddress,
+  toNormalizedAddressColumns,
+} from './domain/geocoding';
 import {
   cleanupUploadedObjects,
   createOpaqueStorageKey,
@@ -17,8 +22,14 @@ import {
   validatePdfFile,
   validatePhotoFile,
 } from './domain/formSafety';
-import { insertAppraisal, isMissingMetadataSchemaError } from './services/appraisalService';
+import {
+  createAppraisalIdempotencyKey,
+  findPotentialAppraisalDuplicates,
+  insertAppraisal,
+  isMissingMetadataSchemaError,
+} from './services/appraisalService';
 import { supabase } from './supabaseClient';
+import { uploadStorageObject } from './services/resumableUpload';
 
 const EMPTY_PROPERTY_DETAILS = {
   propertyType: '',
@@ -26,7 +37,14 @@ const EMPTY_PROPERTY_DETAILS = {
   yearBuilt: '',
 };
 
-function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChange }) {
+function AddAppraisal({
+  onAdded,
+  metadataSupported = null,
+  onWorkspaceStateChange,
+  manualPlacement = { active: false, location: null },
+  onRequestManualPlacement,
+  onCancelManualPlacement,
+}) {
   const [address, setAddress] = useState('');
   const [city, setCity] = useState('');
   const [appraisalDate, setAppraisalDate] = useState('');
@@ -41,6 +59,18 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
   const [status, setStatus] = useState('');
   const [fieldErrors, setFieldErrors] = useState({});
   const [verifiedAddress, setVerifiedAddress] = useState(null);
+  const [manualPlacementAvailable, setManualPlacementAvailable] = useState(false);
+  const [preparationProgress, setPreparationProgress] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const [potentialDuplicates, setPotentialDuplicates] = useState([]);
+  const alertRef = useRef(null);
+  const photoInputRef = useRef(null);
+  const pdfInputRef = useRef(null);
+  const folderInputRef = useRef(null);
+  const uploadControllerRef = useRef(null);
+  const createCommandIdRef = useRef(
+    window.crypto?.randomUUID?.() || `create-${Date.now()}-${Math.random().toString(36).slice(2)}`
+  );
 
   const isBusy = phase !== 'idle';
   const currentAddressFingerprint = addressFingerprint(address, city);
@@ -68,12 +98,47 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
   }, [isBusy, isDirty, onWorkspaceStateChange]);
 
   useEffect(() => () => {
+    uploadControllerRef.current?.abort();
     onWorkspaceStateChange?.({ dirty: false, busy: false });
   }, [onWorkspaceStateChange]);
+
+  useEffect(() => {
+    if (!error) return undefined;
+    const frame = window.requestAnimationFrame(() => alertRef.current?.focus());
+    return () => window.cancelAnimationFrame(frame);
+  }, [error]);
+
+  useEffect(() => {
+    if (!manualPlacement.active || !manualPlacement.location) return;
+    const { latitude, longitude } = manualPlacement.location;
+    setVerifiedAddress({
+      formattedAddress: `${address.trim()}, ${city.trim()}`,
+      latitude,
+      longitude,
+      fingerprint: addressFingerprint(address, city),
+      verificationProvider: 'manual',
+      verificationStatus: 'pending_review',
+      normalizedAddress: toNormalizedAddressColumns(
+        { formattedAddress: `${address.trim()}, ${city.trim()}` },
+        {
+          verificationStatus: 'manual',
+          provider: 'manual',
+          originalInput: `${address.trim()}, ${city.trim()}`,
+        }
+      ),
+    });
+    setManualPlacementAvailable(false);
+    setPotentialDuplicates([]);
+    setError('');
+    setStatus('Manual pin selected. Review the location, then save the appraisal.');
+  }, [address, city, manualPlacement]);
 
   const invalidateVerifiedAddress = () => {
     setVerifiedAddress(null);
     setStatus('');
+    setManualPlacementAvailable(false);
+    setPotentialDuplicates([]);
+    onCancelManualPlacement?.();
   };
 
   const handleAddressChange = (value) => {
@@ -86,6 +151,19 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
     setCity(value);
     invalidateVerifiedAddress();
     setFieldErrors((current) => ({ ...current, city: '' }));
+  };
+
+  const handleAddressResolved = (result, values) => {
+    setVerifiedAddress({
+      ...result,
+      fingerprint: addressFingerprint(values.address, values.city),
+      verificationProvider: 'google',
+      verificationStatus: 'verified',
+    });
+    setManualPlacementAvailable(false);
+    setPotentialDuplicates([]);
+    setError('');
+    setStatus(`Address matched as ${result.formattedAddress}.`);
   };
 
   const handlePropertyDetailChange = (field, value) => {
@@ -185,35 +263,80 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
 
     setFieldErrors({});
 
-    if (!addressIsVerified) {
+    let resolvedAddress = addressIsVerified ? verifiedAddress : null;
+
+    if (!resolvedAddress) {
+      if (manualPlacement.active && !manualPlacement.location) {
+        setError('Click the exact property location on the map, then return here to save.');
+        return;
+      }
       setPhase('verifying');
       try {
         const geocodedAddress = await geocodeFullOntarioAddress(address, city);
-        setVerifiedAddress({
+        resolvedAddress = {
           ...geocodedAddress,
           fingerprint: addressFingerprint(address, city),
-        });
-        setStatus(
-          `Address verified as ${geocodedAddress.formattedAddress}. Review it, then save the appraisal.`
-        );
+          verificationProvider: 'google',
+          verificationStatus: 'verified',
+        };
+        setVerifiedAddress(resolvedAddress);
+        setStatus(`Address verified as ${geocodedAddress.formattedAddress}. Saving now…`);
       } catch (geocodeError) {
         setError(geocodeError.message);
-      } finally {
         setPhase('idle');
+        setManualPlacementAvailable(geocodeError?.code === 'ZERO_RESULTS');
+        return;
       }
-      return;
+    }
+
+    if (potentialDuplicates.length === 0) {
+      setPhase('checking');
+      try {
+        const duplicateResult = await findPotentialAppraisalDuplicates(supabase, {
+          placeId: resolvedAddress.placeId || resolvedAddress.place_id || null,
+          address: address.trim(),
+          city: city.trim(),
+          appraisalDate: appraisalDate || null,
+          effectiveDate: effectiveDate || null,
+        });
+        if (duplicateResult.data.length > 0) {
+          setPotentialDuplicates(duplicateResult.data);
+          setStatus('A report may already exist for this property and date. Review the note below before continuing.');
+          setPhase('idle');
+          return;
+        }
+      } catch {
+        setStatus('Duplicate checking was unavailable, so the save is continuing with retry protection.');
+      }
     }
 
     setPhase('saving');
+    setPreparationProgress(null);
+    setUploadProgress(null);
     const uploadedStoragePaths = [];
     let rowCommitted = false;
+    const uploadController = new AbortController();
+    uploadControllerRef.current = uploadController;
+
+    const uploadObject = async (bucket, path, file, label, contentType) => {
+      setStatus(`Uploading ${label}…`);
+      setUploadProgress({ label, percent: 0 });
+      const result = await uploadStorageObject(supabase, bucket, path, file, {
+        signal: uploadController.signal,
+        forceResumable: true,
+        contentType,
+        onProgress: ({ percent }) => setUploadProgress({ label, percent }),
+      });
+      if (result.error) throw result.error;
+      setUploadProgress({ label, percent: 100 });
+      return result;
+    };
 
     try {
       let photoPath = null;
       if (photo) {
         const photoName = createOpaqueStorageKey(photo);
-        const { error: photoError } = await supabase.storage.from('photos').upload(photoName, photo);
-        if (photoError) throw photoError;
+        await uploadObject('photos', photoName, photo, 'property photo');
         photoPath = photoName;
         uploadedStoragePaths.push({ bucket: 'photos', path: photoName });
       }
@@ -223,45 +346,71 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
 
       if (uploadType === 'pdf' && pdf) {
         const pdfName = createOpaqueStorageKey(pdf);
-        const { error: pdfError } = await supabase.storage.from('pdfs').upload(pdfName, pdf);
-        if (pdfError) throw pdfError;
+        await uploadObject('pdfs', pdfName, pdf, 'report PDF');
         pdfPath = pdfName;
         uploadedStoragePaths.push({ bucket: 'pdfs', path: pdfName });
       }
 
       if (uploadType === 'folder' && folderFiles.length > 0) {
+        setStatus('Preparing the document folder…');
         const { default: JSZip } = await import('jszip');
         const zip = new JSZip();
         for (const file of folderFiles) {
           zip.file(file.webkitRelativePath || file.name, file);
         }
-        const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipBlob = await zip.generateAsync({ type: 'blob' }, ({ percent }) => {
+          const rounded = Math.max(0, Math.min(100, Math.round(percent)));
+          setPreparationProgress(rounded);
+          setStatus(`Preparing the document folder… ${rounded}%`);
+        });
+        const zipFile = new File([zipBlob], 'appraisal-documents.zip', { type: 'application/zip' });
         const zipName = createOpaqueStorageKey('.zip');
-        const { error: zipError } = await supabase.storage
-          .from('appraisal-folders')
-          .upload(zipName, zipBlob);
-        if (zipError) throw zipError;
+        await uploadObject(
+          'appraisal-folders',
+          zipName,
+          zipFile,
+          'document folder',
+          'application/zip'
+        );
         folderPaths = [zipName];
         uploadedStoragePaths.push({ bucket: 'appraisal-folders', path: zipName });
       }
 
+      uploadControllerRef.current = null;
+      setUploadProgress(null);
+      setStatus('Finishing the appraisal save…');
+
       const legacyPayload = {
         address: address.trim(),
         city: city.trim(),
-        latitude: verifiedAddress.latitude,
-        longitude: verifiedAddress.longitude,
+        latitude: resolvedAddress.latitude,
+        longitude: resolvedAddress.longitude,
         appraisal_date: appraisalDate || null,
         photo_url: photoPath,
         pdf_url: pdfPath,
         folder_files: folderPaths.length > 0 ? folderPaths : null,
       };
+      const enhancedPayload = {
+        ...legacyPayload,
+        idempotency_key: createAppraisalIdempotencyKey(createCommandIdRef.current),
+        ...(resolvedAddress.normalizedAddress || toNormalizedAddressColumns(
+          resolvedAddress,
+          {
+            verificationStatus: resolvedAddress.verificationStatus === 'pending_review'
+              ? 'manual'
+              : resolvedAddress.verificationStatus || 'verified',
+            provider: resolvedAddress.verificationProvider || 'google',
+          }
+        )),
+      };
       let insertError = null;
+      let insertedData = null;
       if (metadataSupported === false) {
-        ({ error: insertError } = await insertAppraisal(supabase, legacyPayload));
+        ({ error: insertError, data: insertedData } = await insertAppraisal(supabase, enhancedPayload));
       } else {
-        ({ error: insertError } = await insertAppraisal(
+        ({ error: insertError, data: insertedData } = await insertAppraisal(
           supabase,
-          { ...legacyPayload, ...metadataPayload }
+          { ...enhancedPayload, ...metadataPayload }
         ));
 
         if (insertError && isMissingMetadataSchemaError(insertError)) {
@@ -273,15 +422,22 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
             throw migrationError;
           }
 
-          const legacyInsert = await insertAppraisal(supabase, legacyPayload);
+          const legacyInsert = await insertAppraisal(supabase, enhancedPayload);
           insertError = legacyInsert.error;
+          insertedData = legacyInsert.data;
         }
       }
 
       if (insertError) throw insertError;
       rowCommitted = true;
 
-      onAdded({ message: 'Appraisal saved.', tone: 'success' });
+      onCancelManualPlacement?.();
+      onAdded({
+        message: 'Appraisal saved and opened on the map.',
+        tone: 'success',
+        data: insertedData,
+        report: Array.isArray(insertedData) ? insertedData[0] : insertedData,
+      });
     } catch (saveError) {
       const cleanupFailures = rowCommitted
         ? []
@@ -304,7 +460,10 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
         );
       }
     } finally {
+      uploadControllerRef.current = null;
       setPhase('idle');
+      setPreparationProgress(null);
+      setUploadProgress(null);
     }
   };
 
@@ -319,62 +478,41 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
       </p>
 
       {error && (
-        <p className="appraisal-alert" role="alert">
+        <div className="appraisal-alert" role="alert" ref={alertRef} tabIndex="-1">
           {error}
-        </p>
+          {manualPlacementAvailable && onRequestManualPlacement && (
+            <button type="button" className="button button--secondary" onClick={onRequestManualPlacement}>
+              Place pin manually
+            </button>
+          )}
+        </div>
       )}
       {status && (
         <p className="appraisal-status" role="status">
           {status}
         </p>
       )}
+      {potentialDuplicates.length > 0 && (
+        <div className="appraisal-caution" role="status">
+          <strong>Possible duplicate</strong>
+          <p>
+            {potentialDuplicates.length} existing report{potentialDuplicates.length === 1 ? '' : 's'} matched
+            this property and date. A newer or separate appraisal can still be saved, and no existing
+            report will be overwritten.
+          </p>
+        </div>
+      )}
       <form onSubmit={handleSubmit} aria-busy={isBusy} noValidate>
-        <div className="appraisal-field">
-          <label className="appraisal-label" htmlFor="appraisal-address">
-            Street address
-          </label>
-          <input
-            id="appraisal-address"
-            className="appraisal-input"
-            type="text"
-            autoComplete="street-address"
-            value={address}
-            disabled={isBusy}
-            required
-            aria-invalid={Boolean(fieldErrors.address)}
-            aria-describedby={fieldErrors.address ? 'appraisal-address-error' : undefined}
-            onChange={(event) => handleAddressChange(event.target.value)}
-          />
-          {fieldErrors.address && (
-            <p id="appraisal-address-error" className="appraisal-field-error">
-              {fieldErrors.address}
-            </p>
-          )}
-        </div>
-
-        <div className="appraisal-field">
-          <label className="appraisal-label" htmlFor="appraisal-city">
-            City
-          </label>
-          <input
-            id="appraisal-city"
-            className="appraisal-input"
-            type="text"
-            autoComplete="address-level2"
-            placeholder="e.g. Vaughan"
-            value={city}
-            disabled={isBusy}
-            required
-            aria-invalid={Boolean(fieldErrors.city)}
-            aria-describedby={fieldErrors.city ? 'appraisal-city-error' : undefined}
-            onChange={(event) => handleCityChange(event.target.value)}
-          />
-          {fieldErrors.city && (
-            <p id="appraisal-city-error" className="appraisal-field-error">
-              {fieldErrors.city}
-            </p>
-          )}
-        </div>
+        <AddressPicker
+          idPrefix="appraisal-address"
+          address={address}
+          city={city}
+          onAddressChange={handleAddressChange}
+          onCityChange={handleCityChange}
+          onResolved={handleAddressResolved}
+          disabled={isBusy}
+          errors={fieldErrors}
+        />
 
         <AppraisalFormFields
           reportDate={appraisalDate}
@@ -383,8 +521,14 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
           errors={fieldErrors}
           dateWarning={dateWarning}
           disabled={isBusy}
-          onReportDateChange={setAppraisalDate}
-          onEffectiveDateChange={setEffectiveDate}
+          onEffectiveDateChange={(value) => {
+            setEffectiveDate(value);
+            setPotentialDuplicates([]);
+          }}
+          onReportDateChange={(value) => {
+            setAppraisalDate(value);
+            setPotentialDuplicates([]);
+          }}
           onPropertyDetailChange={handlePropertyDetailChange}
         />
 
@@ -396,6 +540,7 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
             <span className="appraisal-file-button">Choose photo</span>
             <span className="appraisal-file-name">{photo ? photo.name : 'No file selected'}</span>
             <input
+              ref={photoInputRef}
               id="appraisal-photo"
               className="appraisal-file-input"
               type="file"
@@ -408,6 +553,18 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
           <p id="appraisal-photo-help" className="appraisal-field-hint">
             JPG, PNG, WebP, HEIC, or TIFF. Maximum {UPLOAD_LIMITS.photo.maxFileBytes / 1024 / 1024} MB.
           </p>
+          {photo && (
+            <button
+              type="button"
+              className="appraisal-remove-file"
+              onClick={() => {
+                setPhoto(null);
+                if (photoInputRef.current) photoInputRef.current.value = '';
+              }}
+            >
+              Remove selected photo
+            </button>
+          )}
         </div>
 
         <fieldset className="appraisal-fieldset" disabled={isBusy}>
@@ -418,9 +575,9 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
             <button
               type="button"
               aria-pressed={uploadType === 'pdf'}
+              disabled={uploadType !== 'pdf' && folderFiles.length > 0}
               onClick={() => {
                 setUploadType('pdf');
-                setFolderFiles([]);
               }}
             >
               Single PDF
@@ -428,14 +585,18 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
             <button
               type="button"
               aria-pressed={uploadType === 'folder'}
+              disabled={uploadType !== 'folder' && Boolean(pdf)}
               onClick={() => {
                 setUploadType('folder');
-                setPdf(null);
               }}
             >
               Folder
             </button>
           </div>
+          {pdf && <p className="appraisal-field-hint">Remove the selected PDF before switching to a folder.</p>}
+          {folderFiles.length > 0 && (
+            <p className="appraisal-field-hint">Remove the selected folder before switching to a PDF.</p>
+          )}
         </fieldset>
 
         {uploadType === 'pdf' && (
@@ -444,6 +605,7 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
               <span className="appraisal-file-button">Choose PDF</span>
               <span className="appraisal-file-name">{pdf ? pdf.name : 'No file selected'}</span>
               <input
+                ref={pdfInputRef}
                 id="appraisal-pdf"
                 className="appraisal-file-input"
                 type="file"
@@ -456,6 +618,18 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
             <p id="appraisal-pdf-help" className="appraisal-field-hint">
               PDF only. Maximum {UPLOAD_LIMITS.pdf.maxFileBytes / 1024 / 1024} MB.
             </p>
+            {pdf && (
+              <button
+                type="button"
+                className="appraisal-remove-file"
+                onClick={() => {
+                  setPdf(null);
+                  if (pdfInputRef.current) pdfInputRef.current.value = '';
+                }}
+              >
+                Remove selected PDF
+              </button>
+            )}
           </div>
         )}
 
@@ -469,6 +643,7 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
                   : 'No folder selected'}
               </span>
               <input
+                ref={folderInputRef}
                 id="appraisal-folder"
                 className="appraisal-file-input"
                 type="file"
@@ -486,17 +661,57 @@ function AddAppraisal({ onAdded, metadataSupported = null, onWorkspaceStateChang
               {UPLOAD_LIMITS.folder.maxFileBytes / 1024 / 1024} MB each and{' '}
               {UPLOAD_LIMITS.folder.maxTotalBytes / 1024 / 1024} MB total.
             </p>
+            {folderFiles.length > 0 && (
+              <button
+                type="button"
+                className="appraisal-remove-file"
+                onClick={() => {
+                  setFolderFiles([]);
+                  if (folderInputRef.current) folderInputRef.current.value = '';
+                }}
+              >
+                Remove selected folder
+              </button>
+            )}
+          </div>
+        )}
+
+        {preparationProgress !== null && (
+          <progress
+            className="appraisal-progress"
+            max="100"
+            value={preparationProgress}
+            aria-label="Document folder preparation progress"
+          >
+            {preparationProgress}%
+          </progress>
+        )}
+
+        {uploadProgress && (
+          <div className="appraisal-upload-progress" role="status">
+            <span>Uploading {uploadProgress.label}</span>
+            <progress max="100" value={uploadProgress.percent}>{uploadProgress.percent}%</progress>
+            <span>{uploadProgress.percent}%</span>
+            <button
+              type="button"
+              className="appraisal-remove-file"
+              onClick={() => uploadControllerRef.current?.abort()}
+            >
+              Cancel upload
+            </button>
           </div>
         )}
 
         <button className="add-appraisal-submit" type="submit" disabled={isBusy}>
           {phase === 'verifying'
             ? 'Verifying address…'
+            : phase === 'checking'
+              ? 'Checking for duplicates…'
             : phase === 'saving'
               ? 'Saving appraisal…'
-              : addressIsVerified
-                ? 'Save appraisal'
-                : 'Verify address'}
+              : potentialDuplicates.length > 0
+                ? 'Save anyway'
+                : 'Save appraisal'}
         </button>
       </form>
     </section>

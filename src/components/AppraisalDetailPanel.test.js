@@ -59,6 +59,10 @@ function renderPanel(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  updateAppraisal.mockReset();
+  updateAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null });
+  deleteAppraisal.mockReset();
+  deleteAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null, deletedId: appraisal.id });
   uploadObject = jest.fn(async () => ({ error: null }));
   removeObject = jest.fn(async () => ({ error: null }));
   supabase.storage.from.mockReturnValue({
@@ -68,6 +72,7 @@ beforeEach(() => {
 });
 
 test('uses a real busy form and saves only the matching verified coordinates', async () => {
+  updateAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null });
   const view = renderPanel();
   fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
   fireEvent.change(screen.getByLabelText('Address'), {
@@ -90,11 +95,17 @@ test('uses a real busy form and saves only the matching verified coordinates', a
     latitude: 43.91,
     longitude: -79.42,
   });
-  await screen.findByText(/Review the matched map location/i);
-  updateAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null });
-  fireEvent.submit(form);
 
-  await waitFor(() => expect(view.onUpdated).toHaveBeenCalledWith('Report updated'));
+  await waitFor(() => expect(view.onUpdated).toHaveBeenCalledWith(
+    'Report updated',
+    expect.objectContaining({
+      address: '12 Example Road',
+      latitude: 43.91,
+      longitude: -79.42,
+    })
+  ));
+  expect(geocodeFullOntarioAddress).toHaveBeenCalledTimes(1);
+  expect(updateAppraisal).toHaveBeenCalledTimes(1);
   expect(updateAppraisal).toHaveBeenCalledWith(
     supabase,
     appraisal.id,
@@ -106,17 +117,35 @@ test('uses a real busy form and saves only the matching verified coordinates', a
   );
 });
 
-test('does not clean storage when deletion is not confirmed for the exact row', async () => {
-  const mutationError = Object.assign(new Error('The appraisal was not removed.'), {
+test('does not clean storage when archiving is not confirmed for the exact row', async () => {
+  const mutationError = Object.assign(new Error('The appraisal was not archived.'), {
     code: 'APPRAISAL_MUTATION_NOT_APPLIED',
   });
   deleteAppraisal.mockResolvedValue({ error: mutationError, deletedId: null });
   renderPanel({ appraisal: { ...appraisal, photo_url: 'legacy-private-path.jpg' } });
 
-  fireEvent.click(screen.getByRole('button', { name: 'Delete…' }));
-  fireEvent.click(screen.getByRole('button', { name: 'Yes, remove' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Archive report' }));
 
-  expect(await screen.findByText(/No private files were removed/i)).toBeInTheDocument();
+  expect(await screen.findByText(/not archived/i)).toBeInTheDocument();
+  expect(supabase.storage.from).not.toHaveBeenCalled();
+});
+
+test('archives a report without deleting its private files', async () => {
+  const view = renderPanel({
+    appraisal: {
+      ...appraisal,
+      photo_url: 'private/current-photo.jpg',
+      pdf_url: 'private/current-report.pdf',
+    },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Archive report' }));
+
+  await waitFor(() => expect(view.onDeleted).toHaveBeenCalledWith(
+    'Report archived. Its files and database record were preserved.'
+  ));
   expect(supabase.storage.from).not.toHaveBeenCalled();
 });
 
@@ -128,8 +157,8 @@ test('exposes every legacy folder with privacy-safe labels', () => {
     },
   });
 
-  fireEvent.click(screen.getByRole('button', { name: /Document 1/i }));
-  fireEvent.click(screen.getByRole('button', { name: /Document 2/i }));
+  fireEvent.click(screen.getByRole('button', { name: /Download folder 1/i }));
+  fireEvent.click(screen.getByRole('button', { name: /Download folder 2/i }));
 
   expect(view.onOpenReport).toHaveBeenNthCalledWith(
     1,
@@ -152,9 +181,55 @@ test('rolls back newly uploaded edit assets when the update throws', async () =>
     target: { files: [new File(['photo'], 'private-house.jpg', { type: 'image/jpeg' })] },
   });
 
-  fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
-  expect(await screen.findByRole('alert')).toHaveTextContent(/No changes were confirmed/i);
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(/No changes were confirmed/i);
+  expect(alert).toHaveFocus();
   expect(uploadObject).toHaveBeenCalledTimes(1);
   expect(removeObject).toHaveBeenCalledTimes(1);
+});
+
+test('explicitly removes existing photo and document attachments on save', async () => {
+  updateAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null });
+  const view = renderPanel({
+    appraisal: {
+      ...appraisal,
+      photo_url: 'private/current-photo.jpg',
+      pdf_url: 'private/current-report.pdf',
+    },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.click(screen.getByRole('checkbox', { name: /Remove current property photo/i }));
+  fireEvent.click(screen.getByRole('checkbox', { name: /Remove current report document/i }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(view.onUpdated).toHaveBeenCalled());
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({ photo_url: null, pdf_url: null, folder_files: null })
+  );
+  expect(supabase.storage.from).toHaveBeenCalledWith('photos');
+  expect(supabase.storage.from).toHaveBeenCalledWith('pdfs');
+  expect(removeObject).toHaveBeenCalledTimes(2);
+  expect(view.onUpdated).toHaveBeenCalledWith(
+    'Report updated',
+    expect.objectContaining({ photo_url: null, pdf_url: null, folder_files: null })
+  );
+});
+
+test('explains how to switch document modes without discarding a selected file', () => {
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText('Replacement PDF'), {
+    target: { files: [new File(['pdf'], 'replacement.pdf', { type: 'application/pdf' })] },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Document folder' }));
+
+  expect(screen.getByRole('alert')).toHaveTextContent(/Remove the selected replacement PDF/i);
+  expect(screen.getByRole('button', { name: 'Single PDF' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByText('replacement.pdf')).toBeInTheDocument();
 });

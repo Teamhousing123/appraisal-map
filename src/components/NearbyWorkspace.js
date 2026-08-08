@@ -152,6 +152,34 @@ function describeMissingReports(count, missingDetail, filterName) {
   } excluded by the ${filterName}.`;
 }
 
+function formatLastUpdated(value) {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(date);
+}
+
+function documentActionLabel(report) {
+  if (report.pdf_url) return 'Open PDF';
+  if (report.folder_files?.length) return 'Download document folder';
+  return 'No report file';
+}
+
+function displayFilterDate(value) {
+  if (!value) return '';
+  const [year, month, day] = value.split('-').map(Number);
+  const date = new Date(year, month - 1, day);
+  if (Number.isNaN(date.getTime())) return value;
+  return new Intl.DateTimeFormat('en-CA', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric',
+  }).format(date);
+}
+
 function Filters({
   filters,
   subject,
@@ -160,10 +188,51 @@ function Filters({
   activeCount,
   missingFilterCounts = {},
 }) {
+  const [dateDraft, setDateDraft] = useState({
+    dateFrom: filters.dateFrom,
+    dateTo: filters.dateTo,
+  });
   const omissionMessages = [];
   const missingPropertyType = normalizeMissingCount(missingFilterCounts.propertyType);
   const missingReferenceDate = normalizeMissingCount(missingFilterCounts.referenceDate);
   const missingCoordinates = normalizeMissingCount(missingFilterCounts.coordinates);
+  const dateRangeError = dateDraft.dateFrom && dateDraft.dateTo
+    && dateDraft.dateFrom > dateDraft.dateTo
+    ? 'The from date must be on or before the to date. This date range has not been applied.'
+    : '';
+
+  useEffect(() => {
+    setDateDraft({ dateFrom: filters.dateFrom, dateTo: filters.dateTo });
+  }, [filters.dateFrom, filters.dateTo]);
+
+  const handleDateChange = (field, value) => {
+    const nextDraft = { ...dateDraft, [field]: value };
+    setDateDraft(nextDraft);
+    if (nextDraft.dateFrom && nextDraft.dateTo && nextDraft.dateFrom > nextDraft.dateTo) {
+      return;
+    }
+    if (nextDraft.dateFrom !== filters.dateFrom) onChange('dateFrom', nextDraft.dateFrom);
+    if (nextDraft.dateTo !== filters.dateTo) onChange('dateTo', nextDraft.dateTo);
+  };
+
+  const activeFilters = [
+    filters.radiusKm ? {
+      field: 'radiusKm',
+      label: `Radius: Within ${filters.radiusKm} km`,
+    } : null,
+    filters.propertyType ? {
+      field: 'propertyType',
+      label: `Property type: ${formatPropertyType(filters.propertyType)}`,
+    } : null,
+    filters.dateFrom ? {
+      field: 'dateFrom',
+      label: `From: ${displayFilterDate(filters.dateFrom)}`,
+    } : null,
+    filters.dateTo ? {
+      field: 'dateTo',
+      label: `To: ${displayFilterDate(filters.dateTo)}`,
+    } : null,
+  ].filter(Boolean);
 
   if (filters.propertyType && missingPropertyType > 0) {
     omissionMessages.push(describeMissingReports(
@@ -188,62 +257,114 @@ function Filters({
   }
 
   return (
-    <details className="report-filters" open={activeCount > 0}>
-      <summary>
-        <span>Filter reports</span>
-        <span>{activeCount > 0 ? `${activeCount} active` : 'Optional'}</span>
-      </summary>
-      <div className="report-filters__grid">
-        <label>
-          <span>Radius</span>
-          <select
-            value={filters.radiusKm}
-            disabled={!subject}
-            onChange={(event) => onChange('radiusKm', event.target.value)}
-          >
-            <option value="">Map area</option>
-            <option value="2">Within 2 km</option>
-            <option value="5">Within 5 km</option>
-            <option value="10">Within 10 km</option>
-            <option value="25">Within 25 km</option>
-            <option value="50">Within 50 km</option>
-          </select>
-        </label>
-        <label>
-          <span>Property type</span>
-          <select value={filters.propertyType} onChange={(event) => onChange('propertyType', event.target.value)}>
-            <option value="">All types</option>
-            {PROPERTY_TYPE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
+    <>
+      {activeFilters.length > 0 && (
+        <div className="active-filter-bar" aria-label="Active report filters">
+          <div className="active-filter-chips">
+            {activeFilters.map((filter) => (
+              <button
+                key={filter.field}
+                type="button"
+                className="active-filter-chip"
+                onClick={() => onChange(filter.field, '')}
+                aria-label={`Remove ${filter.label}`}
+              >
+                <span>{filter.label}</span>
+                <span aria-hidden="true">×</span>
+              </button>
             ))}
-          </select>
-        </label>
-        <label>
-          <span>Reference date from</span>
-          <input type="date" value={filters.dateFrom} onChange={(event) => onChange('dateFrom', event.target.value)} />
-        </label>
-        <label>
-          <span>Reference date to</span>
-          <input type="date" value={filters.dateTo} onChange={(event) => onChange('dateTo', event.target.value)} />
-        </label>
-        <label className="report-filters__sort">
-          <span>Sort</span>
-          <select value={filters.sortBy} onChange={(event) => onChange('sortBy', event.target.value)}>
-            <option value="distance" disabled={!subject}>Nearest first</option>
-            <option value="newest">Newest reference date first</option>
-          </select>
-        </label>
-      </div>
-      <div className="report-filters__footer">
-        <p aria-live="polite">
-          Reference date uses the effective date when recorded; otherwise it uses the report date.
-          {omissionMessages.length > 0 ? ` ${omissionMessages.join(' ')}` : ''}
-        </p>
-        <button type="button" className="button button--quiet" onClick={onReset} disabled={activeCount === 0}>
-          Clear filters
-        </button>
-      </div>
-    </details>
+          </div>
+          <button type="button" className="button button--quiet" onClick={onReset}>
+            Clear all
+          </button>
+        </div>
+      )}
+      <details className="report-filters" open={activeCount > 0}>
+        <summary>
+          <span>Filter reports</span>
+          <span>{activeCount > 0 ? `${activeCount} active` : 'Optional'}</span>
+        </summary>
+        {!subject && (
+          <p id="subject-filter-guidance" className="report-filters__guidance">
+            Set a subject property above to use radius, nearest-first sorting, and candidate comparison.
+          </p>
+        )}
+        <div className="report-filters__grid">
+          <label>
+            <span>Radius</span>
+            <select
+              value={filters.radiusKm}
+              disabled={!subject}
+              aria-describedby={!subject ? 'subject-filter-guidance' : undefined}
+              onChange={(event) => onChange('radiusKm', event.target.value)}
+            >
+              <option value="">Map area</option>
+              <option value="2">Within 2 km</option>
+              <option value="5">Within 5 km</option>
+              <option value="10">Within 10 km</option>
+              <option value="25">Within 25 km</option>
+              <option value="50">Within 50 km</option>
+            </select>
+          </label>
+          <label>
+            <span>Property type</span>
+            <select value={filters.propertyType} onChange={(event) => onChange('propertyType', event.target.value)}>
+              <option value="">All types</option>
+              {PROPERTY_TYPE_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>{option.label}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Reference date from</span>
+            <input
+              type="date"
+              value={dateDraft.dateFrom}
+              max={dateDraft.dateTo || undefined}
+              aria-invalid={Boolean(dateRangeError)}
+              aria-describedby={dateRangeError ? 'report-date-range-error' : undefined}
+              onChange={(event) => handleDateChange('dateFrom', event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Reference date to</span>
+            <input
+              type="date"
+              value={dateDraft.dateTo}
+              min={dateDraft.dateFrom || undefined}
+              aria-invalid={Boolean(dateRangeError)}
+              aria-describedby={dateRangeError ? 'report-date-range-error' : undefined}
+              onChange={(event) => handleDateChange('dateTo', event.target.value)}
+            />
+          </label>
+          {dateRangeError && (
+            <p id="report-date-range-error" className="report-filters__date-error" role="alert">
+              {dateRangeError}
+            </p>
+          )}
+          <label className="report-filters__sort">
+            <span>Sort</span>
+            <select
+              value={filters.sortBy}
+              aria-describedby={!subject ? 'subject-filter-guidance' : undefined}
+              onChange={(event) => onChange('sortBy', event.target.value)}
+            >
+              <option value="distance" disabled={!subject}>Nearest first</option>
+              <option value="newest">Newest reference date first</option>
+            </select>
+          </label>
+        </div>
+        <div className="report-filters__footer">
+          <p aria-live="polite">
+            Reference date uses the effective date when recorded; otherwise it uses the report date.
+            {omissionMessages.length > 0 ? ` ${omissionMessages.join(' ')}` : ''}
+          </p>
+          <button type="button" className="button button--quiet" onClick={onReset} disabled={activeCount === 0}>
+            Clear filters
+          </button>
+        </div>
+      </details>
+    </>
   );
 }
 
@@ -251,6 +372,7 @@ function ReportCard({
   report,
   selected,
   selectionDisabled,
+  selectionDisabledReason,
   onToggle,
   onDetails,
   onOpenReport,
@@ -260,6 +382,7 @@ function ReportCard({
   const date = reportReferenceDate(report);
   const hasMetadata = report.property_type || report.reported_living_area_sq_ft || report.year_built;
   const hasDocument = report.pdf_url || report.folder_files?.length;
+  const documentLabel = documentActionLabel(report);
 
   return (
     <article
@@ -267,6 +390,9 @@ function ReportCard({
       onMouseEnter={() => onHover(report.id)}
       onMouseLeave={() => onHover(null)}
       onFocus={() => onHover(report.id)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) onHover(null);
+      }}
     >
       <div className="report-card__topline">
         <p>{formatDistance(report._distanceKm)}</p>
@@ -307,7 +433,7 @@ function ReportCard({
           disabled={!hasDocument || openingReport}
         >
           <DocumentIcon />
-          {openingReport ? 'Opening…' : hasDocument ? 'Open report' : 'No report file'}
+          {openingReport ? 'Preparing…' : documentLabel}
         </button>
         <button type="button" className="button button--quiet" onClick={() => onDetails(report)}>
           Details <ArrowIcon />
@@ -321,7 +447,11 @@ function ReportCard({
           onChange={() => onToggle(report)}
         />
         <span aria-hidden="true" />
-        {selected ? 'Selected for comparison' : 'Select as candidate'}
+        {selected
+          ? 'Selected for comparison'
+          : selectionDisabledReason
+            ? `Select as candidate — ${selectionDisabledReason}`
+            : 'Select as candidate'}
       </label>
     </article>
   );
@@ -419,8 +549,8 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
                     disabled={!hasReportDocument(candidate) || openingReportId === candidate.id}
                   >
                     <DocumentIcon /> {openingReportId === candidate.id
-                      ? 'Opening…'
-                      : hasReportDocument(candidate) ? 'Open original report' : 'No report file'}
+                      ? 'Preparing…'
+                      : documentActionLabel(candidate)}
                   </button>
                 </td>
               ))}
@@ -456,8 +586,8 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
               disabled={!hasReportDocument(candidate) || openingReportId === candidate.id}
             >
               <DocumentIcon /> {openingReportId === candidate.id
-                ? 'Opening…'
-                : hasReportDocument(candidate) ? 'Open original report' : 'No report file'}
+                ? 'Preparing…'
+                : documentActionLabel(candidate)}
             </button>
           </article>
         ))}
@@ -491,6 +621,7 @@ function NearbyWorkspace({
   onBackFromCompare,
   onRemoveCandidate,
   onRetry,
+  lastUpdatedAt = null,
 }) {
   const [visibleReportCount, setVisibleReportCount] = useState(REPORT_BATCH_SIZE);
   const reportResultKey = useMemo(
@@ -505,6 +636,7 @@ function NearbyWorkspace({
   const visibleReports = reports.slice(0, visibleReportCount);
   const remainingReportCount = Math.max(0, reports.length - visibleReports.length);
   const nextBatchSize = Math.min(REPORT_BATCH_SIZE, remainingReportCount);
+  const lastUpdatedLabel = formatLastUpdated(lastUpdatedAt);
   const subjectFactErrors = subject ? validatePropertyDetails(subject) : {};
   const validatedSubject = subject ? {
     ...subject,
@@ -564,13 +696,29 @@ function NearbyWorkspace({
         </div>
       )}
 
+      {error && reports.length > 0 && (
+        <div className="workspace-stale-banner" role="status">
+          <div>
+            <strong>Reports could not be refreshed</strong>
+            <span>
+              Showing the last successfully loaded reports. They may not match the current map area.
+              {lastUpdatedLabel ? ` Last updated ${lastUpdatedLabel}.` : ''}
+            </span>
+          </div>
+          <button type="button" className="button button--secondary" onClick={onRetry}>
+            Try again
+          </button>
+        </div>
+      )}
+
       <div id="nearby-report-list-status" className="report-list-status" aria-live="polite">
         {loading
           ? `Updating reports in this map area… ${visibleReports.length} of ${reports.length} matching reports currently visible`
           : `Showing ${visibleReports.length} of ${reports.length} matching reports`}
+        {!error && lastUpdatedLabel ? ` · Last updated ${lastUpdatedLabel}` : ''}
       </div>
 
-      {error ? (
+      {error && reports.length === 0 ? (
         <div className="workspace-state workspace-state--error" role="alert">
           <h3>Reports could not be loaded</h3>
           <p>{error}</p>
@@ -585,22 +733,28 @@ function NearbyWorkspace({
         </div>
       ) : (
         <div id="nearby-report-list" className="report-list" aria-busy={loading}>
-          {visibleReports.map((report) => (
-            <ReportCard
-              key={report.id}
-              report={report}
-              selected={candidateIds.includes(report.id)}
-              selectionDisabled={
-                !subject
-                || (!candidateIds.includes(report.id) && candidateIds.length >= 3)
-              }
-              onToggle={onToggleCandidate}
-              onDetails={onOpenDetails}
-              onOpenReport={onOpenReport}
-              openingReport={openingReportId === report.id}
-              onHover={onHoverReport}
-            />
-          ))}
+          {visibleReports.map((report) => {
+            const selected = candidateIds.includes(report.id);
+            const selectionDisabledReason = !subject
+              ? 'Set a subject property first.'
+              : !selected && candidateIds.length >= 3
+                ? 'Remove one selected candidate to choose another.'
+                : '';
+            return (
+              <ReportCard
+                key={report.id}
+                report={report}
+                selected={selected}
+                selectionDisabled={Boolean(selectionDisabledReason)}
+                selectionDisabledReason={selectionDisabledReason}
+                onToggle={onToggleCandidate}
+                onDetails={onOpenDetails}
+                onOpenReport={onOpenReport}
+                openingReport={openingReportId === report.id}
+                onHover={onHoverReport}
+              />
+            );
+          })}
           {remainingReportCount > 0 && (
             <button
               type="button"

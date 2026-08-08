@@ -21,6 +21,7 @@ function SubjectSearch({
   onClear,
   busy = false,
   error = '',
+  placeholder = 'Search for a subject property',
 }) {
   const listboxId = useId();
   const inputId = useId();
@@ -77,7 +78,7 @@ function SubjectSearch({
             activeSuggestionIndex >= 0 ? `${listboxId}-option-${activeSuggestionIndex}` : undefined
           }
           autoComplete="off"
-          placeholder="Search for a subject property"
+          placeholder={placeholder}
           value={value}
           onChange={(event) => onChange(event.target.value)}
           onKeyDown={handleKeyDown}

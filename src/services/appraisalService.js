@@ -1,95 +1,130 @@
 export const LEGACY_APPRAISAL_COLUMNS = Object.freeze([
-  'id',
-  'address',
-  'city',
-  'latitude',
-  'longitude',
-  'appraisal_date',
-  'photo_url',
-  'pdf_url',
-  'folder_files',
-  'created_at',
+  'id', 'address', 'city', 'latitude', 'longitude', 'appraisal_date',
+  'photo_url', 'pdf_url', 'folder_files', 'created_at',
 ]);
 
 export const METADATA_APPRAISAL_COLUMNS = Object.freeze([
-  'effective_date',
-  'property_type',
-  'reported_living_area_sq_ft',
-  'year_built',
+  'effective_date', 'property_type', 'reported_living_area_sq_ft', 'year_built',
+]);
+
+export const FOUNDATION_APPRAISAL_COLUMNS = Object.freeze([
+  'idempotency_key',
+  'street_number',
+  'route',
+  'locality',
+  'province',
+  'postal_code',
+  'unit',
+  'country_code',
+  'formatted_address',
+  'place_id',
+  'original_input',
+  'address_verification_status',
+  'address_verification_provider',
+  'address_verified_at',
+  'service_area_version',
+  'version',
+  'updated_at',
+  'updated_by',
+  'deleted_at',
+  'deleted_by',
 ]);
 
 export const EXTENDED_APPRAISAL_COLUMNS = Object.freeze([
   ...LEGACY_APPRAISAL_COLUMNS,
   ...METADATA_APPRAISAL_COLUMNS,
 ]);
+export const CURRENT_APPRAISAL_COLUMNS = Object.freeze([
+  ...EXTENDED_APPRAISAL_COLUMNS,
+  ...FOUNDATION_APPRAISAL_COLUMNS,
+]);
+const LEGACY_FOUNDATION_APPRAISAL_COLUMNS = Object.freeze([
+  ...LEGACY_APPRAISAL_COLUMNS,
+  ...FOUNDATION_APPRAISAL_COLUMNS,
+]);
 
 export const LEGACY_APPRAISAL_SELECT = LEGACY_APPRAISAL_COLUMNS.join(',');
 export const EXTENDED_APPRAISAL_SELECT = EXTENDED_APPRAISAL_COLUMNS.join(',');
+export const CURRENT_APPRAISAL_SELECT = CURRENT_APPRAISAL_COLUMNS.join(',');
+const LEGACY_FOUNDATION_APPRAISAL_SELECT = LEGACY_FOUNDATION_APPRAISAL_COLUMNS.join(',');
 export const DEFAULT_PAGE_SIZE = 500;
 export const MAX_RECORDS_PER_BOUNDS_FETCH = 5000;
 export const APPRAISAL_MUTATION_NOT_APPLIED_CODE = 'APPRAISAL_MUTATION_NOT_APPLIED';
+export const APPRAISAL_VERSION_CONFLICT_CODE = 'APPRAISAL_VERSION_CONFLICT';
 
 const CAPABILITY_UNKNOWN = 'unknown';
 const CAPABILITY_SUPPORTED = 'supported';
 const CAPABILITY_UNSUPPORTED = 'unsupported';
 
 let metadataSchemaCapability = CAPABILITY_UNKNOWN;
+let foundationSchemaCapability = CAPABILITY_UNKNOWN;
 
 export function getMetadataSchemaCapability() {
   return metadataSchemaCapability;
+}
+
+export function getFoundationSchemaCapability() {
+  return foundationSchemaCapability;
 }
 
 export function resetMetadataSchemaCapability() {
   metadataSchemaCapability = CAPABILITY_UNKNOWN;
 }
 
-function metadataSupportedFlag() {
-  if (metadataSchemaCapability === CAPABILITY_SUPPORTED) return true;
-  if (metadataSchemaCapability === CAPABILITY_UNSUPPORTED) return false;
+export function resetFoundationSchemaCapability() {
+  foundationSchemaCapability = CAPABILITY_UNKNOWN;
+}
+
+export function resetAppraisalSchemaCapabilities() {
+  resetMetadataSchemaCapability();
+  resetFoundationSchemaCapability();
+}
+
+function capabilityFlag(capability) {
+  if (capability === CAPABILITY_SUPPORTED) return true;
+  if (capability === CAPABILITY_UNSUPPORTED) return false;
   return null;
 }
 
-export function isMissingMetadataSchemaError(error) {
+function missingColumnErrorMentions(error, columns) {
   if (!error) return false;
-
   const text = [error.message, error.details, error.hint]
     .filter(Boolean)
     .join(' ')
     .toLowerCase();
-  const mentionsMetadataColumn = METADATA_APPRAISAL_COLUMNS.some((column) => (
-    text.includes(column.toLowerCase())
-  ));
-  if (!mentionsMetadataColumn) return false;
-
-  return (
-    error.code === 'PGRST204'
+  if (!columns.some((column) => text.includes(column.toLowerCase()))) return false;
+  return error.code === 'PGRST204'
     || error.code === '42703'
     || text.includes('schema cache')
     || text.includes('does not exist')
     || text.includes('could not find')
-    || text.includes('unknown column')
-  );
+    || text.includes('unknown column');
+}
+
+export function isMissingMetadataSchemaError(error) {
+  return missingColumnErrorMentions(error, METADATA_APPRAISAL_COLUMNS);
+}
+
+export function isMissingFoundationSchemaError(error) {
+  return missingColumnErrorMentions(error, FOUNDATION_APPRAISAL_COLUMNS);
 }
 
 function normalizeBounds(bounds) {
   if (!bounds || typeof bounds !== 'object') {
     throw new TypeError('Map bounds are required to fetch appraisals.');
   }
-
   const rawValues = [bounds.north, bounds.south, bounds.east, bounds.west];
   if (rawValues.some((value) => value === '' || value === null || value === undefined)) {
     throw new TypeError('Map bounds must contain valid north, south, east, and west values.');
   }
-
   const normalized = {
     north: Number(bounds.north),
     south: Number(bounds.south),
     east: Number(bounds.east),
     west: Number(bounds.west),
   };
-  const allFinite = Object.values(normalized).every(Number.isFinite);
   if (
-    !allFinite
+    !Object.values(normalized).every(Number.isFinite)
     || normalized.north < normalized.south
     || normalized.north > 90
     || normalized.south < -90
@@ -100,7 +135,6 @@ function normalizeBounds(bounds) {
   ) {
     throw new TypeError('Map bounds must contain valid north, south, east, and west values.');
   }
-
   return normalized;
 }
 
@@ -111,19 +145,12 @@ function normalizePositiveInteger(value, fallback, maximum) {
 }
 
 function applyBounds(query, bounds) {
-  let bounded = query
-    .gte('latitude', bounds.south)
-    .lte('latitude', bounds.north);
-
+  let bounded = query.gte('latitude', bounds.south).lte('latitude', bounds.north);
   if (bounds.west <= bounds.east) {
-    bounded = bounded
-      .gte('longitude', bounds.west)
-      .lte('longitude', bounds.east);
+    bounded = bounded.gte('longitude', bounds.west).lte('longitude', bounds.east);
   } else {
-    // A west value greater than east means the viewport crosses the antimeridian.
     bounded = bounded.or(`longitude.gte.${bounds.west},longitude.lte.${bounds.east}`);
   }
-
   return bounded;
 }
 
@@ -133,18 +160,16 @@ function buildPageQuery(
   bounds,
   from,
   to,
-  { includeCount, signal }
+  { includeCount, includeDeletedFilter, signal }
 ) {
   let query = supabase
     .from('appraisals')
     .select(columns, includeCount ? { count: 'exact' } : undefined)
     .order('created_at', { ascending: false })
     .order('id', { ascending: true });
-
+  if (includeDeletedFilter) query = query.is('deleted_at', null);
   query = applyBounds(query, bounds).range(from, to);
-  if (signal && typeof query.abortSignal === 'function') {
-    query = query.abortSignal(signal);
-  }
+  if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
   return query;
 }
 
@@ -152,12 +177,11 @@ async function fetchWithColumns(
   supabase,
   bounds,
   columns,
-  { pageSize, maxRecords, signal }
+  { pageSize, maxRecords, signal, includeDeletedFilter = false }
 ) {
   const records = [];
   let totalCount = null;
   let lastPageWasFull = false;
-
   for (let from = 0; from < maxRecords; from += pageSize) {
     const to = Math.min(from + pageSize, maxRecords) - 1;
     const { data, count, error } = await buildPageQuery(
@@ -166,20 +190,16 @@ async function fetchWithColumns(
       bounds,
       from,
       to,
-      { includeCount: from === 0, signal }
+      { includeCount: from === 0, includeDeletedFilter, signal }
     );
     if (error) throw error;
-
     const page = data || [];
     if (from === 0 && Number.isFinite(count)) totalCount = count;
     records.push(...page);
-
     const requestedPageSize = to - from + 1;
     lastPageWasFull = page.length === requestedPageSize;
-    if (!lastPageWasFull) break;
-    if (totalCount !== null && records.length >= totalCount) break;
+    if (!lastPageWasFull || (totalCount !== null && records.length >= totalCount)) break;
   }
-
   return {
     data: records,
     count: totalCount === null ? records.length : totalCount,
@@ -189,86 +209,220 @@ async function fetchWithColumns(
   };
 }
 
+async function fetchWithAvailableSchema(supabase, bounds, options) {
+  if (foundationSchemaCapability !== CAPABILITY_UNSUPPORTED) {
+    const columns = metadataSchemaCapability === CAPABILITY_UNSUPPORTED
+      ? LEGACY_FOUNDATION_APPRAISAL_SELECT
+      : CURRENT_APPRAISAL_SELECT;
+    try {
+      const result = await fetchWithColumns(supabase, bounds, columns, {
+        ...options,
+        includeDeletedFilter: true,
+      });
+      foundationSchemaCapability = CAPABILITY_SUPPORTED;
+      if (columns === CURRENT_APPRAISAL_SELECT) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+      return result;
+    } catch (error) {
+      if (isMissingFoundationSchemaError(error)) {
+        foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+      } else if (isMissingMetadataSchemaError(error)) {
+        metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+        return fetchWithAvailableSchema(supabase, bounds, options);
+      } else {
+        throw error;
+      }
+    }
+  }
+
+  if (metadataSchemaCapability !== CAPABILITY_UNSUPPORTED) {
+    try {
+      const result = await fetchWithColumns(supabase, bounds, EXTENDED_APPRAISAL_SELECT, options);
+      metadataSchemaCapability = CAPABILITY_SUPPORTED;
+      return result;
+    } catch (error) {
+      if (!isMissingMetadataSchemaError(error)) throw error;
+      metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+    }
+  }
+  return fetchWithColumns(supabase, bounds, LEGACY_APPRAISAL_SELECT, options);
+}
+
 export async function fetchAppraisalsInBounds(
   supabase,
   bounds,
-  {
-    pageSize = DEFAULT_PAGE_SIZE,
-    maxRecords = MAX_RECORDS_PER_BOUNDS_FETCH,
-    signal,
-  } = {}
+  { pageSize = DEFAULT_PAGE_SIZE, maxRecords = MAX_RECORDS_PER_BOUNDS_FETCH, signal } = {}
 ) {
   const normalizedBounds = normalizeBounds(bounds);
-  const normalizedPageSize = normalizePositiveInteger(
-    pageSize,
-    DEFAULT_PAGE_SIZE,
-    DEFAULT_PAGE_SIZE
-  );
+  const normalizedPageSize = normalizePositiveInteger(pageSize, DEFAULT_PAGE_SIZE, DEFAULT_PAGE_SIZE);
   const normalizedMaxRecords = normalizePositiveInteger(
     maxRecords,
     MAX_RECORDS_PER_BOUNDS_FETCH,
     MAX_RECORDS_PER_BOUNDS_FETCH
   );
-  const options = {
+  const result = await fetchWithAvailableSchema(supabase, normalizedBounds, {
     pageSize: Math.min(normalizedPageSize, normalizedMaxRecords),
     maxRecords: normalizedMaxRecords,
     signal,
+  });
+  return {
+    ...result,
+    metadataSupported: capabilityFlag(metadataSchemaCapability),
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
   };
+}
 
-  if (metadataSchemaCapability === CAPABILITY_UNSUPPORTED) {
-    const result = await fetchWithColumns(
-      supabase,
-      normalizedBounds,
-      LEGACY_APPRAISAL_SELECT,
-      options
-    );
-    return { ...result, metadataSupported: false };
+function duplicateSelect({ useFoundation, dateColumn }) {
+  return [
+    'id',
+    'address',
+    'city',
+    'appraisal_date',
+    ...(dateColumn === 'effective_date' ? ['effective_date'] : []),
+    'created_at',
+    ...(useFoundation ? ['place_id', 'formatted_address', 'deleted_at'] : []),
+  ].join(',');
+}
+
+function exactIlikeValue(value) {
+  return String(value || '').trim().replace(/[\\%_]/g, '\\$&');
+}
+
+async function queryPotentialDuplicates(
+  supabase,
+  { placeId, address, city, dateColumn, dateValue },
+  { useFoundation, signal }
+) {
+  let query = supabase
+    .from('appraisals')
+    .select(duplicateSelect({ useFoundation, dateColumn }))
+    .eq(dateColumn, dateValue)
+    .order('created_at', { ascending: false });
+  if (useFoundation) query = query.is('deleted_at', null);
+  if (useFoundation && placeId) {
+    query = query.eq('place_id', placeId);
+  } else {
+    query = query
+      .ilike('address', exactIlikeValue(address))
+      .ilike('city', exactIlikeValue(city));
+  }
+  if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+  return query.limit(3);
+}
+
+export async function findPotentialAppraisalDuplicates(
+  supabase,
+  { placeId, address, city, appraisalDate, effectiveDate } = {},
+  { signal } = {}
+) {
+  let dateColumn = effectiveDate ? 'effective_date' : appraisalDate ? 'appraisal_date' : null;
+  let dateValue = effectiveDate || appraisalDate || null;
+  const hasLegacyLocation = Boolean(String(address || '').trim() && String(city || '').trim());
+  if (!dateColumn || (!placeId && !hasLegacyLocation)) {
+    return {
+      data: [],
+      matchedOn: null,
+      foundationSupported: capabilityFlag(foundationSchemaCapability),
+      skipped: true,
+    };
   }
 
-  try {
-    const result = await fetchWithColumns(
-      supabase,
-      normalizedBounds,
-      EXTENDED_APPRAISAL_SELECT,
-      options
-    );
-    metadataSchemaCapability = CAPABILITY_SUPPORTED;
-    return { ...result, metadataSupported: true };
-  } catch (error) {
-    if (!isMissingMetadataSchemaError(error)) throw error;
+  if (dateColumn === 'effective_date' && metadataSchemaCapability === CAPABILITY_UNSUPPORTED) {
+    if (!appraisalDate) {
+      return { data: [], matchedOn: null, foundationSupported: capabilityFlag(foundationSchemaCapability), skipped: true };
+    }
+    dateColumn = 'appraisal_date';
+    dateValue = appraisalDate;
+  }
 
+  let useFoundation = foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
+  if (!useFoundation && !hasLegacyLocation) {
+    return { data: [], matchedOn: null, foundationSupported: false, skipped: true };
+  }
+
+  let response = await queryPotentialDuplicates(
+    supabase,
+    { placeId, address, city, dateColumn, dateValue },
+    { useFoundation, signal }
+  );
+
+  if (useFoundation && isMissingFoundationSchemaError(response.error)) {
+    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    useFoundation = false;
+    if (!hasLegacyLocation) {
+      return { data: [], matchedOn: null, foundationSupported: false, skipped: true };
+    }
+    response = await queryPotentialDuplicates(
+      supabase,
+      { address, city, dateColumn, dateValue },
+      { useFoundation: false, signal }
+    );
+  }
+
+  if (dateColumn === 'effective_date' && isMissingMetadataSchemaError(response.error)) {
     metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    const result = await fetchWithColumns(
+    if (!appraisalDate) {
+      return {
+        data: [],
+        matchedOn: null,
+        foundationSupported: capabilityFlag(foundationSchemaCapability),
+        skipped: true,
+      };
+    }
+    dateColumn = 'appraisal_date';
+    dateValue = appraisalDate;
+    response = await queryPotentialDuplicates(
       supabase,
-      normalizedBounds,
-      LEGACY_APPRAISAL_SELECT,
-      options
+      { placeId, address, city, dateColumn, dateValue },
+      { useFoundation, signal }
     );
-    return { ...result, metadataSupported: false };
   }
+
+  if (response.error) throw response.error;
+  if (useFoundation) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+  if (dateColumn === 'effective_date') metadataSchemaCapability = CAPABILITY_SUPPORTED;
+  return {
+    data: response.data || [],
+    matchedOn: useFoundation && placeId ? 'place_id' : 'address_city',
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
+    skipped: false,
+  };
+}
+
+function payloadContains(payload, columns) {
+  return columns.some((column) => Object.prototype.hasOwnProperty.call(payload || {}, column));
 }
 
 function payloadContainsMetadata(payload) {
-  return METADATA_APPRAISAL_COLUMNS.some((column) => (
-    Object.prototype.hasOwnProperty.call(payload || {}, column)
+  return payloadContains(payload, METADATA_APPRAISAL_COLUMNS);
+}
+
+function payloadContainsFoundation(payload) {
+  return payloadContains(payload, FOUNDATION_APPRAISAL_COLUMNS);
+}
+
+function withoutFoundationFields(payload) {
+  return Object.fromEntries(Object.entries(payload || {}).filter(
+    ([column]) => !FOUNDATION_APPRAISAL_COLUMNS.includes(column)
   ));
 }
 
 function rememberMutationCapability(payload, error) {
-  if (isMissingMetadataSchemaError(error)) {
-    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-  } else if (!error && payloadContainsMetadata(payload)) {
-    metadataSchemaCapability = CAPABILITY_SUPPORTED;
-  }
+  if (isMissingMetadataSchemaError(error)) metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+  else if (!error && payloadContainsMetadata(payload)) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+  if (isMissingFoundationSchemaError(error)) foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+  else if (!error && payloadContainsFoundation(payload)) foundationSchemaCapability = CAPABILITY_SUPPORTED;
 }
 
-function createMutationNotAppliedError(action, id) {
+function createMutationNotAppliedError(action, id, code = APPRAISAL_MUTATION_NOT_APPLIED_CODE) {
   const error = new Error(
-    `The appraisal was not ${action}. It may no longer exist or your account may not have permission.`
+    code === APPRAISAL_VERSION_CONFLICT_CODE
+      ? 'This appraisal changed after you opened it. Reload it before saving your changes.'
+      : `The appraisal was not ${action}. It may no longer exist or your account may not have permission.`
   );
   error.name = 'AppraisalMutationError';
-  error.code = APPRAISAL_MUTATION_NOT_APPLIED_CODE;
+  error.code = code;
   error.appraisalId = id;
+  error.isUserFacing = true;
   return error;
 }
 
@@ -276,43 +430,211 @@ export function isAppraisalMutationNotAppliedError(error) {
   return error?.code === APPRAISAL_MUTATION_NOT_APPLIED_CODE;
 }
 
-function verifyMutationResult(data, error, action, id) {
+export function isAppraisalVersionConflictError(error) {
+  return error?.code === APPRAISAL_VERSION_CONFLICT_CODE;
+}
+
+function verifyMutationResult(data, error, action, id, expectedVersion) {
   if (error) return error;
-  if (!data || String(data.id) !== String(id)) {
-    return createMutationNotAppliedError(action, id);
+  if (!data || (id !== undefined && String(data.id) !== String(id))) {
+    return createMutationNotAppliedError(
+      action,
+      id,
+      expectedVersion === undefined
+        ? APPRAISAL_MUTATION_NOT_APPLIED_CODE
+        : APPRAISAL_VERSION_CONFLICT_CODE
+    );
   }
   return null;
 }
 
+function selectForMutation(payload, useFoundation) {
+  if (useFoundation) {
+    return metadataSchemaCapability === CAPABILITY_UNSUPPORTED && !payloadContainsMetadata(payload)
+      ? LEGACY_FOUNDATION_APPRAISAL_SELECT
+      : CURRENT_APPRAISAL_SELECT;
+  }
+  return metadataSchemaCapability === CAPABILITY_UNSUPPORTED && !payloadContainsMetadata(payload)
+    ? LEGACY_APPRAISAL_SELECT
+    : EXTENDED_APPRAISAL_SELECT;
+}
+
+function normalizeOpaqueToken(value) {
+  return String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
+}
+
+export function createAppraisalSubmissionId() {
+  if (typeof window !== 'undefined' && window.crypto?.randomUUID) {
+    return window.crypto.randomUUID();
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
+export function createAppraisalIdempotencyKey(submissionId) {
+  const token = normalizeOpaqueToken(submissionId);
+  if (!token) throw new TypeError('A submission id is required for an idempotency key.');
+  if (token.length < 6) throw new TypeError('The submission id is too short for an idempotency key.');
+  return `appraisal-${token}`.slice(0, 160);
+}
+
+async function executeInsert(supabase, payload, useFoundation) {
+  const table = supabase.from('appraisals');
+  const query = useFoundation && payload.idempotency_key
+    ? table.upsert([payload], { onConflict: 'idempotency_key', ignoreDuplicates: false })
+    : table.insert([payload]);
+  return query.select(selectForMutation(payload, useFoundation)).maybeSingle();
+}
+
 export async function insertAppraisal(supabase, payload) {
-  const { data, error } = await supabase.from('appraisals').insert([payload]);
-  rememberMutationCapability(payload, error);
-  return { data, error, metadataSupported: metadataSupportedFlag() };
-}
-
-export async function updateAppraisal(supabase, id, updates) {
-  const { data, error: responseError } = await supabase
-    .from('appraisals')
-    .update(updates)
-    .eq('id', id)
-    .select('id')
-    .maybeSingle();
-  const error = verifyMutationResult(data, responseError, 'updated', id);
-  rememberMutationCapability(updates, error);
-  return { data, error, metadataSupported: metadataSupportedFlag() };
-}
-
-export async function deleteAppraisal(supabase, id) {
-  const { data, error: responseError } = await supabase
-    .from('appraisals')
-    .delete()
-    .eq('id', id)
-    .select('id')
-    .maybeSingle();
-  const error = verifyMutationResult(data, responseError, 'removed', id);
+  const wantsFoundation = payloadContainsFoundation(payload);
+  let useFoundation = wantsFoundation && foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
+  let appliedPayload = useFoundation ? payload : withoutFoundationFields(payload);
+  let response = await executeInsert(supabase, appliedPayload, useFoundation);
+  if (useFoundation && isMissingFoundationSchemaError(response.error)) {
+    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    useFoundation = false;
+    appliedPayload = withoutFoundationFields(payload);
+    response = await executeInsert(supabase, appliedPayload, false);
+  }
+  if (!payloadContainsMetadata(payload) && isMissingMetadataSchemaError(response.error)) {
+    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+    response = await executeInsert(supabase, appliedPayload, useFoundation);
+  }
+  const error = verifyMutationResult(response.data, response.error, 'created');
+  rememberMutationCapability(appliedPayload, error);
   return {
-    data,
+    data: response.data,
     error,
-    deletedId: error ? null : data.id,
+    metadataSupported: capabilityFlag(metadataSchemaCapability),
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
+    idempotencySupported: useFoundation && !error,
+  };
+}
+
+async function executeUpdate(supabase, id, updates, { expectedVersion, useFoundation }) {
+  let query = supabase.from('appraisals').update(updates).eq('id', id);
+  if (expectedVersion !== undefined && useFoundation) query = query.eq('version', expectedVersion);
+  return query.select(selectForMutation(updates, useFoundation)).maybeSingle();
+}
+
+export async function updateAppraisal(supabase, id, updates, { expectedVersion } = {}) {
+  const wantsFoundation = payloadContainsFoundation(updates) || expectedVersion !== undefined;
+  let useFoundation = wantsFoundation && foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
+  let appliedUpdates = useFoundation ? updates : withoutFoundationFields(updates);
+  let response = await executeUpdate(supabase, id, appliedUpdates, { expectedVersion, useFoundation });
+  if (useFoundation && isMissingFoundationSchemaError(response.error)) {
+    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    useFoundation = false;
+    appliedUpdates = withoutFoundationFields(updates);
+    response = await executeUpdate(supabase, id, appliedUpdates, { useFoundation: false });
+  }
+  if (!payloadContainsMetadata(updates) && isMissingMetadataSchemaError(response.error)) {
+    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+    response = await executeUpdate(
+      supabase,
+      id,
+      appliedUpdates,
+      { expectedVersion, useFoundation }
+    );
+  }
+  const error = verifyMutationResult(
+    response.data,
+    response.error,
+    'updated',
+    id,
+    useFoundation ? expectedVersion : undefined
+  );
+  rememberMutationCapability(appliedUpdates, error);
+  return {
+    data: response.data,
+    error,
+    metadataSupported: capabilityFlag(metadataSchemaCapability),
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
+    concurrencySupported: useFoundation && !error,
+  };
+}
+
+function migrationRequiredError() {
+  const error = new Error('This appraisal cannot be archived until the safe-delete migration is applied.');
+  error.code = 'APPRAISAL_ARCHIVE_MIGRATION_REQUIRED';
+  error.isUserFacing = true;
+  return error;
+}
+
+async function archiveAppraisal(supabase, id, { expectedVersion, now }) {
+  let query = supabase
+    .from('appraisals')
+    .update({ deleted_at: now })
+    .eq('id', id)
+    .is('deleted_at', null);
+  if (expectedVersion !== undefined) query = query.eq('version', expectedVersion);
+  return query.select(selectForMutation({ deleted_at: now }, true)).maybeSingle();
+}
+
+export async function deleteAppraisal(
+  supabase,
+  id,
+  { expectedVersion, now = new Date().toISOString() } = {}
+) {
+  if (foundationSchemaCapability === CAPABILITY_UNSUPPORTED) {
+    return { data: null, error: migrationRequiredError(), deletedId: null, archived: false };
+  }
+  const response = await archiveAppraisal(supabase, id, { expectedVersion, now });
+  let finalResponse = response;
+  if (isMissingFoundationSchemaError(finalResponse.error)) {
+    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    return { data: null, error: migrationRequiredError(), deletedId: null, archived: false };
+  }
+  if (isMissingMetadataSchemaError(finalResponse.error)) {
+    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+    finalResponse = await archiveAppraisal(supabase, id, { expectedVersion, now });
+  }
+  if (!finalResponse.error) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+  const error = verifyMutationResult(
+    finalResponse.data,
+    finalResponse.error,
+    'archived',
+    id,
+    expectedVersion
+  );
+  return {
+    data: finalResponse.data,
+    error,
+    deletedId: error ? null : finalResponse.data.id,
+    archived: !error,
+  };
+}
+
+export async function restoreAppraisal(supabase, id, { expectedVersion } = {}) {
+  if (foundationSchemaCapability === CAPABILITY_UNSUPPORTED) {
+    return { data: null, error: migrationRequiredError(), foundationSupported: false };
+  }
+  let query = supabase
+    .from('appraisals')
+    .update({ deleted_at: null, deleted_by: null })
+    .eq('id', id);
+  if (expectedVersion !== undefined) query = query.eq('version', expectedVersion);
+  let response = await query.select(selectForMutation({ deleted_at: null }, true)).maybeSingle();
+  if (isMissingFoundationSchemaError(response.error)) {
+    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    return { data: null, error: migrationRequiredError(), foundationSupported: false };
+  }
+  if (isMissingMetadataSchemaError(response.error)) {
+    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+    let retry = supabase
+      .from('appraisals')
+      .update({ deleted_at: null, deleted_by: null })
+      .eq('id', id);
+    if (expectedVersion !== undefined) retry = retry.eq('version', expectedVersion);
+    response = await retry
+      .select(selectForMutation({ deleted_at: null }, true))
+      .maybeSingle();
+  }
+  if (!response.error) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+  const error = verifyMutationResult(response.data, response.error, 'restored', id, expectedVersion);
+  return {
+    data: response.data,
+    error,
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
   };
 }

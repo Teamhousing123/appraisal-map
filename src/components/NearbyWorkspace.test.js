@@ -64,14 +64,23 @@ function renderWorkspace(overrides = {}) {
   return render(<NearbyWorkspace {...workspaceProps(overrides)} />);
 }
 
-test('keeps a sparse legacy report useful and distinguishes missing data', () => {
-  renderWorkspace();
+test('keeps a sparse legacy report useful, explains disabled selection, and clears focus hover', () => {
+  const onHoverReport = jest.fn();
+  renderWorkspace({ onHoverReport });
 
   expect(screen.getByRole('heading', { name: 'Reports in this map area' })).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
   expect(screen.getByText('Property details not recorded')).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Open report/i })).toBeEnabled();
-  expect(screen.getByRole('checkbox', { name: /Select as candidate/i })).toBeDisabled();
+  expect(screen.getByRole('button', { name: 'Open PDF' })).toBeEnabled();
+  expect(screen.getByRole('checkbox', {
+    name: /Select as candidate.*Set a subject property first/i,
+  })).toBeDisabled();
+
+  const detailsButton = screen.getByRole('button', { name: /Details/i });
+  fireEvent.focus(detailsButton);
+  expect(onHoverReport).toHaveBeenLastCalledWith(report.id);
+  fireEvent.blur(detailsButton, { relatedTarget: null });
+  expect(onHoverReport).toHaveBeenLastCalledWith(null);
 });
 
 test('renders neutral factual differences in comparison view', () => {
@@ -90,8 +99,9 @@ test('renders neutral factual differences in comparison view', () => {
   expect(screen.getByText(/No valuation adjustment, ranking, or recommendation/i)).toBeInTheDocument();
 });
 
-test('explains every active filter omission and clears the filters in one action', () => {
+test('explains every active filter omission and makes each filter removable', () => {
   const onResetFilters = jest.fn();
+  const onFilterChange = jest.fn();
   renderWorkspace({
     subject,
     filters: {
@@ -107,6 +117,7 @@ test('explains every active filter omission and clears the filters in one action
       referenceDate: 3,
       coordinates: 1,
     },
+    onFilterChange,
     onResetFilters,
   });
 
@@ -117,8 +128,57 @@ test('explains every active filter omission and clears the filters in one action
   expect(screen.getByText(/3 reports without an effective or report date are excluded/i)).toBeInTheDocument();
   expect(screen.getByText(/1 report without a mapped location is excluded/i)).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }));
+  fireEvent.click(screen.getByRole('button', { name: /Remove Radius: Within 10 km/i }));
+  expect(onFilterChange).toHaveBeenCalledWith('radiusKm', '');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Clear all' }));
   expect(onResetFilters).toHaveBeenCalledTimes(1);
+});
+
+test('does not apply an invalid date range or hide the retained results', () => {
+  const onFilterChange = jest.fn();
+  renderWorkspace({ onFilterChange });
+
+  fireEvent.change(screen.getByLabelText('Reference date from'), {
+    target: { value: '2026-08-05' },
+  });
+  fireEvent.change(screen.getByLabelText('Reference date to'), {
+    target: { value: '2026-08-01' },
+  });
+
+  expect(screen.getByRole('alert')).toHaveTextContent(/from date must be on or before the to date/i);
+  expect(screen.getByLabelText('Reference date to')).toHaveAttribute('aria-invalid', 'true');
+  expect(onFilterChange).toHaveBeenCalledWith('dateFrom', '2026-08-05');
+  expect(onFilterChange).not.toHaveBeenCalledWith('dateTo', '2026-08-01');
+  expect(screen.getByRole('heading', { name: report.address })).toBeInTheDocument();
+});
+
+test('retains report cards when refresh fails and shows freshness context', () => {
+  const onRetry = jest.fn();
+  renderWorkspace({
+    error: 'The latest reports could not be loaded.',
+    lastUpdatedAt: '2026-08-07T14:30:00Z',
+    onRetry,
+  });
+
+  expect(screen.getByText('Reports could not be refreshed')).toBeInTheDocument();
+  expect(screen.getByText(/They may not match the current map area/i)).toBeInTheDocument();
+  expect(screen.getByText(/Last updated/i)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: report.address })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  expect(onRetry).toHaveBeenCalledTimes(1);
+});
+
+test('explains the three-candidate limit on disabled report selection', () => {
+  renderWorkspace({
+    subject,
+    candidateIds: ['candidate-1', 'candidate-2', 'candidate-3'],
+  });
+
+  expect(screen.getByRole('checkbox', {
+    name: /Remove one selected candidate to choose another/i,
+  })).toBeDisabled();
 });
 
 test('shows accessible validation errors for invalid transient subject facts', () => {

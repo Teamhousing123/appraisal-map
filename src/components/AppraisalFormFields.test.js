@@ -76,3 +76,15 @@ test('associates validation and date warnings with their inputs', () => {
     .toHaveAttribute('aria-describedby', 'appraisal-living-area-help appraisal-living-area-error');
   expect(screen.getByText('Enter a whole number greater than zero.')).toBeInTheDocument();
 });
+
+test('opens optional property details when the report already has stored values', () => {
+  renderFields({
+    propertyDetails: {
+      propertyType: PROPERTY_TYPE_OPTIONS[0].value,
+      reportedLivingAreaSqFt: '',
+      yearBuilt: '',
+    },
+  });
+
+  expect(screen.getByRole('group')).toHaveAttribute('open');
+});

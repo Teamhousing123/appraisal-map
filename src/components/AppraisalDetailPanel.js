@@ -28,6 +28,8 @@ import {
   updateAppraisal,
 } from '../services/appraisalService';
 import AppraisalFormFields from './AppraisalFormFields';
+import AddressPicker from './AddressPicker';
+import { uploadStorageObject } from '../services/resumableUpload';
 
 function BackIcon() {
   return (
@@ -124,6 +126,7 @@ function AppraisalDetailPanel({
   const [form, setForm] = useState(() => initialFormState(appraisal));
   const formRef = useRef(form);
   const geocodeRequestRef = useRef(0);
+  const errorSummaryRef = useRef(null);
   const [fieldErrors, setFieldErrors] = useState({});
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
@@ -135,7 +138,13 @@ function AppraisalDetailPanel({
   const [uploadType, setUploadType] = useState(appraisal.folder_files?.length ? 'folder' : 'pdf');
   const [newPdf, setNewPdf] = useState(null);
   const [newFolderFiles, setNewFolderFiles] = useState([]);
+  const [removePhoto, setRemovePhoto] = useState(false);
+  const [removeDocuments, setRemoveDocuments] = useState(false);
   const [addressMatch, setAddressMatch] = useState(null);
+  const [uploadProgress, setUploadProgress] = useState(null);
+  const uploadControllerRef = useRef(null);
+  const hasExistingPhoto = Boolean(appraisal.photo_url);
+  const hasExistingDocuments = Boolean(appraisal.pdf_url || appraisal.folder_files?.length);
   const formBusy = saving || verifyingAddress;
   const editDirty = Boolean(
     editing
@@ -144,6 +153,8 @@ function AppraisalDetailPanel({
       || newPhoto
       || newPdf
       || newFolderFiles.length
+      || removePhoto
+      || removeDocuments
     )
   );
 
@@ -159,7 +170,12 @@ function AppraisalDetailPanel({
     });
   }, [deleting, editDirty, formBusy, onWorkspaceStateChange]);
 
+  useEffect(() => {
+    if (error) errorSummaryRef.current?.focus();
+  }, [error]);
+
   useEffect(() => () => {
+    uploadControllerRef.current?.abort();
     onWorkspaceStateChange?.({ dirty: false, busy: false });
   }, [onWorkspaceStateChange]);
 
@@ -177,6 +193,8 @@ function AppraisalDetailPanel({
     setNewPhoto(null);
     setNewPdf(null);
     setNewFolderFiles([]);
+    setRemovePhoto(false);
+    setRemoveDocuments(false);
     setUploadType(appraisal.folder_files?.length ? 'folder' : 'pdf');
     setAddressMatch(null);
 
@@ -206,6 +224,26 @@ function AppraisalDetailPanel({
 
   const handlePropertyDetailChange = (field, value) => updateForm(field, value);
 
+  const handleAddressResolved = (result, values) => {
+    const nextForm = {
+      ...formRef.current,
+      address: values.address,
+      city: values.city,
+    };
+    formRef.current = nextForm;
+    setForm(nextForm);
+    setFieldErrors((current) => ({ ...current, address: undefined, city: undefined }));
+    setAddressMatch({
+      key: addressFingerprint(values.address, values.city),
+      formattedAddress: result.formattedAddress,
+      latitude: result.latitude,
+      longitude: result.longitude,
+      normalizedAddress: result.normalizedAddress || null,
+    });
+    setError('');
+    setStatus(`Address matched as ${result.formattedAddress}.`);
+  };
+
   const resetEditing = () => {
     const nextForm = initialFormState(appraisal);
     geocodeRequestRef.current += 1;
@@ -219,6 +257,8 @@ function AppraisalDetailPanel({
     setNewPhoto(null);
     setNewPdf(null);
     setNewFolderFiles([]);
+    setRemovePhoto(false);
+    setRemoveDocuments(false);
   };
 
   const handleNewPhotoSelection = (event) => {
@@ -232,6 +272,7 @@ function AppraisalDetailPanel({
     }
     setError('');
     setNewPhoto(selectedPhoto);
+    if (selectedPhoto) setRemovePhoto(false);
   };
 
   const handleNewPdfSelection = (event) => {
@@ -245,6 +286,7 @@ function AppraisalDetailPanel({
     }
     setError('');
     setNewPdf(selectedPdf);
+    if (selectedPdf) setRemoveDocuments(false);
   };
 
   const handleNewFolderSelection = (event) => {
@@ -258,6 +300,24 @@ function AppraisalDetailPanel({
     }
     setError('');
     setNewFolderFiles(selectedFiles);
+    if (selectedFiles.length > 0) setRemoveDocuments(false);
+  };
+
+  const handleUploadTypeChange = (nextType) => {
+    if (nextType === uploadType) return;
+    const wouldDiscardSelection = uploadType === 'pdf'
+      ? Boolean(newPdf)
+      : newFolderFiles.length > 0;
+    if (wouldDiscardSelection) {
+      setError(
+        uploadType === 'pdf'
+          ? 'Remove the selected replacement PDF before switching to a document folder.'
+          : 'Remove the selected replacement folder before switching to a PDF.'
+      );
+      return;
+    }
+    setError('');
+    setUploadType(nextType);
   };
 
   const handleSave = async (event) => {
@@ -296,8 +356,13 @@ function AppraisalDetailPanel({
       || formSnapshot.city.trim() !== String(appraisal.city || '').trim()
     );
     const expectedAddressKey = addressFingerprint(formSnapshot.address, formSnapshot.city);
+    let verifiedAddressMatch = isCurrentAddressMatch(
+      addressMatch,
+      formSnapshot.address,
+      formSnapshot.city
+    ) ? addressMatch : null;
 
-    if (addressChanged && !isCurrentAddressMatch(addressMatch, formSnapshot.address, formSnapshot.city)) {
+    if (addressChanged && !verifiedAddressMatch) {
       const requestId = ++geocodeRequestRef.current;
       setVerifyingAddress(true);
       try {
@@ -308,32 +373,46 @@ function AppraisalDetailPanel({
           setStatus('The address changed while it was being verified. Verify the current address again.');
           return;
         }
-        setAddressMatch({
+        verifiedAddressMatch = {
           key: expectedAddressKey,
           formattedAddress: result.formattedAddress,
           latitude: result.latitude,
           longitude: result.longitude,
-        });
-        setStatus('Review the matched map location, then choose Save changes again.');
+          normalizedAddress: result.normalizedAddress || null,
+        };
+        setAddressMatch(verifiedAddressMatch);
+        setStatus(`Address matched as ${result.formattedAddress}. Saving changes…`);
       } catch (geocodeError) {
         if (requestId === geocodeRequestRef.current) {
           setError(geocodeError.message || 'The address could not be verified. Try again.');
         }
+        return;
       } finally {
         setVerifyingAddress(false);
       }
-      return;
-    }
-
-    if (addressChanged && !isCurrentAddressMatch(addressMatch, formSnapshot.address, formSnapshot.city)) {
-      setError('Verify the current address again before saving.');
-      return;
     }
 
     setSaving(true);
+    setUploadProgress(null);
     const uploadedPaths = [];
     const oldPaths = [];
     let rowCommitted = false;
+    const uploadController = new AbortController();
+    uploadControllerRef.current = uploadController;
+
+    const uploadObject = async (bucket, path, file, label, contentType) => {
+      setStatus(`Uploading ${label}…`);
+      setUploadProgress({ label, percent: 0 });
+      const result = await uploadStorageObject(supabase, bucket, path, file, {
+        signal: uploadController.signal,
+        forceResumable: true,
+        contentType,
+        onProgress: ({ percent }) => setUploadProgress({ label, percent }),
+      });
+      if (result.error) throw result.error;
+      setUploadProgress({ label, percent: 100 });
+      return result;
+    };
 
     try {
       const normalized = normalizeAppraisalFields({
@@ -355,19 +434,36 @@ function AppraisalDetailPanel({
       }
 
       if (addressChanged) {
-        if (!isCurrentAddressMatch(addressMatch, formRef.current.address, formRef.current.city)) {
+        const currentKey = addressFingerprint(formRef.current.address, formRef.current.city);
+        if (!verifiedAddressMatch || verifiedAddressMatch.key !== currentKey) {
           const staleMatchError = new Error('The verified address no longer matches the form. Verify it again before saving.');
           staleMatchError.isUserFacing = true;
           throw staleMatchError;
         }
-        updates.latitude = addressMatch.latitude;
-        updates.longitude = addressMatch.longitude;
+        updates.latitude = verifiedAddressMatch.latitude;
+        updates.longitude = verifiedAddressMatch.longitude;
+        if (verifiedAddressMatch.normalizedAddress) {
+          updates = { ...updates, ...verifiedAddressMatch.normalizedAddress };
+        }
+      }
+
+      if (removePhoto && appraisal.photo_url && !newPhoto) {
+        updates.photo_url = null;
+        oldPaths.push({ bucket: 'photos', path: appraisal.photo_url });
+      }
+
+      if (removeDocuments && !newPdf && newFolderFiles.length === 0) {
+        updates.pdf_url = null;
+        updates.folder_files = null;
+        if (appraisal.pdf_url) oldPaths.push({ bucket: 'pdfs', path: appraisal.pdf_url });
+        (appraisal.folder_files || []).forEach((oldPath) => (
+          oldPaths.push({ bucket: 'appraisal-folders', path: oldPath })
+        ));
       }
 
       if (newPhoto) {
         const path = createOpaqueStorageKey(newPhoto);
-        const { error: uploadError } = await supabase.storage.from('photos').upload(path, newPhoto);
-        if (uploadError) throw uploadError;
+        await uploadObject('photos', path, newPhoto, 'property photo');
         uploadedPaths.push({ bucket: 'photos', path });
         updates.photo_url = path;
         if (appraisal.photo_url) oldPaths.push({ bucket: 'photos', path: appraisal.photo_url });
@@ -375,8 +471,7 @@ function AppraisalDetailPanel({
 
       if (uploadType === 'pdf' && newPdf) {
         const path = createOpaqueStorageKey(newPdf);
-        const { error: uploadError } = await supabase.storage.from('pdfs').upload(path, newPdf);
-        if (uploadError) throw uploadError;
+        await uploadObject('pdfs', path, newPdf, 'report PDF');
         uploadedPaths.push({ bucket: 'pdfs', path });
         updates.pdf_url = path;
         updates.folder_files = null;
@@ -389,9 +484,15 @@ function AppraisalDetailPanel({
         const zip = new JSZip();
         newFolderFiles.forEach((file) => zip.file(file.webkitRelativePath || file.name, file));
         const zipBlob = await zip.generateAsync({ type: 'blob' });
+        const zipFile = new File([zipBlob], 'appraisal-documents.zip', { type: 'application/zip' });
         const path = createOpaqueStorageKey('.zip');
-        const { error: uploadError } = await supabase.storage.from('appraisal-folders').upload(path, zipBlob);
-        if (uploadError) throw uploadError;
+        await uploadObject(
+          'appraisal-folders',
+          path,
+          zipFile,
+          'document folder',
+          'application/zip'
+        );
         uploadedPaths.push({ bucket: 'appraisal-folders', path });
         updates.folder_files = [path];
         updates.pdf_url = null;
@@ -399,10 +500,23 @@ function AppraisalDetailPanel({
         (appraisal.folder_files || []).forEach((oldPath) => oldPaths.push({ bucket: 'appraisal-folders', path: oldPath }));
       }
 
-      let result = await updateAppraisal(supabase, appraisal.id, updates);
+      uploadControllerRef.current = null;
+      setUploadProgress(null);
+      setStatus('Finishing the report update…');
+
+      let committedUpdates = updates;
+      const concurrencyOptions = Number.isInteger(appraisal.version)
+        ? { expectedVersion: appraisal.version }
+        : undefined;
+      let result = concurrencyOptions
+        ? await updateAppraisal(supabase, appraisal.id, updates, concurrencyOptions)
+        : await updateAppraisal(supabase, appraisal.id, updates);
       if (result.error && isMissingMetadataSchemaError(result.error) && !metadataHasValue(formSnapshot)) {
         const { effective_date, property_type, reported_living_area_sq_ft, year_built, ...legacyUpdates } = updates;
-        result = await updateAppraisal(supabase, appraisal.id, legacyUpdates);
+        committedUpdates = legacyUpdates;
+        result = concurrencyOptions
+          ? await updateAppraisal(supabase, appraisal.id, legacyUpdates, concurrencyOptions)
+          : await updateAppraisal(supabase, appraisal.id, legacyUpdates);
       }
       if (result.error) {
         if (isMissingMetadataSchemaError(result.error)) {
@@ -415,11 +529,13 @@ function AppraisalDetailPanel({
       rowCommitted = true;
 
       const cleanupFailures = await cleanupUploadedObjects(supabase, oldPaths);
+      const updatedAppraisal = { ...appraisal, ...committedUpdates, ...(result.data || {}) };
+      const updateMessage = cleanupFailures.length > 0
+        ? 'Report updated. An old file could not be removed and should be reviewed.'
+        : 'Report updated';
 
       setEditing(false);
-      onUpdated(cleanupFailures.length > 0
-        ? 'Report updated. An old file could not be removed and should be reviewed.'
-        : 'Report updated');
+      onUpdated(updateMessage, updatedAppraisal);
     } catch (saveError) {
       const rollbackFailures = rowCommitted
         ? []
@@ -436,6 +552,8 @@ function AppraisalDetailPanel({
         setError(`The report could not be updated. No changes were confirmed. Try again.${cleanupWarning}`);
       }
     } finally {
+      uploadControllerRef.current = null;
+      setUploadProgress(null);
       setSaving(false);
     }
   };
@@ -443,29 +561,26 @@ function AppraisalDetailPanel({
   const handleDelete = async () => {
     setDeleting(true);
     setError('');
-    let rowDeleted = false;
+    let rowArchived = false;
     try {
-      const storagePaths = [
-        ...(appraisal.photo_url ? [{ bucket: 'photos', path: appraisal.photo_url }] : []),
-        ...(appraisal.pdf_url ? [{ bucket: 'pdfs', path: appraisal.pdf_url }] : []),
-        ...((appraisal.folder_files || []).map((path) => ({ bucket: 'appraisal-folders', path }))),
-      ];
-      const { error: rowError, deletedId } = await deleteAppraisal(supabase, appraisal.id);
+      const archiveOptions = Number.isInteger(appraisal.version)
+        ? { expectedVersion: appraisal.version }
+        : undefined;
+      const { error: rowError, deletedId } = archiveOptions
+        ? await deleteAppraisal(supabase, appraisal.id, archiveOptions)
+        : await deleteAppraisal(supabase, appraisal.id);
       if (rowError || String(deletedId) !== String(appraisal.id)) {
-        throw rowError || new Error('The report removal could not be confirmed. No private files were removed.');
+        throw rowError || new Error('The report archive could not be confirmed.');
       }
-      rowDeleted = true;
-      const cleanupFailures = await cleanupUploadedObjects(supabase, storagePaths);
-      onDeleted(cleanupFailures.length > 0
-        ? 'Report removed. One or more files need storage cleanup.'
-        : 'Report removed');
+      rowArchived = true;
+      onDeleted('Report archived. Its files and database record were preserved.');
     } catch (deleteError) {
-      if (rowDeleted) {
-        setError('The report was removed, but the workspace could not refresh. Reload nearby reports to confirm it.');
-      } else if (isAppraisalMutationNotAppliedError(deleteError)) {
-        setError(`${deleteError.message} No private files were removed.`);
+      if (rowArchived) {
+        setError('The report was archived, but the workspace could not refresh. Reload nearby reports to confirm it.');
+      } else if (deleteError?.isUserFacing || isAppraisalMutationNotAppliedError(deleteError)) {
+        setError(deleteError.message);
       } else {
-        setError('The report could not be removed. No private files were removed. Check your permission and try again.');
+        setError('The report could not be archived. It remains visible and unchanged. Check your permission and try again.');
       }
     } finally {
       setDeleting(false);
@@ -488,34 +603,23 @@ function AppraisalDetailPanel({
           onSubmit={handleSave}
           noValidate
         >
-          {error && <div className="form-alert" role="alert">{error}</div>}
+          {error && (
+            <div ref={errorSummaryRef} className="form-alert" role="alert" tabIndex="-1">
+              {error}
+            </div>
+          )}
           {status && <div className="form-status" role="status">{status}</div>}
-          <div className="detail-form__field">
-            <label htmlFor="edit-address">Address</label>
-            <input
-              id="edit-address"
-              autoComplete="street-address"
-              value={form.address}
-              disabled={formBusy}
-              aria-invalid={Boolean(fieldErrors.address)}
-              aria-describedby={fieldErrors.address ? 'edit-address-error' : undefined}
-              onChange={(event) => updateForm('address', event.target.value)}
-            />
-            {fieldErrors.address && <p id="edit-address-error" className="field-error">{fieldErrors.address}</p>}
-          </div>
-          <div className="detail-form__field">
-            <label htmlFor="edit-city">City</label>
-            <input
-              id="edit-city"
-              autoComplete="address-level2"
-              value={form.city}
-              disabled={formBusy}
-              aria-invalid={Boolean(fieldErrors.city)}
-              aria-describedby={fieldErrors.city ? 'edit-city-error' : undefined}
-              onChange={(event) => updateForm('city', event.target.value)}
-            />
-            {fieldErrors.city && <p id="edit-city-error" className="field-error">{fieldErrors.city}</p>}
-          </div>
+          <AddressPicker
+            idPrefix="edit-address"
+            address={form.address}
+            city={form.city}
+            addressLabel="Address"
+            onAddressChange={(value) => updateForm('address', value)}
+            onCityChange={(value) => updateForm('city', value)}
+            onResolved={handleAddressResolved}
+            disabled={formBusy}
+            errors={fieldErrors}
+          />
           {addressMatch && (
             <div className="address-match" role="status">
               <span>Matched map location</span>
@@ -534,6 +638,7 @@ function AppraisalDetailPanel({
             onPropertyDetailChange={handlePropertyDetailChange}
           />
           <FilePicker
+            key={newPhoto?.name || 'empty-photo'}
             id="edit-photo"
             label="Replace property photo (optional)"
             accept={PHOTO_ACCEPT}
@@ -542,15 +647,39 @@ function AppraisalDetailPanel({
             disabled={formBusy}
             onChange={handleNewPhotoSelection}
           />
+          {newPhoto && (
+            <button type="button" className="appraisal-remove-file" onClick={() => setNewPhoto(null)} disabled={formBusy}>
+              Remove selected replacement photo
+            </button>
+          )}
+          {hasExistingPhoto && (
+            <label className="detail-removal-option">
+              <input
+                type="checkbox"
+                checked={removePhoto}
+                disabled={formBusy}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setRemovePhoto(checked);
+                  if (checked) setNewPhoto(null);
+                }}
+              />
+              <span>
+                <strong>Remove current property photo</strong>
+                <small>The report details will remain available.</small>
+              </span>
+            </label>
+          )}
           <fieldset className="document-replacement" disabled={formBusy}>
             <legend>Replace report documents (optional)</legend>
             <div className="segmented-control">
-              <button type="button" aria-pressed={uploadType === 'pdf'} onClick={() => { setUploadType('pdf'); setNewFolderFiles([]); }}>Single PDF</button>
-              <button type="button" aria-pressed={uploadType === 'folder'} onClick={() => { setUploadType('folder'); setNewPdf(null); }}>Document folder</button>
+              <button type="button" aria-pressed={uploadType === 'pdf'} onClick={() => handleUploadTypeChange('pdf')}>Single PDF</button>
+              <button type="button" aria-pressed={uploadType === 'folder'} onClick={() => handleUploadTypeChange('folder')}>Document folder</button>
             </div>
           </fieldset>
           {uploadType === 'pdf' ? (
             <FilePicker
+              key={newPdf?.name || 'empty-pdf'}
               id="edit-pdf"
               label="Replacement PDF"
               accept={PDF_ACCEPT}
@@ -561,6 +690,7 @@ function AppraisalDetailPanel({
             />
           ) : (
             <FilePicker
+              key={newFolderFiles.length ? `folder-${newFolderFiles.length}` : 'empty-folder'}
               id="edit-folder"
               label="Replacement folder"
               directory
@@ -570,9 +700,54 @@ function AppraisalDetailPanel({
               onChange={handleNewFolderSelection}
             />
           )}
+          {newPdf && (
+            <button type="button" className="appraisal-remove-file" onClick={() => setNewPdf(null)} disabled={formBusy}>
+              Remove selected replacement PDF
+            </button>
+          )}
+          {newFolderFiles.length > 0 && (
+            <button type="button" className="appraisal-remove-file" onClick={() => setNewFolderFiles([])} disabled={formBusy}>
+              Remove selected replacement folder
+            </button>
+          )}
+          {hasExistingDocuments && (
+            <label className="detail-removal-option">
+              <input
+                type="checkbox"
+                checked={removeDocuments}
+                disabled={formBusy}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setRemoveDocuments(checked);
+                  if (checked) {
+                    setNewPdf(null);
+                    setNewFolderFiles([]);
+                  }
+                }}
+              />
+              <span>
+                <strong>Remove current report document</strong>
+                <small>This removes the attached PDF or document folder after saving.</small>
+              </span>
+            </label>
+          )}
+          {uploadProgress && (
+            <div className="appraisal-upload-progress" role="status">
+              <span>Uploading {uploadProgress.label}</span>
+              <progress max="100" value={uploadProgress.percent}>{uploadProgress.percent}%</progress>
+              <span>{uploadProgress.percent}%</span>
+              <button
+                type="button"
+                className="appraisal-remove-file"
+                onClick={() => uploadControllerRef.current?.abort()}
+              >
+                Cancel upload
+              </button>
+            </div>
+          )}
           <div className="detail-form__actions">
             <button type="submit" className="button button--primary" disabled={formBusy}>
-              {verifyingAddress ? 'Verifying address…' : saving ? 'Saving…' : addressMatch ? 'Save changes' : 'Save'}
+              {verifyingAddress ? 'Verifying address…' : saving ? 'Saving…' : 'Save changes'}
             </button>
             <button type="button" className="button button--secondary" onClick={resetEditing} disabled={formBusy}>Cancel</button>
           </div>
@@ -604,7 +779,11 @@ function AppraisalDetailPanel({
       </div>
 
       <div className="detail-panel__body">
-        {error && <div className="form-alert" role="alert">{error}</div>}
+        {error && (
+          <div ref={errorSummaryRef} className="form-alert" role="alert" tabIndex="-1">
+            {error}
+          </div>
+        )}
         <h3>{appraisal.address}</h3>
         <p className="detail-panel__city">{appraisal.city}</p>
         <dl className="detail-facts">
@@ -624,7 +803,7 @@ function AppraisalDetailPanel({
             onClick={() => onOpenReport(appraisal)}
             disabled={openingDocument}
           >
-            <DocumentIcon /> {openingDocument ? 'Opening…' : 'Open original report'}
+            <DocumentIcon /> {openingDocument ? 'Preparing…' : 'Open PDF'}
           </button>
         ) : folderPaths.length === 1 ? (
           <button
@@ -633,7 +812,7 @@ function AppraisalDetailPanel({
             onClick={() => onOpenReport(appraisal, folderPaths[0])}
             disabled={openingDocument}
           >
-            <DocumentIcon /> {openingDocument ? 'Opening…' : 'Open original report'}
+            <DocumentIcon /> {openingDocument ? 'Preparing…' : 'Download document folder'}
           </button>
         ) : !hasDocument ? (
           <button type="button" className="button button--report button--full" disabled>
@@ -652,7 +831,7 @@ function AppraisalDetailPanel({
                 onClick={() => onOpenReport(appraisal, folderPath)}
                 disabled={openingDocument}
               >
-                <DocumentIcon /> {openingDocument ? 'Opening…' : `Document ${index + 1}`}
+                <DocumentIcon /> {openingDocument ? 'Preparing…' : `Download folder ${index + 1}`}
               </button>
             ))}
           </div>
@@ -662,13 +841,13 @@ function AppraisalDetailPanel({
           <div className="maintenance-actions">
             <button type="button" className="button button--secondary" onClick={() => setEditing(true)}>Edit report</button>
             {!confirmDelete ? (
-              <button type="button" className="button button--danger-quiet" onClick={() => setConfirmDelete(true)}>Delete…</button>
+              <button type="button" className="button button--secondary" onClick={() => setConfirmDelete(true)}>Archive…</button>
             ) : (
-              <div className="delete-confirmation" role="alert">
-                <p><strong>Remove this report?</strong> This also attempts to remove its private files.</p>
+              <div className="archive-confirmation" role="status">
+                <p><strong>Archive this report?</strong> It will leave the map, while its record and private files stay preserved.</p>
                 <div>
-                  <button type="button" className="button button--danger" onClick={handleDelete} disabled={deleting}>{deleting ? 'Removing…' : 'Yes, remove'}</button>
-                  <button type="button" className="button button--quiet" onClick={() => setConfirmDelete(false)} disabled={deleting}>Keep report</button>
+                  <button type="button" className="button button--primary" onClick={handleDelete} disabled={deleting}>{deleting ? 'Archiving…' : 'Archive report'}</button>
+                  <button type="button" className="button button--quiet" onClick={() => setConfirmDelete(false)} disabled={deleting}>Keep visible</button>
                 </div>
               </div>
             )}

@@ -26,11 +26,16 @@ function AppraisalFormFields({
   const hasPropertyErrors = Boolean(
     errors.propertyType || errors.reportedLivingAreaSqFt || errors.yearBuilt
   );
-  const [detailsOpen, setDetailsOpen] = useState(false);
+  const hasPropertyValues = Boolean(
+    propertyDetails.propertyType
+    || propertyDetails.reportedLivingAreaSqFt
+    || propertyDetails.yearBuilt
+  );
+  const [detailsOpen, setDetailsOpen] = useState(hasPropertyValues);
 
   useEffect(() => {
-    if (hasPropertyErrors) setDetailsOpen(true);
-  }, [hasPropertyErrors]);
+    if (hasPropertyErrors || hasPropertyValues) setDetailsOpen(true);
+  }, [hasPropertyErrors, hasPropertyValues]);
 
   return (
     <>

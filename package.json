@@ -10,16 +10,15 @@
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^13.5.0",
     "jszip": "^3.10.1",
-    "leaflet": "^1.9.4",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "react-leaflet": "^5.0.0",
     "react-scripts": "^5.0.1",
-    "web-vitals": "^2.1.4"
+    "tus-js-client": "^4.3.1"
   },
   "scripts": {
     "start": "react-scripts start",
     "build": "react-scripts build",
+    "verify:build": "node scripts/verify-build.mjs",
     "test": "react-scripts test",
     "test:ci": "react-scripts test --watchAll=false --no-cache",
     "lint": "eslint src --no-cache",

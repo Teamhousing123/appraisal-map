@@ -13,7 +13,7 @@ Appraisal Map brings the core appraisal workflow into one focused interface:
 - Review a synchronized nearby-report list with factual radius, property-type, and reference-date filters.
 - Select up to three candidate reports and compare distance, dates, type, reported living area, and year built without rankings or automated appraisal conclusions.
 - Review property details, report dates, photos, and supporting documents.
-- Add, update, and remove records without leaving the map.
+- Add, update, and reversibly archive records without leaving the map.
 - Upload a single report or preserve a related document set as one archive.
 - Restrict application access to authenticated users.
 
@@ -21,7 +21,7 @@ Map queries are scoped to the visible region and records are loaded in pages, ke
 
 ## Technology
 
-The client is built with React and integrates Google Maps for the primary workspace. Authentication, structured data, and protected file storage are provided by Supabase. The sign-in experience uses Leaflet with CARTO basemaps.
+The client is built with React and integrates Google Maps for the primary workspace. Authentication, structured data, and protected file storage are provided by Supabase. The sign-in screen has no third-party map or font requests, so it stays fast and private before authentication.
 
 ## Development
 
@@ -51,7 +51,7 @@ npm run build
 1. Open this repository as the PyCharm project.
 2. In **Settings → Languages & Frameworks → Node.js**, select a Node.js 22 LTS interpreter and its bundled npm installation.
 3. Open PyCharm's terminal and run `npm ci` once.
-4. Create a local `.env.local` file with the configuration keys listed below. Obtain development values through the approved secrets channel; never use a Supabase service-role key in this browser application.
+4. Copy `.env.example` to a local `.env.local` file and add development values from the approved secrets channel. Never use a Supabase service-role key in this browser application.
 5. Open **Run → Edit Configurations**, add an **npm** configuration, select this repository's `package.json`, choose the `run` command, and enter `start` as the script.
 6. Run that configuration and open [http://localhost:3000](http://localhost:3000).
 
@@ -63,11 +63,40 @@ REACT_APP_SUPABASE_ANON_KEY=
 REACT_APP_GOOGLE_MAPS_API_KEY=
 ```
 
+Optional sign-in help link:
+
+```dotenv
+REACT_APP_SUPPORT_EMAIL=administrator@example.com
+```
+
+The map defaults to an enforced Southern Ontario service area. Operators can change its label,
+version, mode (`enforced` or `advisory`), and bounds with the optional
+`REACT_APP_SERVICE_AREA_*` values documented in `.env.example`. Leave them unset to use the safe
+defaults.
+
 The Google Maps browser key should be restricted to the authorized local and deployed origins. The Supabase anon key is a public client credential and must be protected by Row Level Security and private storage-bucket policies.
+
+If a required value is missing or malformed, the app shows a setup message instead of a blank screen. Restart `npm start` after changing a local environment file.
+
+### Production setup checklist
+
+1. Add the three required `REACT_APP_*` values to the production and preview environments in Vercel, then redeploy. Add `REACT_APP_SUPPORT_EMAIL` if staff should have a direct help link.
+2. Restrict the Google Maps browser key to the deployed hostname and the Maps JavaScript API, Places API, and Geocoding API used by this app.
+3. Apply the migrations in `supabase/migrations` in filename order through the authorized Supabase workflow. They are additive and do not delete or rewrite existing reports.
+4. Confirm Row Level Security on `appraisals` and private policies for `photos`, `pdfs`, and `appraisal-folders` with separate reader and editor test accounts. Follow the exact inspection checklist in `supabase/README.md`; existing policy names must be reviewed before replacement.
+5. Assign write access through server-controlled `app_metadata.role` before deploying this client. Supported writer values are `admin`, `editor`, `writer`, and `appraiser`; missing or unknown roles are intentionally view-only.
+6. Add `REACT_APP_SUPABASE_URL` and `REACT_APP_SUPABASE_ANON_KEY` as GitHub Actions secrets so the existing **Keep Supabase Alive** workflow can make its read-only probe.
+7. Enable GitHub private vulnerability reporting so the process in `SECURITY.md` has a confidential destination.
+
+The browser bundle must receive only the Supabase anon/publishable key. Never add the service-role key to `.env`, Vercel, or GitHub secrets used by the client or keep-alive workflow.
 
 ### Database rollout
 
-The comparison fields use the additive SQL migration in `supabase/migrations`. Apply that migration through the authorized Supabase migration workflow before staff enter effective dates or property details. The UI continues to read legacy records when the migration is not yet present and will not silently discard newly entered metadata.
+The SQL files in `supabase/migrations` add comparison fields, normalized addresses, idempotent
+creates, optimistic versions, reversible archiving, and metadata-only auditing. Apply them in
+filename order before enabling the matching features for staff. The client continues to read,
+create, and edit against the legacy schema while rollout is pending. Archiving deliberately stays
+disabled until the safety migration exists, so it never falls back to permanent deletion.
 
 ### Configuration
 

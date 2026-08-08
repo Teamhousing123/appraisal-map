@@ -13,7 +13,7 @@
   background: #ffffff;
   box-shadow: 0 0.25rem 1.25rem rgba(15, 23, 42, 0.14);
   color: #1f2937;
-  font-family: 'DM Sans', sans-serif;
+  font-family: inherit;
 }
 
 .add-appraisal-title {
@@ -32,6 +32,48 @@
 .appraisal-field {
   min-width: 0;
   margin-bottom: 0.75rem;
+}
+
+.address-picker__city {
+  position: relative;
+}
+
+.address-picker__busy {
+  display: block;
+  margin-top: 0.25rem;
+  color: #4b5563;
+  font-size: 0.75rem;
+}
+
+.address-picker__suggestions {
+  position: absolute;
+  top: calc(100% - 0.25rem);
+  right: 0;
+  left: 0;
+  z-index: 20;
+  max-height: 15rem;
+  margin: 0;
+  padding: 0.3rem;
+  overflow-y: auto;
+  border: 1px solid #cbd5d1;
+  border-radius: 0.5rem;
+  list-style: none;
+  background: #ffffff;
+  box-shadow: 0 0.75rem 1.75rem rgba(15, 42, 43, 0.16);
+}
+
+.address-picker__suggestions li {
+  padding: 0.6rem 0.65rem;
+  border-radius: 0.35rem;
+  color: #374151;
+  font-size: 0.8125rem;
+  line-height: 1.35;
+  cursor: pointer;
+}
+
+.address-picker__suggestions li.is-active {
+  color: #173f43;
+  background: #e3efeb;
 }
 
 .appraisal-label,
@@ -171,10 +213,37 @@
   color: #991b1b;
 }
 
+.appraisal-alert .button {
+  width: 100%;
+  margin-top: 0.625rem;
+  color: #5f2f09;
+  background: #ffffff;
+}
+
 .appraisal-status {
   border: 1px solid #a7f3d0;
   background: #ecfdf5;
   color: #065f46;
+}
+
+.appraisal-caution {
+  margin: 0 0 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #f3d29d;
+  border-radius: 0.5rem;
+  color: #6b3a08;
+  background: #fff8ec;
+  font-size: 0.8125rem;
+  line-height: 1.45;
+}
+
+.appraisal-caution strong {
+  display: block;
+  margin-bottom: 0.2rem;
+}
+
+.appraisal-caution p {
+  margin: 0;
 }
 
 .appraisal-file-control {
@@ -251,6 +320,57 @@
   border-color: #0f766e;
   background: #0f766e;
   color: #ffffff;
+}
+
+.appraisal-remove-file {
+  min-height: 2rem;
+  margin-top: 0.375rem;
+  padding: 0;
+  border: 0;
+  color: #0f766e;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.appraisal-remove-file:hover {
+  text-decoration: underline;
+}
+
+.appraisal-progress {
+  width: 100%;
+  height: 0.5rem;
+  margin: 0 0 0.75rem;
+  accent-color: #0f766e;
+}
+
+.appraisal-upload-progress {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.35rem 0.65rem;
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #b9d8d3;
+  border-radius: 0.5rem;
+  color: #254c49;
+  background: #eef7f4;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.appraisal-upload-progress progress {
+  grid-column: 1;
+  width: 100%;
+  accent-color: #0f766e;
+}
+
+.appraisal-upload-progress .appraisal-remove-file {
+  grid-column: 1 / -1;
+  justify-self: start;
+  margin-top: 0;
 }
 
 .add-appraisal-submit {

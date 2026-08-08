@@ -2,6 +2,25 @@
   min-height: 100dvh;
 }
 
+.app-offline {
+  position: fixed;
+  top: max(8px, env(safe-area-inset-top, 0px));
+  left: 50%;
+  z-index: 12000;
+  width: min(560px, calc(100vw - 24px));
+  padding: 9px 12px;
+  border: 1px solid rgba(122, 84, 30, 0.18);
+  border-radius: 8px;
+  color: #674614;
+  background: #fff8e8;
+  box-shadow: 0 5px 18px rgba(44, 48, 39, 0.13);
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 1.4;
+  text-align: center;
+  transform: translateX(-50%);
+}
+
 .app-loader {
   display: flex;
   align-items: center;
@@ -27,6 +46,9 @@
   bottom: max(24px, env(safe-area-inset-bottom, 0px));
   left: 50%;
   z-index: 10000;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   max-width: min(420px, calc(100vw - 32px));
   padding: 11px 16px;
   border: 1px solid rgba(255, 255, 255, 0.16);
@@ -39,6 +61,114 @@
   text-align: center;
   transform: translateX(-50%);
   animation: toast-enter 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.app-toast__content {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  text-align: left;
+}
+
+.app-toast__content strong {
+  font-size: 13px;
+}
+
+.app-toast__content > span {
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.app-toast__content small {
+  opacity: 0.78;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.app-toast button,
+.app-toast > a {
+  min-height: 28px;
+  padding: 4px 7px;
+  border: 0;
+  border-radius: 5px;
+  color: inherit;
+  background: rgba(255, 255, 255, 0.12);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.app-toast button:hover,
+.app-toast > a:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.app-toast--success {
+  background: #145a46;
+}
+
+.app-toast--error {
+  background: #713225;
+}
+
+.app-recovery {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  width: 100%;
+  min-height: 100dvh;
+  padding-inline: max(16px, calc((100vw - 440px) / 2));
+  color: #172529;
+  background: #f3f5f1;
+}
+
+.app-recovery__logo {
+  width: 42px;
+  height: 42px;
+  margin-bottom: 18px;
+  border-radius: 10px;
+}
+
+.app-recovery h1 {
+  margin: 0;
+  font-size: 26px;
+  line-height: 1.2;
+  letter-spacing: -0.025em;
+}
+
+.app-recovery > p {
+  margin: 10px 0 0;
+  color: #536468;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.app-recovery > button {
+  min-height: 42px;
+  margin-top: 20px;
+  padding: 9px 15px;
+  border: 0;
+  border-radius: 7px;
+  color: #fff;
+  background: #075f59;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.app-recovery .app-recovery__support {
+  margin-top: 18px;
+  font-size: 12px;
+}
+
+.app-recovery__support a {
+  color: #075f59;
+  font-weight: 700;
+  text-underline-offset: 2px;
 }
 
 @keyframes toast-enter {

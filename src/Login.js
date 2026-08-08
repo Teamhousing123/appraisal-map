@@ -1,31 +1,16 @@
 import React, { useState } from 'react';
-import { MapContainer, Marker, TileLayer } from 'react-leaflet';
-import L from 'leaflet';
-import 'leaflet/dist/leaflet.css';
 import { supabase } from './supabaseClient';
 import BrandLogo from './components/BrandLogo';
+import { OPERATION_ERROR_CODES, runBoundedOperation } from './services/operation';
+import { recordTelemetryEvent } from './services/telemetry';
 import './Login.css';
 
-const LOGIN_MAP_CENTER = [43.76, -79.42];
-const LOGIN_MARKERS = [
-  [43.72, -79.38],
-  [43.78, -79.5],
-  [43.65, -79.38],
-  [43.85, -79.44],
-  [43.8, -79.55],
-  [43.7, -79.28],
-];
+const LOGIN_TIMEOUT_MS = 12000;
 
-const reportMarkerIcon = L.divIcon({
-  className: 'login-map-marker',
-  html: '<span><i></i></span>',
-  iconSize: [20, 24],
-  iconAnchor: [10, 24],
-});
-
-function Login() {
+function Login({ supportEmail = '', message = '' }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
 
@@ -33,39 +18,58 @@ function Login() {
     event.preventDefault();
     if (loading) return;
 
+    const normalizedEmail = email.trim();
+    if (!normalizedEmail || !password) {
+      setError('Enter your email and password to continue.');
+      return;
+    }
+
     setLoading(true);
     setError('');
-    const { error: signInError } = await supabase.auth.signInWithPassword({
-      email: email.trim(),
-      password,
-    });
+    try {
+      const { error: signInError } = await runBoundedOperation(
+        () => supabase.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+        }),
+        { label: 'Sign in', timeoutMs: LOGIN_TIMEOUT_MS }
+      );
 
-    if (signInError) {
-      setError('We could not sign you in. Check your email and password, then try again.');
+      if (signInError) {
+        const invalidCredentials = signInError.status === 400
+          || signInError.code === 'invalid_credentials';
+        setError(invalidCredentials
+          ? 'That email and password do not match. Check them and try again.'
+          : 'Sign in is temporarily unavailable. Please try again.');
+        recordTelemetryEvent('auth_sign_in', {
+          outcome: 'failed',
+          errorCode: signInError.code || 'auth_error',
+          online: navigator.onLine,
+        });
+      } else {
+        recordTelemetryEvent('auth_sign_in', { outcome: 'success', online: navigator.onLine });
+      }
+    } catch (signInError) {
+      if (signInError?.code === OPERATION_ERROR_CODES.TIMEOUT) {
+        setError('Sign in is taking longer than expected. Check your connection and try again.');
+      } else if (navigator.onLine === false) {
+        setError('You’re offline. Reconnect to the internet, then try again.');
+      } else {
+        setError('Sign in is temporarily unavailable. Please try again.');
+      }
+      recordTelemetryEvent('auth_sign_in', {
+        outcome: 'failed',
+        errorCode: signInError?.code || 'unknown',
+        online: navigator.onLine,
+      });
+    } finally {
+      setLoading(false);
     }
-    setLoading(false);
   };
 
   return (
     <main className="login-page">
-      <div className="login-map" aria-hidden="true">
-        <MapContainer
-          center={LOGIN_MAP_CENTER}
-          zoom={11}
-          zoomControl={false}
-          dragging={false}
-          scrollWheelZoom={false}
-          doubleClickZoom={false}
-          keyboard={false}
-          attributionControl={false}
-        >
-          <TileLayer url="https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png" />
-          {LOGIN_MARKERS.map((position) => (
-            <Marker key={position.join(',')} position={position} icon={reportMarkerIcon} interactive={false} />
-          ))}
-        </MapContainer>
-      </div>
-      <div className="login-map__veil" aria-hidden="true" />
+      <div className="login-backdrop" aria-hidden="true" />
 
       <section className="login-shell" aria-labelledby="login-title">
         <div className="login-brand">
@@ -80,9 +84,9 @@ function Login() {
           </div>
 
           <form onSubmit={handleLogin} noValidate>
+            {message && <div className="login-message" role="status">{message}</div>}
             {error && (
               <div className="login-alert" role="alert">
-                <span aria-hidden="true">!</span>
                 <p>{error}</p>
               </div>
             )}
@@ -95,7 +99,10 @@ function Login() {
                 autoComplete="email"
                 inputMode="email"
                 value={email}
-                onChange={(event) => setEmail(event.target.value)}
+                onChange={(event) => {
+                  setEmail(event.target.value);
+                  if (error) setError('');
+                }}
                 required
                 autoFocus
               />
@@ -103,14 +110,27 @@ function Login() {
 
             <div className="field-group">
               <label htmlFor="login-password">Password</label>
-              <input
-                id="login-password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                required
-              />
+              <div className="password-field">
+                <input
+                  id="login-password"
+                  type={showPassword ? 'text' : 'password'}
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    if (error) setError('');
+                  }}
+                  required
+                />
+                <button
+                  type="button"
+                  className="password-field__toggle"
+                  aria-pressed={showPassword}
+                  onClick={() => setShowPassword((visible) => !visible)}
+                >
+                  {showPassword ? 'Hide' : 'Show'}
+                </button>
+              </div>
             </div>
 
             <button className="login-submit" type="submit" disabled={loading || !email || !password}>
@@ -119,8 +139,11 @@ function Login() {
             </button>
           </form>
 
-          <p className="login-card__privacy">
-            Access is restricted to authorized staff. Report documents remain protected.
+          <p className="login-card__support">
+            Authorized staff only.{' '}
+            {supportEmail
+              ? <a href={`mailto:${supportEmail}`}>Get sign-in help</a>
+              : 'Ask your administrator if you need access.'}
           </p>
         </div>
       </section>
