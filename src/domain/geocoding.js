@@ -43,6 +43,74 @@ export function addressFingerprint(address = '', city = '') {
   return `${normalizeText(address).toLocaleLowerCase()}|${normalizeText(city).toLocaleLowerCase()}`;
 }
 
+export function formatCanonicalStreetAddress(result = {}) {
+  const components = result?.components || parseGoogleAddressComponents(result);
+  const streetAddress = components.streetAddress
+    || normalizeText([components.streetNumber, components.route].filter(Boolean).join(' '));
+  return components.unit
+    ? `${streetAddress}, Unit ${components.unit}`
+    : streetAddress;
+}
+
+function normalizeComparableCivicText(value = '') {
+  const replacements = new Map([
+    ['street', 'st'], ['avenue', 'ave'], ['road', 'rd'], ['drive', 'dr'],
+    ['boulevard', 'blvd'], ['court', 'ct'], ['crescent', 'cres'], ['lane', 'ln'],
+    ['highway', 'hwy'], ['north', 'n'], ['south', 's'], ['east', 'e'], ['west', 'w'],
+  ]);
+  return normalizeText(value)
+    .toLocaleLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => replacements.get(part) || part)
+    .join(' ');
+}
+
+function parseEnteredStreet(value = '') {
+  const withoutUnit = normalizeText(value)
+    .replace(/\b(unit|suite|apt|apartment)\s*#?\s*[a-z0-9-]+\b/ig, ' ')
+    .replace(/#\s*[a-z0-9-]+\b/ig, ' ')
+    .replace(/^\s*[a-z0-9]+\s*-\s*(?=\d)/i, ' ');
+  const numberMatch = withoutUnit.match(/\b\d+[a-z]?\b/i);
+  if (!numberMatch) return { streetNumber: '', route: normalizeComparableCivicText(withoutUnit) };
+  const route = withoutUnit.slice(numberMatch.index + numberMatch[0].length);
+  return {
+    streetNumber: normalizeComparableCivicText(numberMatch[0]),
+    route: normalizeComparableCivicText(route),
+  };
+}
+
+export function getMaterialAddressCorrection(address, city, result = {}) {
+  const entered = parseEnteredStreet(address);
+  const components = result?.components || parseGoogleAddressComponents(result);
+  const changedStreetNumber = Boolean(
+    entered.streetNumber
+    && components.streetNumber
+    && normalizeComparableCivicText(components.streetNumber) !== entered.streetNumber
+  );
+  const changedStreet = Boolean(
+    entered.route
+    && components.route
+    && normalizeComparableCivicText(components.route) !== entered.route
+  );
+  const changedCity = Boolean(
+    normalizeComparableCivicText(city)
+    && components.city
+    && normalizeComparableCivicText(components.city) !== normalizeComparableCivicText(city)
+  );
+  return Object.freeze({
+    changedStreetNumber,
+    changedStreet,
+    changedCity,
+    material: changedStreetNumber || changedStreet || changedCity,
+    canonicalAddress: formatCanonicalStreetAddress({ components }),
+    canonicalCity: components.city || normalizeText(city),
+    formattedAddress: result?.formattedAddress || result?.formatted_address || '',
+  });
+}
+
 export function isWithinSupportedMapBounds(latitude, longitude) {
   return isWithinServiceArea(latitude, longitude);
 }

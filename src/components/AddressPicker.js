@@ -1,6 +1,8 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import {
   GEOCODING_ERROR_CODES,
+  addressFingerprint,
+  formatCanonicalStreetAddress,
   getAddressPredictions,
   resolveAddressSuggestion,
   toNormalizedAddressColumns,
@@ -32,11 +34,19 @@ function AddressPicker({
   const requestRef = useRef(0);
   const timerRef = useRef(null);
   const sessionTokenRef = useRef(null);
+  const suppressedLookupRef = useRef('');
 
   useEffect(() => {
     if (timerRef.current) window.clearTimeout(timerRef.current);
     const street = address.trim();
     const locality = city.trim();
+    const currentFingerprint = addressFingerprint(street, locality);
+    if (suppressedLookupRef.current === currentFingerprint) {
+      setSuggestions([]);
+      setActiveIndex(-1);
+      setBusy(false);
+      return undefined;
+    }
     if (disabled || street.length < 3 || !window.google?.maps?.places) {
       setSuggestions([]);
       setActiveIndex(-1);
@@ -65,7 +75,11 @@ function AddressPicker({
         if (requestId !== requestRef.current) return;
         setSuggestions([]);
         if (error?.code !== GEOCODING_ERROR_CODES.ZERO_RESULTS) {
-          setLookupError(error?.message || 'Address suggestions are temporarily unavailable.');
+          setLookupError(
+            error?.isUserFacing
+              ? error.message
+              : 'Address suggestions are temporarily unavailable. Try again shortly.'
+          );
         }
       } finally {
         if (requestId === requestRef.current) setBusy(false);
@@ -97,15 +111,20 @@ function AddressPicker({
         ...validated,
         normalizedAddress: toNormalizedAddressColumns(validated, { originalInput }),
       };
-      const resolvedAddress = result.components?.streetAddress || address.trim();
+      const resolvedAddress = formatCanonicalStreetAddress(result) || address.trim();
       const resolvedCity = result.components?.city || city.trim();
+      suppressedLookupRef.current = addressFingerprint(resolvedAddress, resolvedCity);
       onAddressChange(resolvedAddress);
       onCityChange(resolvedCity);
       onResolved?.(result, { address: resolvedAddress, city: resolvedCity });
     } catch (error) {
       if (requestId !== requestRef.current) return;
       sessionTokenRef.current = null;
-      setLookupError(error?.message || 'That address suggestion could not be verified.');
+      setLookupError(
+        error?.isUserFacing
+          ? error.message
+          : 'That address suggestion could not be verified. Choose it again or try another match.'
+      );
     } finally {
       if (requestId === requestRef.current) setBusy(false);
     }
@@ -148,7 +167,10 @@ function AddressPicker({
           required
           aria-invalid={Boolean(errors.address)}
           aria-describedby={errors.address ? `${prefix}-street-error` : undefined}
-          onChange={(event) => onAddressChange(event.target.value)}
+          onChange={(event) => {
+            suppressedLookupRef.current = '';
+            onAddressChange(event.target.value);
+          }}
           onKeyDown={handlePickerKeyDown}
         />
         {errors.address && (
@@ -174,7 +196,10 @@ function AddressPicker({
           required
           aria-invalid={Boolean(errors.city)}
           aria-describedby={errors.city ? `${prefix}-city-error` : lookupError ? `${prefix}-lookup-error` : undefined}
-          onChange={(event) => onCityChange(event.target.value)}
+          onChange={(event) => {
+            suppressedLookupRef.current = '';
+            onCityChange(event.target.value);
+          }}
           onKeyDown={handlePickerKeyDown}
         />
         {busy && <span className="address-picker__busy" role="status">Finding matches…</span>}

@@ -40,7 +40,6 @@ function normalizeNotice(notice) {
     title: typeof notice.title === 'string' ? notice.title : '',
     message: notice.message,
     tone,
-    referenceId: typeof notice.referenceId === 'string' ? notice.referenceId : '',
     action,
     duration: notice.persistent
       ? 0
@@ -146,6 +145,11 @@ function App() {
     }
   }, [noticeActionBusy]);
 
+  const handleSessionChange = useCallback((nextSession) => {
+    sessionRef.current = nextSession || null;
+    setSession(nextSession || null);
+  }, []);
+
   const appLoader = (
     <div className="app-loader" role="status" aria-live="polite">
       <BrandLogo className="app-loader__brand" />
@@ -202,7 +206,7 @@ function App() {
     <div className="app-root">
       {offlineNotice}
       <Suspense fallback={appLoader}>
-        <Map session={session} showToast={showToast} />
+        <Map session={session} onSessionChange={handleSessionChange} showToast={showToast} />
       </Suspense>
       {notice && (
         <div
@@ -213,7 +217,6 @@ function App() {
           <span className="app-toast__content">
             {notice.title && <strong>{notice.title}</strong>}
             <span>{notice.message}</span>
-            {notice.referenceId && <small>Support reference: {notice.referenceId}</small>}
           </span>
           {notice.action?.onClick && (
             <button

@@ -8,7 +8,13 @@ import {
   validatePropertyDetails,
 } from '../domain/appraisalFields';
 import { formatDateOnly, validateOptionalDateOrder } from '../domain/dates';
-import { addressFingerprint, geocodeFullOntarioAddress } from '../domain/geocoding';
+import {
+  addressFingerprint,
+  formatCanonicalStreetAddress,
+  geocodeFullOntarioAddress,
+  getMaterialAddressCorrection,
+  toNormalizedAddressColumns,
+} from '../domain/geocoding';
 import {
   cleanupUploadedObjects,
   createOpaqueStorageKey,
@@ -23,6 +29,7 @@ import {
 } from '../domain/formSafety';
 import {
   deleteAppraisal,
+  APPRAISAL_COMMIT_STATUS,
   isAppraisalMutationNotAppliedError,
   isAppraisalVersionConflictError,
   isMissingMetadataSchemaError,
@@ -32,11 +39,7 @@ import AppraisalFormFields from './AppraisalFormFields';
 import AddressPicker from './AddressPicker';
 import { uploadStorageObject } from '../services/resumableUpload';
 import { isAbortError } from '../services/operation';
-import { createSupportReference, recordTelemetryEvent } from '../services/telemetry';
-
-function withSupportReference(message, referenceId) {
-  return referenceId ? `${message} Support reference: ${referenceId}.` : message;
-}
+import { recordTelemetryEvent } from '../services/telemetry';
 
 function BackIcon() {
   return (
@@ -148,8 +151,11 @@ function AppraisalDetailPanel({
   const [removePhoto, setRemovePhoto] = useState(false);
   const [removeDocuments, setRemoveDocuments] = useState(false);
   const [addressMatch, setAddressMatch] = useState(null);
+  const [pendingAddressCorrection, setPendingAddressCorrection] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const uploadControllerRef = useRef(null);
+  const saveLockRef = useRef(false);
+  const storagePathsRef = useRef({ photo: null, pdf: null, folder: null });
   const hasExistingPhoto = Boolean(appraisal.photo_url);
   const hasExistingDocuments = Boolean(appraisal.pdf_url || appraisal.folder_files?.length);
   const formBusy = saving || verifyingAddress;
@@ -204,6 +210,8 @@ function AppraisalDetailPanel({
     setRemoveDocuments(false);
     setUploadType(appraisal.folder_files?.length ? 'folder' : 'pdf');
     setAddressMatch(null);
+    setPendingAddressCorrection(null);
+    storagePathsRef.current = { photo: null, pdf: null, folder: null };
 
     let active = true;
     if (appraisal.photo_url) {
@@ -225,6 +233,7 @@ function AppraisalDetailPanel({
     if (field === 'address' || field === 'city') {
       geocodeRequestRef.current += 1;
       setAddressMatch(null);
+      setPendingAddressCorrection(null);
       setStatus('');
     }
   };
@@ -243,6 +252,8 @@ function AppraisalDetailPanel({
     setAddressMatch({
       key: addressFingerprint(values.address, values.city),
       formattedAddress: result.formattedAddress,
+      canonicalAddress: values.address,
+      canonicalCity: values.city,
       latitude: result.latitude,
       longitude: result.longitude,
       normalizedAddress: result.normalizedAddress || null,
@@ -261,11 +272,36 @@ function AppraisalDetailPanel({
     setError('');
     setStatus('');
     setAddressMatch(null);
+    setPendingAddressCorrection(null);
     setNewPhoto(null);
     setNewPdf(null);
     setNewFolderFiles([]);
     setRemovePhoto(false);
     setRemoveDocuments(false);
+    storagePathsRef.current = { photo: null, pdf: null, folder: null };
+  };
+
+  const acceptMatchedAddress = () => {
+    if (!pendingAddressCorrection) return;
+    const { result, canonicalAddress, canonicalCity } = pendingAddressCorrection;
+    const nextForm = {
+      ...formRef.current,
+      address: canonicalAddress,
+      city: canonicalCity,
+    };
+    formRef.current = nextForm;
+    setForm(nextForm);
+    setAddressMatch({
+      key: addressFingerprint(canonicalAddress, canonicalCity),
+      formattedAddress: result.formattedAddress,
+      canonicalAddress,
+      canonicalCity,
+      latitude: result.latitude,
+      longitude: result.longitude,
+      normalizedAddress: result.normalizedAddress,
+    });
+    setPendingAddressCorrection(null);
+    setStatus(`Using the matched address: ${result.formattedAddress}.`);
   };
 
   const handleNewPhotoSelection = (event) => {
@@ -274,11 +310,13 @@ function AppraisalDetailPanel({
     if (fileError) {
       event.target.value = '';
       setNewPhoto(null);
+      storagePathsRef.current.photo = null;
       setError(fileError);
       return;
     }
     setError('');
     setNewPhoto(selectedPhoto);
+    storagePathsRef.current.photo = selectedPhoto ? createOpaqueStorageKey(selectedPhoto) : null;
     if (selectedPhoto) setRemovePhoto(false);
   };
 
@@ -288,11 +326,13 @@ function AppraisalDetailPanel({
     if (fileError) {
       event.target.value = '';
       setNewPdf(null);
+      storagePathsRef.current.pdf = null;
       setError(fileError);
       return;
     }
     setError('');
     setNewPdf(selectedPdf);
+    storagePathsRef.current.pdf = selectedPdf ? createOpaqueStorageKey(selectedPdf) : null;
     if (selectedPdf) setRemoveDocuments(false);
   };
 
@@ -302,11 +342,13 @@ function AppraisalDetailPanel({
     if (fileError) {
       event.target.value = '';
       setNewFolderFiles([]);
+      storagePathsRef.current.folder = null;
       setError(fileError);
       return;
     }
     setError('');
     setNewFolderFiles(selectedFiles);
+    storagePathsRef.current.folder = selectedFiles.length > 0 ? createOpaqueStorageKey('.zip') : null;
     if (selectedFiles.length > 0) setRemoveDocuments(false);
   };
 
@@ -329,7 +371,10 @@ function AppraisalDetailPanel({
 
   const handleSave = async (event) => {
     event?.preventDefault();
-    if (formBusy) return;
+    if (formBusy || saveLockRef.current) return;
+    saveLockRef.current = true;
+    setSaving(true);
+    try {
 
     const formSnapshot = formRef.current;
     const propertyErrors = validatePropertyDetails(formSnapshot);
@@ -351,19 +396,18 @@ function AppraisalDetailPanel({
       setError(uploadError);
       return;
     }
+    if (navigator.onLine === false) {
+      setError('You are offline. Reconnect before saving; your edits and selected files are still here.');
+      return;
+    }
     if (metadataSupported === false && metadataHasValue(formSnapshot)) {
-      const referenceId = createSupportReference('update');
       recordTelemetryEvent('appraisal_mutation', {
         outcome: 'failed',
         errorCode: 'metadata_unavailable',
         operation: 'update',
         endpoint: 'supabase_database',
-        referenceId,
       });
-      setError(withSupportReference(
-        'Property comparison details are temporarily unavailable. Ask an administrator to enable them.',
-        referenceId
-      ));
+      setError('Property comparison details are temporarily unavailable. Ask an administrator to enable them.');
       return;
     }
 
@@ -391,18 +435,55 @@ function AppraisalDetailPanel({
           setStatus('The address changed while it was being verified. Verify the current address again.');
           return;
         }
+        const originalInput = `${formSnapshot.address.trim()}, ${formSnapshot.city.trim()}`;
+        const normalizedResult = {
+          ...result,
+          normalizedAddress: toNormalizedAddressColumns(result, { originalInput }),
+        };
+        const correction = getMaterialAddressCorrection(
+          formSnapshot.address,
+          formSnapshot.city,
+          normalizedResult
+        );
+        const canonicalAddress = correction.canonicalAddress
+          || formatCanonicalStreetAddress(result)
+          || formSnapshot.address.trim();
+        const canonicalCity = correction.canonicalCity || formSnapshot.city.trim();
+        if (correction.material) {
+          setAddressMatch(null);
+          setPendingAddressCorrection({
+            result: normalizedResult,
+            canonicalAddress,
+            canonicalCity,
+          });
+          setStatus('Google found a different civic address. Confirm the match before saving.');
+          return;
+        }
+        const canonicalForm = {
+          ...formRef.current,
+          address: canonicalAddress,
+          city: canonicalCity,
+        };
+        formRef.current = canonicalForm;
+        setForm(canonicalForm);
         verifiedAddressMatch = {
-          key: expectedAddressKey,
+          key: addressFingerprint(canonicalAddress, canonicalCity),
           formattedAddress: result.formattedAddress,
+          canonicalAddress,
+          canonicalCity,
           latitude: result.latitude,
           longitude: result.longitude,
-          normalizedAddress: result.normalizedAddress || null,
+          normalizedAddress: normalizedResult.normalizedAddress,
         };
         setAddressMatch(verifiedAddressMatch);
         setStatus(`Address matched as ${result.formattedAddress}. Saving changes…`);
       } catch (geocodeError) {
         if (requestId === geocodeRequestRef.current) {
-          setError(geocodeError.message || 'The address could not be verified. Try again.');
+          setError(
+            geocodeError?.isUserFacing
+              ? geocodeError.message
+              : 'The address could not be verified. Check your connection and try again.'
+          );
         }
         return;
       } finally {
@@ -410,12 +491,11 @@ function AppraisalDetailPanel({
       }
     }
 
-    setSaving(true);
     setUploadProgress(null);
     const uploadedPaths = [];
     const oldPaths = [];
     let rowCommitted = false;
-    let failureReferenceId = '';
+    let databaseMutationAttempted = false;
     const uploadController = new AbortController();
     uploadControllerRef.current = uploadController;
 
@@ -425,7 +505,6 @@ function AppraisalDetailPanel({
       try {
         const result = await uploadStorageObject(supabase, bucket, path, file, {
           signal: uploadController.signal,
-          forceResumable: true,
           contentType,
           onProgress: ({ percent }) => setUploadProgress({ label, percent }),
         });
@@ -439,13 +518,11 @@ function AppraisalDetailPanel({
         return result;
       } catch (uploadError) {
         const cancelled = isAbortError(uploadError);
-        if (!cancelled) failureReferenceId ||= createSupportReference('upload');
         recordTelemetryEvent('appraisal_mutation', {
           outcome: cancelled ? 'cancelled' : 'failed',
           errorCode: uploadError?.code || 'unknown',
           operation: 'upload',
           endpoint: 'supabase_storage',
-          referenceId: failureReferenceId,
         });
         throw uploadError;
       }
@@ -459,8 +536,12 @@ function AppraisalDetailPanel({
         year_built: formSnapshot.yearBuilt,
       });
       let updates = {
-        address: formSnapshot.address.trim(),
-        city: formSnapshot.city.trim(),
+        address: addressChanged && verifiedAddressMatch
+          ? verifiedAddressMatch.canonicalAddress
+          : formSnapshot.address.trim(),
+        city: addressChanged && verifiedAddressMatch
+          ? verifiedAddressMatch.canonicalCity
+          : formSnapshot.city.trim(),
         appraisal_date: formSnapshot.reportDate || null,
         ...normalized,
       };
@@ -499,7 +580,8 @@ function AppraisalDetailPanel({
       }
 
       if (newPhoto) {
-        const path = createOpaqueStorageKey(newPhoto);
+        const path = storagePathsRef.current.photo || createOpaqueStorageKey(newPhoto);
+        storagePathsRef.current.photo = path;
         await uploadObject('photos', path, newPhoto, 'property photo');
         uploadedPaths.push({ bucket: 'photos', path });
         updates.photo_url = path;
@@ -507,7 +589,8 @@ function AppraisalDetailPanel({
       }
 
       if (uploadType === 'pdf' && newPdf) {
-        const path = createOpaqueStorageKey(newPdf);
+        const path = storagePathsRef.current.pdf || createOpaqueStorageKey(newPdf);
+        storagePathsRef.current.pdf = path;
         await uploadObject('pdfs', path, newPdf, 'report PDF');
         uploadedPaths.push({ bucket: 'pdfs', path });
         updates.pdf_url = path;
@@ -521,8 +604,13 @@ function AppraisalDetailPanel({
         const zip = new JSZip();
         newFolderFiles.forEach((file) => zip.file(file.webkitRelativePath || file.name, file));
         const zipBlob = await zip.generateAsync({ type: 'blob' });
-        const zipFile = new File([zipBlob], 'appraisal-documents.zip', { type: 'application/zip' });
-        const path = createOpaqueStorageKey('.zip');
+        const stableLastModified = Math.max(...newFolderFiles.map((file) => Number(file.lastModified) || 0));
+        const zipFile = new File([zipBlob], 'appraisal-documents.zip', {
+          type: 'application/zip',
+          lastModified: stableLastModified,
+        });
+        const path = storagePathsRef.current.folder || createOpaqueStorageKey('.zip');
+        storagePathsRef.current.folder = path;
         await uploadObject(
           'appraisal-folders',
           path,
@@ -542,6 +630,7 @@ function AppraisalDetailPanel({
       setStatus('Finishing the report update…');
 
       let committedUpdates = updates;
+      databaseMutationAttempted = true;
       const concurrencyOptions = Number.isInteger(appraisal.version)
         ? { expectedVersion: appraisal.version }
         : undefined;
@@ -582,31 +671,22 @@ function AppraisalDetailPanel({
       setEditing(false);
       onUpdated(updateMessage, updatedAppraisal);
     } catch (saveError) {
-      const rollbackFailures = rowCommitted
-        ? []
-        : await cleanupUploadedObjects(supabase, uploadedPaths);
+      const confirmedNotCommitted = saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.ABSENT
+        || isAppraisalVersionConflictError(saveError)
+        || isMissingMetadataSchemaError(saveError);
+      const safeToRollback = !rowCommitted && (!databaseMutationAttempted || confirmedNotCommitted);
+      const rollbackFailures = safeToRollback
+        ? await cleanupUploadedObjects(supabase, uploadedPaths)
+        : [];
       const cancelled = isAbortError(saveError);
       const versionConflict = isAppraisalVersionConflictError(saveError);
-      const requiresSupport = !cancelled && !versionConflict && (
-        rowCommitted
-        || failureReferenceId
-        || saveError?.isInfrastructureFailure
-        || isAppraisalMutationNotAppliedError(saveError)
-        || !saveError?.isUserFacing
-      );
-      const referenceId = requiresSupport
-        ? failureReferenceId || createSupportReference('update')
-        : '';
       recordTelemetryEvent('appraisal_mutation', {
         outcome: cancelled ? 'cancelled' : 'failed',
         errorCode: saveError?.code || 'unknown',
         operation: rowCommitted ? 'update_refresh' : 'update',
         endpoint: rowCommitted
           ? undefined
-          : failureReferenceId
-            ? 'supabase_storage'
-            : 'supabase_database',
-        referenceId,
+          : databaseMutationAttempted ? 'supabase_database' : 'supabase_storage',
       });
       if (rollbackFailures.length > 0) {
         recordTelemetryEvent('appraisal_mutation', {
@@ -614,28 +694,29 @@ function AppraisalDetailPanel({
           errorCode: 'cleanup_failed',
           operation: 'cleanup',
           endpoint: 'supabase_storage',
-          referenceId,
         });
       }
 
       if (cancelled) {
-        setError('Upload cancelled. No report changes were confirmed.');
+        setError('Cancelled before save. Your edits and selected files are still here, so you can retry.');
       } else if (rowCommitted) {
-        setError(withSupportReference(
-          'The report was updated, but the workspace could not refresh. Reopen nearby reports to confirm it.',
-          referenceId
-        ));
+        setError('The report was updated, but the workspace could not refresh. Reopen nearby reports to confirm it.');
+      } else if (saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.UNKNOWN) {
+        setError('The update could not be confirmed. Your edits are still here, files were kept safe, and retrying is safe.');
       } else if (saveError.isUserFacing || isAppraisalMutationNotAppliedError(saveError)) {
-        setError(withSupportReference(saveError.message, referenceId));
+        setError(saveError.message);
       } else {
-        setError(withSupportReference(
-          'The report could not be updated. No changes were confirmed, and your form is still here. Try again or contact support.',
-          referenceId
-        ));
+        setError(versionConflict
+          ? 'This report changed after you opened it. Reload it before saving your changes.'
+          : 'The report was not updated. Your edits are still here. Check your connection and retry.');
       }
     } finally {
       uploadControllerRef.current = null;
       setUploadProgress(null);
+      setSaving(false);
+    }
+    } finally {
+      saveLockRef.current = false;
       setSaving(false);
     }
   };
@@ -657,33 +738,21 @@ function AppraisalDetailPanel({
       rowArchived = true;
       onDeleted('Report archived. Its files and database record were preserved.', archivedRecord);
     } catch (deleteError) {
-      const versionConflict = isAppraisalVersionConflictError(deleteError);
-      const requiresSupport = !versionConflict && (
-        rowArchived
-        || isAppraisalMutationNotAppliedError(deleteError)
-        || !deleteError?.isUserFacing
-      );
-      const referenceId = requiresSupport ? createSupportReference('archive') : '';
       recordTelemetryEvent('appraisal_mutation', {
         outcome: 'failed',
         errorCode: deleteError?.code || 'unknown',
         operation: rowArchived ? 'archive_refresh' : 'archive',
         endpoint: rowArchived ? undefined : 'supabase_database',
-        referenceId,
       });
 
       if (rowArchived) {
-        setError(withSupportReference(
-          'The report was archived, but the workspace could not refresh. Reload nearby reports to confirm it.',
-          referenceId
-        ));
+        setError('The report was archived, but the workspace could not refresh. Reload nearby reports to confirm it.');
+      } else if (deleteError?.commitStatus === APPRAISAL_COMMIT_STATUS.UNKNOWN) {
+        setError('The archive could not be confirmed. Check your connection; retrying is safe.');
       } else if (deleteError?.isUserFacing || isAppraisalMutationNotAppliedError(deleteError)) {
-        setError(withSupportReference(deleteError.message, referenceId));
+        setError(deleteError.message);
       } else {
-        setError(withSupportReference(
-          'The report could not be archived. It remains visible and unchanged. Check your permission and try again.',
-          referenceId
-        ));
+        setError('The report was not archived. Check your access, reload the report, and try again.');
       }
     } finally {
       setDeleting(false);
@@ -712,6 +781,31 @@ function AppraisalDetailPanel({
             </div>
           )}
           {status && <div className="form-status" role="status">{status}</div>}
+          {pendingAddressCorrection && (
+            <div className="appraisal-caution" role="alert">
+              <strong>Confirm the matched address</strong>
+              <p>
+                You entered “{form.address.trim()}, {form.city.trim()}”. Google matched
+                “{pendingAddressCorrection.result.formattedAddress}”.
+              </p>
+              <div className="appraisal-confirm-actions">
+                <button type="button" className="button button--primary" onClick={acceptMatchedAddress}>
+                  Use matched address
+                </button>
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={() => {
+                    setPendingAddressCorrection(null);
+                    setStatus('');
+                    document.getElementById('edit-address-street')?.focus();
+                  }}
+                >
+                  Keep editing
+                </button>
+              </div>
+            </div>
+          )}
           <AddressPicker
             idPrefix="edit-address"
             address={form.address}
@@ -751,7 +845,10 @@ function AppraisalDetailPanel({
             onChange={handleNewPhotoSelection}
           />
           {newPhoto && (
-            <button type="button" className="appraisal-remove-file" onClick={() => setNewPhoto(null)} disabled={formBusy}>
+            <button type="button" className="appraisal-remove-file" onClick={() => {
+              setNewPhoto(null);
+              storagePathsRef.current.photo = null;
+            }} disabled={formBusy}>
               Remove selected replacement photo
             </button>
           )}
@@ -764,7 +861,10 @@ function AppraisalDetailPanel({
                 onChange={(event) => {
                   const checked = event.target.checked;
                   setRemovePhoto(checked);
-                  if (checked) setNewPhoto(null);
+                  if (checked) {
+                    setNewPhoto(null);
+                    storagePathsRef.current.photo = null;
+                  }
                 }}
               />
               <span>
@@ -804,12 +904,18 @@ function AppraisalDetailPanel({
             />
           )}
           {newPdf && (
-            <button type="button" className="appraisal-remove-file" onClick={() => setNewPdf(null)} disabled={formBusy}>
+            <button type="button" className="appraisal-remove-file" onClick={() => {
+              setNewPdf(null);
+              storagePathsRef.current.pdf = null;
+            }} disabled={formBusy}>
               Remove selected replacement PDF
             </button>
           )}
           {newFolderFiles.length > 0 && (
-            <button type="button" className="appraisal-remove-file" onClick={() => setNewFolderFiles([])} disabled={formBusy}>
+            <button type="button" className="appraisal-remove-file" onClick={() => {
+              setNewFolderFiles([]);
+              storagePathsRef.current.folder = null;
+            }} disabled={formBusy}>
               Remove selected replacement folder
             </button>
           )}
@@ -825,6 +931,8 @@ function AppraisalDetailPanel({
                   if (checked) {
                     setNewPdf(null);
                     setNewFolderFiles([]);
+                    storagePathsRef.current.pdf = null;
+                    storagePathsRef.current.folder = null;
                   }
                 }}
               />

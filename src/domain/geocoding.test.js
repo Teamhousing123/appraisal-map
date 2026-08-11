@@ -3,8 +3,10 @@ import {
   GeocodingError,
   addressFingerprint,
   createGoogleMapsError,
+  formatCanonicalStreetAddress,
   geocodeFullOntarioAddress,
   getAddressPredictions,
+  getMaterialAddressCorrection,
   isVerifiedOntarioCivicAddress,
   isWithinSupportedMapBounds,
   parseGoogleAddressComponents,
@@ -98,6 +100,57 @@ test('parses legacy and modern Google address component shapes into stable field
     address_verified_at: null,
     original_input: '10 Exmple Road, Aurora',
   });
+});
+
+test('keeps exact and harmless street abbreviations as a one-step address match', () => {
+  const result = {
+    formattedAddress: '10 Example Road, Aurora, ON',
+    components: {
+      streetNumber: '10',
+      route: 'Example Road',
+      streetAddress: '10 Example Road',
+      city: 'Aurora',
+    },
+  };
+
+  expect(getMaterialAddressCorrection('10 Example Rd', 'Aurora', result)).toMatchObject({
+    changedStreetNumber: false,
+    changedStreet: false,
+    changedCity: false,
+    material: false,
+  });
+});
+
+test.each([
+  ['12 Example Road', 'Aurora', { changedStreetNumber: true }],
+  ['10 Example Avenue', 'Aurora', { changedStreet: true }],
+  ['10 Example Road', 'Newmarket', { changedCity: true }],
+])('requires confirmation when %s, %s materially differs', (address, city, expected) => {
+  const result = {
+    formattedAddress: '10 Example Road, Aurora, ON',
+    components: {
+      streetNumber: '10',
+      route: 'Example Road',
+      streetAddress: '10 Example Road',
+      city: 'Aurora',
+    },
+  };
+
+  expect(getMaterialAddressCorrection(address, city, result)).toMatchObject({
+    ...expected,
+    material: true,
+  });
+});
+
+test('preserves a condo unit in the canonical human-readable address', () => {
+  expect(formatCanonicalStreetAddress({
+    components: {
+      streetNumber: '10',
+      route: 'Example Road',
+      streetAddress: '10 Example Road',
+      unit: '604',
+    },
+  })).toBe('10 Example Road, Unit 604');
 });
 
 test('keeps genuine no-result, quota, and configuration failures distinct', () => {

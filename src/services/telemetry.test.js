@@ -1,6 +1,5 @@
 import {
   configureTelemetrySink,
-  createSupportReference,
   recordTelemetryEvent,
   sanitizeTelemetryAttributes,
 } from './telemetry';
@@ -31,19 +30,13 @@ test('emits only allow-listed non-identifying telemetry fields', async () => {
   expect(sink).toHaveBeenCalledWith(payload);
 });
 
-test('creates opaque support references without user or report data', () => {
-  expect(createSupportReference('map')).toMatch(/^MAP-[A-Z0-9]{8}$/);
-});
-
-test('allows only categorical endpoint, Google status, and opaque support references', () => {
+test('allows only categorical endpoint and Google status values', () => {
   expect(sanitizeTelemetryAttributes('address_lookup', {
     endpoint: 'google_geocoding',
     googleStatus: 'ZERO_RESULTS',
-    referenceId: 'MAP-ABC12345',
   })).toEqual({
     endpoint: 'google_geocoding',
     googleStatus: 'ZERO_RESULTS',
-    referenceId: 'MAP-ABC12345',
   });
 
   const rejected = sanitizeTelemetryAttributes('address_lookup', {

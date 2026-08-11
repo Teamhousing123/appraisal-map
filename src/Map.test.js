@@ -103,7 +103,10 @@ jest.mock('./components/AppraisalDetailPanel', () => function TestDetailPanel({
 
 jest.mock('./supabaseClient', () => ({
   supabase: {
-    auth: { signOut: jest.fn(async () => ({ error: null })) },
+    auth: {
+      signOut: jest.fn(async () => ({ error: null })),
+      refreshSession: jest.fn(),
+    },
     storage: { from: jest.fn() },
   },
 }));
@@ -172,8 +175,35 @@ test('treats an account without an assigned server role as view only', async () 
   render(<MapView session={{ user: { app_metadata: {} } }} showToast={jest.fn()} />);
 
   await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalled());
-  expect(screen.getByText('View only')).toBeInTheDocument();
+  expect(screen.getByText(/currently has view-only access/i)).toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Refresh access' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: /Add appraisal/i })).not.toBeInTheDocument();
+});
+
+test('refreshes the server session after an administrator assigns editing access', async () => {
+  const refreshedSession = { user: { app_metadata: { role: 'editor' } } };
+  const onSessionChange = jest.fn();
+  const showToast = jest.fn();
+  supabase.auth.refreshSession.mockResolvedValue({
+    data: { session: refreshedSession },
+    error: null,
+  });
+  render(
+    <MapView
+      session={{ user: { app_metadata: {} } }}
+      onSessionChange={onSessionChange}
+      showToast={showToast}
+    />
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Refresh access' }));
+
+  await waitFor(() => expect(supabase.auth.refreshSession).toHaveBeenCalledTimes(1));
+  expect(onSessionChange).toHaveBeenCalledWith(refreshedSession);
+  expect(showToast).toHaveBeenCalledWith(expect.objectContaining({
+    tone: 'success',
+    title: 'Editing enabled',
+  }));
 });
 
 test('keeps repeat entry open and preserves the normal save-to-detail behavior', async () => {

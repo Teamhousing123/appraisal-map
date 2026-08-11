@@ -128,6 +128,49 @@ test('uses a real busy form and saves only the matching verified coordinates', a
   );
 });
 
+test('requires a clear correction choice and keeps optimistic version protection when editing', async () => {
+  const versioned = { ...appraisal, version: 7 };
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '14 Example Road, Aurora, ON, Canada',
+    latitude: 43.91,
+    longitude: -79.42,
+    placeId: 'corrected-place',
+    components: {
+      streetNumber: '14',
+      route: 'Example Road',
+      streetAddress: '14 Example Road',
+      city: 'Aurora',
+    },
+  });
+  renderPanel({ appraisal: versioned });
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText('Address'), {
+    target: { value: '12 Example Road' },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  expect(await screen.findByText('Confirm the matched address')).toBeInTheDocument();
+  expect(updateAppraisal).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Use matched address' }));
+  expect(screen.getByLabelText('Address')).toHaveValue('14 Example Road');
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({
+      address: '14 Example Road',
+      city: 'Aurora',
+      latitude: 43.91,
+      longitude: -79.42,
+      original_input: '12 Example Road, Aurora',
+    }),
+    { expectedVersion: 7 }
+  );
+});
+
 test('does not clean storage when archiving is not confirmed for the exact row', async () => {
   const mutationError = Object.assign(new Error('The appraisal was not archived.'), {
     code: 'APPRAISAL_MUTATION_NOT_APPLIED',
@@ -175,7 +218,7 @@ test('archives a report without deleting its private files', async () => {
   expect(telemetrySink).not.toHaveBeenCalled();
 });
 
-test('adds a privacy-safe support reference when archive infrastructure fails', async () => {
+test('shows an actionable archive error without a fake support reference', async () => {
   const telemetrySink = jest.fn();
   configureTelemetrySink(telemetrySink);
   deleteAppraisal.mockRejectedValue(Object.assign(new Error('offline'), {
@@ -187,7 +230,8 @@ test('adds a privacy-safe support reference when archive infrastructure fails', 
   fireEvent.click(screen.getByRole('button', { name: 'Archive report' }));
 
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent(/Support reference: ARCHIVE-[A-Z0-9]{8}/i);
+  expect(alert).toHaveTextContent(/not archived/i);
+  expect(alert).not.toHaveTextContent(/Support reference/i);
   await waitFor(() => expect(telemetrySink).toHaveBeenCalled());
   const telemetry = telemetrySink.mock.calls.map(([payload]) => payload);
   expect(telemetry).toEqual([
@@ -227,7 +271,7 @@ test('exposes every legacy folder with privacy-safe labels', () => {
   expect(screen.queryByText(/path-one|path-two/i)).not.toBeInTheDocument();
 });
 
-test('rolls back newly uploaded edit assets when the update throws', async () => {
+test('keeps newly uploaded edit assets when the update result is uncertain', async () => {
   const telemetrySink = jest.fn();
   configureTelemetrySink(telemetrySink);
   updateAppraisal.mockRejectedValue(new Error('offline'));
@@ -240,11 +284,11 @@ test('rolls back newly uploaded edit assets when the update throws', async () =>
   fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
 
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent(/No changes were confirmed/i);
-  expect(alert).toHaveTextContent(/Support reference: UPDATE-[A-Z0-9]{8}/i);
+  expect(alert).toHaveTextContent(/edits are still here/i);
+  expect(alert).not.toHaveTextContent(/Support reference/i);
   expect(alert).toHaveFocus();
   expect(uploadObject).toHaveBeenCalledTimes(1);
-  expect(removeObject).toHaveBeenCalledTimes(1);
+  expect(removeObject).not.toHaveBeenCalled();
   await waitFor(() => expect(telemetrySink).toHaveBeenCalled());
   const telemetry = telemetrySink.mock.calls.map(([payload]) => payload);
   expect(telemetry).toEqual(expect.arrayContaining([
