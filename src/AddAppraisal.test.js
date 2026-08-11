@@ -21,6 +21,7 @@ import { Upload } from 'tus-js-client';
 let uploadObject;
 let removeObject;
 let originalGoogle;
+let originalSupabaseUrl;
 
 jest.mock('./domain/geocoding', () => ({
   ...jest.requireActual('./domain/geocoding'),
@@ -53,6 +54,8 @@ jest.mock('tus-js-client', () => ({ Upload: jest.fn() }));
 beforeEach(() => {
   jest.clearAllMocks();
   originalGoogle = window.google;
+  originalSupabaseUrl = process.env.REACT_APP_SUPABASE_URL;
+  process.env.REACT_APP_SUPABASE_URL = 'https://test-project.supabase.co';
   geocodeFullOntarioAddress.mockReset();
   getAddressPredictions.mockReset();
   resolveAddressSuggestion.mockReset();
@@ -80,6 +83,11 @@ beforeEach(() => {
 
 afterEach(() => {
   window.google = originalGoogle;
+  if (originalSupabaseUrl === undefined) {
+    delete process.env.REACT_APP_SUPABASE_URL;
+  } else {
+    process.env.REACT_APP_SUPABASE_URL = originalSupabaseUrl;
+  }
   configureTelemetrySink(null);
 });
 
