@@ -8,7 +8,7 @@ import React, {
   useState,
 } from 'react';
 import { GoogleMap, Marker, MarkerClusterer, useJsApiLoader } from '@react-google-maps/api';
-import { supabase } from './supabaseClient';
+import { supabase, supportEmail } from './supabaseClient';
 import { applySpiralOffset, COORDINATE_PRECISION } from './mapUtils';
 import { formatDateOnly } from './domain/dates';
 import { getAppraisalAccess } from './domain/access';
@@ -27,7 +27,7 @@ import {
   getReportDistanceKm,
 } from './domain/filters';
 import { fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
-import { createSupportReference, recordTelemetryEvent } from './services/telemetry';
+import { recordTelemetryEvent } from './services/telemetry';
 import SubjectSearch from './components/SubjectSearch';
 import NearbyWorkspace from './components/NearbyWorkspace';
 import AppraisalDetailPanel from './components/AppraisalDetailPanel';
@@ -257,17 +257,13 @@ function showPendingDocument(windowReference, label) {
 }
 
 function getAddressFailurePresentation(error, fallbackMessage) {
-  const noMatch = error?.code === GEOCODING_ERROR_CODES.ZERO_RESULTS
-    || error?.googleStatus === 'ZERO_RESULTS';
-  const referenceId = noMatch ? '' : createSupportReference('address');
-  const message = error?.message || fallbackMessage;
-  return {
-    message: referenceId ? `${message} Support reference: ${referenceId}.` : message,
-    referenceId,
-  };
+  const message = error?.isUserFacing || error?.code === GEOCODING_ERROR_CODES.ZERO_RESULTS
+    ? error?.message
+    : fallbackMessage;
+  return { message: message || fallbackMessage };
 }
 
-function MapView({ session, showToast = () => {} }) {
+function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) {
   const [appraisals, setAppraisals] = useState([]);
   const [loadingReports, setLoadingReports] = useState(false);
   const [reportsError, setReportsError] = useState('');
@@ -289,10 +285,14 @@ function MapView({ session, showToast = () => {} }) {
   const [openingReportId, setOpeningReportId] = useState(null);
   const [workspaceState, setWorkspaceState] = useState(EMPTY_WORKSPACE_STATE);
   const [discardAction, setDiscardAction] = useState(null);
-  const [manualPlacement, setManualPlacement] = useState({ active: false, location: null });
+  const [manualPlacement, setManualPlacement] = useState({
+    active: false,
+    location: null,
+    confirmed: false,
+  });
   const [signingOut, setSigningOut] = useState(false);
+  const [refreshingAccess, setRefreshingAccess] = useState(false);
   const [googleAuthFailed, setGoogleAuthFailed] = useState(false);
-  const [googleAuthReference, setGoogleAuthReference] = useState('');
 
   const mapRef = useRef(null);
   const mapIdleTimerRef = useRef(null);
@@ -499,16 +499,13 @@ function MapView({ session, showToast = () => {} }) {
 
   useEffect(() => {
     const handleGoogleAuthFailure = () => {
-      const referenceId = createSupportReference('maps');
       setGoogleAuthFailed(true);
-      setGoogleAuthReference(referenceId);
       recordTelemetryEvent('address_lookup', {
         outcome: 'failed',
         errorCode: 'REQUEST_DENIED',
         source: 'google',
         endpoint: 'google_places',
         googleStatus: 'REQUEST_DENIED',
-        referenceId,
       });
     };
     window.addEventListener(GOOGLE_AUTH_FAILURE_EVENT, handleGoogleAuthFailure);
@@ -642,20 +639,17 @@ function MapView({ session, showToast = () => {} }) {
       });
     } catch (error) {
       pendingWindow?.close();
-      const referenceId = createSupportReference('document');
       showToast({
         tone: 'error',
         title: 'Report not opened',
-        message: error?.message || 'The report link could not be prepared. Try again.',
+        message: 'The protected report link could not be prepared. Check your connection and try again.',
         persistent: true,
-        referenceId,
       });
       recordTelemetryEvent('document_open', {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
         documentType: isFolder ? 'folder' : 'pdf',
         endpoint: 'supabase_storage',
-        referenceId,
       });
     } finally {
       setOpeningReportId(null);
@@ -713,7 +707,6 @@ function MapView({ session, showToast = () => {} }) {
           source: 'google',
           endpoint: 'google_places',
           googleStatus: error?.googleStatus || error?.code,
-          referenceId: failure.referenceId,
         });
       }
     }, AUTOCOMPLETE_DEBOUNCE_MS);
@@ -783,7 +776,6 @@ function MapView({ session, showToast = () => {} }) {
         source: 'google',
         endpoint: 'google_places',
         googleStatus: error?.googleStatus || error?.code,
-        referenceId: failure.referenceId,
       });
     }
   }, [fitMapToSubjectRadius, resolveSuggestion, runWorkspaceAction]);
@@ -815,7 +807,6 @@ function MapView({ session, showToast = () => {} }) {
         source: 'google',
         endpoint: 'google_places',
         googleStatus: error?.googleStatus || error?.code,
-        referenceId: failure.referenceId,
       });
     }
   }, [getPredictions, searchBusy, searchTerm]);
@@ -893,7 +884,7 @@ function MapView({ session, showToast = () => {} }) {
 
   const handleAdded = useCallback((result = {}) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
-    setManualPlacement({ active: false, location: null });
+    setManualPlacement({ active: false, location: null, confirmed: false });
     const created = result.report || (Array.isArray(result.data) ? result.data[0] : result.data);
     if (created?.id) {
       setAppraisals((current) => applySpiralOffset([
@@ -970,13 +961,15 @@ function MapView({ session, showToast = () => {} }) {
         endpoint: 'supabase_database',
       });
     } catch (error) {
-      const referenceId = createSupportReference('restore');
       showToast({
         tone: 'error',
         title: 'Report not restored',
-        message: 'The report is still archived. Check your connection and try again.',
+        message: error?.commitStatus === 'unknown'
+          ? 'The restore could not be confirmed. Check your connection; retrying is safe.'
+          : error?.code === 'APPRAISAL_VERSION_CONFLICT'
+            ? 'This report changed after it was archived. Reload the reports before restoring it.'
+            : 'The report is still archived. Check your access and try again.',
         persistent: true,
-        referenceId,
         action: {
           label: 'Try again',
           busyLabel: 'Restoring…',
@@ -988,7 +981,6 @@ function MapView({ session, showToast = () => {} }) {
         errorCode: error?.code || 'unknown',
         operation: 'restore',
         endpoint: 'supabase_database',
-        referenceId,
       });
     }
   }, [focusReportOnMap, showToast]);
@@ -1039,25 +1031,53 @@ function MapView({ session, showToast = () => {} }) {
         endpoint: 'supabase_auth',
       });
     } catch (error) {
-      const referenceId = createSupportReference('signout');
       showToast({
         tone: 'error',
         title: 'Still signed in',
-        message: error?.message || 'Sign out failed. Check your connection and try again.',
+        message: 'Sign out failed. Check your connection and try again.',
         persistent: true,
-        referenceId,
       });
       recordTelemetryEvent('auth_sign_out', {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
         online: navigator.onLine,
         endpoint: 'supabase_auth',
-        referenceId,
       });
     } finally {
       setSigningOut(false);
     }
   }, [showToast, signingOut]);
+
+  const handleRefreshAccess = useCallback(async () => {
+    if (refreshingAccess) return;
+    setRefreshingAccess(true);
+    try {
+      const { data, error } = await withTimeout(
+        supabase.auth.refreshSession(),
+        REMOTE_OPERATION_TIMEOUT_MS,
+        'Access refresh took too long.'
+      );
+      if (error || !data?.session) throw error || new Error('No refreshed session was returned.');
+      onSessionChange(data.session);
+      const refreshedAccess = getAppraisalAccess(data.session);
+      showToast({
+        tone: refreshedAccess.canMutate ? 'success' : 'info',
+        title: refreshedAccess.canMutate ? 'Editing enabled' : 'Access is still view-only',
+        message: refreshedAccess.canMutate
+          ? 'Your updated access is ready to use.'
+          : 'Ask your administrator to enable editing, then refresh access again.',
+      });
+    } catch {
+      showToast({
+        tone: 'error',
+        title: 'Access could not be refreshed',
+        message: 'Check your connection. If your sign-in expired, sign in again and retry.',
+        persistent: true,
+      });
+    } finally {
+      setRefreshingAccess(false);
+    }
+  }, [onSessionChange, refreshingAccess, showToast]);
 
   const handleSignOut = useCallback(() => {
     runWorkspaceAction(performSignOut);
@@ -1069,7 +1089,7 @@ function MapView({ session, showToast = () => {} }) {
   }, [candidates.length]);
 
   const beginManualPlacement = useCallback(() => {
-    setManualPlacement({ active: true, location: null });
+    setManualPlacement({ active: true, location: null, confirmed: false });
     showToast({
       tone: 'info',
       title: 'Place the property pin',
@@ -1079,7 +1099,21 @@ function MapView({ session, showToast = () => {} }) {
   }, [showToast]);
 
   const cancelManualPlacement = useCallback(() => {
-    setManualPlacement({ active: false, location: null });
+    setManualPlacement({ active: false, location: null, confirmed: false });
+  }, []);
+
+  const confirmManualPlacement = useCallback(() => {
+    setManualPlacement((current) => (
+      current.location ? { ...current, active: true, confirmed: true } : current
+    ));
+    showToast({
+      tone: 'success',
+      message: 'Location confirmed. Return to the form and save when ready.',
+    });
+  }, [showToast]);
+
+  const changeManualPlacement = useCallback(() => {
+    setManualPlacement((current) => ({ ...current, active: true, confirmed: false }));
   }, []);
 
   const handleMapClick = useCallback((event) => {
@@ -1099,6 +1133,7 @@ function MapView({ session, showToast = () => {} }) {
     setManualPlacement({
       active: true,
       location: { latitude, longitude },
+      confirmed: false,
     });
   }, [manualPlacement.active, showToast]);
 
@@ -1116,6 +1151,7 @@ function MapView({ session, showToast = () => {} }) {
     setManualPlacement({
       active: true,
       location: { latitude, longitude },
+      confirmed: false,
     });
   }, [showToast]);
 
@@ -1153,7 +1189,6 @@ function MapView({ session, showToast = () => {} }) {
             ? 'The Google Maps key was rejected. An administrator needs to check its API and website restrictions.'
             : 'Check the connection and mapping configuration, then reload the page.'}
         </p>
-        {googleAuthReference && <small>Support reference: {googleAuthReference}</small>}
         <button type="button" className="button button--primary" onClick={() => window.location.reload()}>Reload</button>
       </main>
     );
@@ -1192,9 +1227,6 @@ function MapView({ session, showToast = () => {} }) {
           placeholder={`Search addresses in ${SERVICE_AREA.name}`}
         />
         <nav className="map-header__actions" aria-label="Workspace actions">
-          {!canMutate && (
-            <span className="map-access-badge" title={access.reason || undefined}>View only</span>
-          )}
           <button type="button" className="button button--secondary" onClick={() => {
             runWorkspaceAction(() => {
               setPanelOpen((open) => !open);
@@ -1223,6 +1255,25 @@ function MapView({ session, showToast = () => {} }) {
             {signingOut ? 'Signing out…' : 'Sign out'}
           </button>
         </nav>
+        {!canMutate && (
+          <div className="map-access-notice" role="status">
+            <span>
+              <strong>Your account currently has view-only access.</strong>{' '}
+              Ask your administrator to enable editing.
+              {supportEmail && (
+                <> <a href={`mailto:${supportEmail}`}>{supportEmail}</a></>
+              )}
+            </span>
+            <button
+              type="button"
+              className="button button--secondary"
+              onClick={handleRefreshAccess}
+              disabled={refreshingAccess}
+            >
+              {refreshingAccess ? 'Refreshing…' : 'Refresh access'}
+            </button>
+          </div>
+        )}
         {isAdmin && (
           <small className="map-service-area-mobile">
             {SERVICE_AREA.name} · {SERVICE_AREA.version}
@@ -1273,7 +1324,7 @@ function MapView({ session, showToast = () => {} }) {
                   lat: manualPlacement.location.latitude,
                   lng: manualPlacement.location.longitude,
                 }}
-                draggable
+                draggable={!manualPlacement.confirmed}
                 onDragEnd={handleManualPinDrag}
                 title="Manual property location"
                 zIndex={1400}
@@ -1293,16 +1344,28 @@ function MapView({ session, showToast = () => {} }) {
         {manualPlacement.active && (
           <div className="manual-placement-guide" role="status">
             <div>
-              <strong>{manualPlacement.location ? 'Pin selected' : 'Choose the property location'}</strong>
+              <strong>
+                {manualPlacement.confirmed
+                  ? 'Location confirmed'
+                  : manualPlacement.location ? 'Pin selected' : 'Choose the property location'}
+              </strong>
               <span>
-                {manualPlacement.location
-                  ? 'Drag the pin if needed, then save from the form.'
-                  : 'Click the exact property on the map.'}
+                {manualPlacement.confirmed
+                  ? 'Return to the form and save, or change the pin.'
+                  : manualPlacement.location
+                    ? 'Drag the pin if needed, then confirm this location.'
+                    : 'Click the exact property on the map.'}
               </span>
             </div>
-            <button type="button" onClick={cancelManualPlacement}>
-              {manualPlacement.location ? 'Use this pin' : 'Cancel'}
-            </button>
+            <div className="manual-placement-guide__actions">
+              <button type="button" onClick={cancelManualPlacement}>Cancel placement</button>
+              {manualPlacement.location && !manualPlacement.confirmed && (
+                <button type="button" onClick={confirmManualPlacement}>Confirm this location</button>
+              )}
+              {manualPlacement.confirmed && (
+                <button type="button" onClick={changeManualPlacement}>Change pin</button>
+              )}
+            </div>
           </div>
         )}
 

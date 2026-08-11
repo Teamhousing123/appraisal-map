@@ -24,7 +24,10 @@ class AppErrorBoundary extends React.Component {
       <main className="app-recovery" aria-labelledby="app-recovery-title">
         <BrandLogo className="app-recovery__logo" />
         <h1 id="app-recovery-title">This screen did not open</h1>
-        <p>Your data has not been changed. Reload Appraisal Map to try again.</p>
+        <p>
+          Reload Appraisal Map to continue. If you had just saved something, reopen the nearby
+          reports to confirm the result before trying again.
+        </p>
         <button type="button" onClick={() => window.location.reload()}>
           Reload app
         </button>

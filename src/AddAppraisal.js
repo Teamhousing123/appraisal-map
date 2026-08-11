@@ -8,8 +8,10 @@ import {
 import { validateOptionalDateOrder } from './domain/dates';
 import {
   addressFingerprint,
+  formatCanonicalStreetAddress,
   GEOCODING_ERROR_CODES,
   geocodeFullOntarioAddress,
+  getMaterialAddressCorrection,
   toNormalizedAddressColumns,
 } from './domain/geocoding';
 import {
@@ -25,12 +27,14 @@ import {
 } from './domain/formSafety';
 import {
   createAppraisalIdempotencyKey,
+  APPRAISAL_COMMIT_STATUS,
   findPotentialAppraisalDuplicates,
   insertAppraisal,
   isMissingMetadataSchemaError,
+  reconcileAppraisalCreate,
 } from './services/appraisalService';
 import { isAbortError, OPERATION_ERROR_CODES } from './services/operation';
-import { createSupportReference, recordTelemetryEvent } from './services/telemetry';
+import { recordTelemetryEvent } from './services/telemetry';
 import { supabase } from './supabaseClient';
 import { uploadStorageObject } from './services/resumableUpload';
 
@@ -52,15 +56,11 @@ function createCommandId() {
   return window.crypto?.randomUUID?.() || `create-${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
-function withSupportReference(message, referenceId) {
-  return referenceId ? `${message} Support reference: ${referenceId}.` : message;
-}
-
 function AddAppraisal({
   onAdded,
   metadataSupported = null,
   onWorkspaceStateChange,
-  manualPlacement = { active: false, location: null },
+  manualPlacement = { active: false, location: null, confirmed: false },
   onRequestManualPlacement,
   onCancelManualPlacement,
 }) {
@@ -82,6 +82,8 @@ function AddAppraisal({
   const [preparationProgress, setPreparationProgress] = useState(null);
   const [uploadProgress, setUploadProgress] = useState(null);
   const [potentialDuplicates, setPotentialDuplicates] = useState([]);
+  const [duplicateIncludesDate, setDuplicateIncludesDate] = useState(false);
+  const [pendingAddressCorrection, setPendingAddressCorrection] = useState(null);
   const [saveIntent, setSaveIntent] = useState(null);
   const alertRef = useRef(null);
   const photoInputRef = useRef(null);
@@ -90,6 +92,9 @@ function AddAppraisal({
   const uploadControllerRef = useRef(null);
   const saveIntentRef = useRef('open');
   const createCommandIdRef = useRef(createCommandId());
+  const createAttemptedRef = useRef(false);
+  const submissionLockRef = useRef(false);
+  const storagePathsRef = useRef({ photo: null, pdf: null, folder: null });
 
   const isBusy = phase !== 'idle';
   const currentAddressFingerprint = addressFingerprint(address, city);
@@ -131,6 +136,7 @@ function AddAppraisal({
     if (
       !manualPlacement.active
       || !manualPlacement.location
+      || !manualPlacement.confirmed
       || !address.trim()
       || !city.trim()
     ) return;
@@ -154,7 +160,7 @@ function AddAppraisal({
     setManualPlacementAvailable(false);
     setPotentialDuplicates([]);
     setError('');
-    setStatus('Manual pin selected. Review the location, then save the appraisal.');
+    setStatus('Manual location confirmed. This report will be marked as needing location review.');
   }, [address, city, manualPlacement]);
 
   const invalidateVerifiedAddress = () => {
@@ -162,6 +168,7 @@ function AddAppraisal({
     setStatus('');
     setManualPlacementAvailable(false);
     setPotentialDuplicates([]);
+    setPendingAddressCorrection(null);
     onCancelManualPlacement?.();
   };
 
@@ -201,11 +208,13 @@ function AddAppraisal({
     if (fileError) {
       event.target.value = '';
       setPhoto(null);
+      storagePathsRef.current.photo = null;
       setError(fileError);
       return;
     }
     setError('');
     setPhoto(selectedPhoto);
+    storagePathsRef.current.photo = selectedPhoto ? createOpaqueStorageKey(selectedPhoto) : null;
   };
 
   const handlePdfSelection = (event) => {
@@ -214,11 +223,13 @@ function AddAppraisal({
     if (fileError) {
       event.target.value = '';
       setPdf(null);
+      storagePathsRef.current.pdf = null;
       setError(fileError);
       return;
     }
     setError('');
     setPdf(selectedPdf);
+    storagePathsRef.current.pdf = selectedPdf ? createOpaqueStorageKey(selectedPdf) : null;
   };
 
   const handleFolderSelection = (event) => {
@@ -227,11 +238,13 @@ function AddAppraisal({
     if (fileError) {
       event.target.value = '';
       setFolderFiles([]);
+      storagePathsRef.current.folder = null;
       setError(fileError);
       return;
     }
     setError('');
     setFolderFiles(selectedFiles);
+    storagePathsRef.current.folder = selectedFiles.length > 0 ? createOpaqueStorageKey('.zip') : null;
   };
 
   const resetForAnotherAppraisal = () => {
@@ -252,7 +265,11 @@ function AddAppraisal({
     setPreparationProgress(null);
     setUploadProgress(null);
     setPotentialDuplicates([]);
+    setDuplicateIncludesDate(false);
+    setPendingAddressCorrection(null);
     createCommandIdRef.current = createCommandId();
+    createAttemptedRef.current = false;
+    storagePathsRef.current = { photo: null, pdf: null, folder: null };
     if (photoInputRef.current) photoInputRef.current.value = '';
     if (pdfInputRef.current) pdfInputRef.current.value = '';
     if (folderInputRef.current) folderInputRef.current.value = '';
@@ -261,11 +278,33 @@ function AddAppraisal({
     });
   };
 
+  const acceptMatchedAddress = () => {
+    if (!pendingAddressCorrection) return;
+    const { resolvedAddress, canonicalAddress, canonicalCity } = pendingAddressCorrection;
+    const confirmedAddress = {
+      ...resolvedAddress,
+      fingerprint: addressFingerprint(canonicalAddress, canonicalCity),
+    };
+    setAddress(canonicalAddress);
+    setCity(canonicalCity);
+    setVerifiedAddress(confirmedAddress);
+    setPendingAddressCorrection(null);
+    setPotentialDuplicates([]);
+    setStatus(`Using the matched address: ${resolvedAddress.formattedAddress}.`);
+    window.requestAnimationFrame(() => {
+      document.querySelector('.add-appraisal-submit')?.focus();
+    });
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
-    const submittedIntent = event.nativeEvent?.submitter?.value || saveIntentRef.current;
-    const continueAdding = submittedIntent === 'add_another';
+    if (submissionLockRef.current) return;
+    submissionLockRef.current = true;
+    setPhase('validating');
+    try {
+    const submittedIntent = event.nativeEvent?.submitter?.value || saveIntentRef.current || 'open';
     saveIntentRef.current = 'open';
+    const continueAdding = submittedIntent === 'add_another';
     setError('');
     setStatus('');
 
@@ -308,19 +347,19 @@ function AddAppraisal({
       return;
     }
 
+    if (navigator.onLine === false) {
+      setError('You are offline. Reconnect before saving; your entries and selected files are still here.');
+      return;
+    }
+
     if (metadataSupported === false && hasEnteredMetadata) {
-      const referenceId = createSupportReference('create');
       recordTelemetryEvent('appraisal_mutation', {
         outcome: 'failed',
         errorCode: 'metadata_unavailable',
         operation: 'create',
         endpoint: 'supabase_database',
-        referenceId,
       });
-      setError(withSupportReference(
-        'Property comparison details are temporarily unavailable. Ask an administrator to enable them. Your files have not been uploaded.',
-        referenceId
-      ));
+      setError('Property comparison details are temporarily unavailable. Ask an administrator to enable them. Your files have not been uploaded.');
       return;
     }
 
@@ -330,26 +369,69 @@ function AddAppraisal({
     let resolvedAddress = addressIsVerified ? verifiedAddress : null;
 
     if (!resolvedAddress) {
-      if (manualPlacement.active && !manualPlacement.location) {
-        setError('Click the exact property location on the map, then return here to save.');
+      if (manualPlacement.active && (!manualPlacement.location || !manualPlacement.confirmed)) {
+        setError('Choose the property location on the map and select “Confirm this location” before saving.');
         return;
       }
       setPhase('verifying');
       try {
         const geocodedAddress = await geocodeFullOntarioAddress(address, city);
+        const originalInput = `${address.trim()}, ${city.trim()}`;
         resolvedAddress = {
           ...geocodedAddress,
-          fingerprint: addressFingerprint(address, city),
           verificationProvider: 'google',
           verificationStatus: 'verified',
+          normalizedAddress: toNormalizedAddressColumns(geocodedAddress, { originalInput }),
         };
+        const correction = getMaterialAddressCorrection(address, city, resolvedAddress);
+        const canonicalAddress = correction.canonicalAddress
+          || formatCanonicalStreetAddress(resolvedAddress)
+          || address.trim();
+        const canonicalCity = correction.canonicalCity || city.trim();
+        resolvedAddress.fingerprint = addressFingerprint(canonicalAddress, canonicalCity);
+        if (correction.material) {
+          setVerifiedAddress(null);
+          setPendingAddressCorrection({ resolvedAddress, canonicalAddress, canonicalCity });
+          setStatus('Google found a different civic address. Confirm the match below before saving.');
+          return;
+        }
+        setAddress(canonicalAddress);
+        setCity(canonicalCity);
         setVerifiedAddress(resolvedAddress);
         setStatus(`Address verified as ${geocodedAddress.formattedAddress}. Saving now…`);
       } catch (geocodeError) {
-        setError(geocodeError.message);
+        setError(
+          geocodeError?.isUserFacing
+            ? geocodeError.message
+            : 'The address could not be verified. Check your connection and try again.'
+        );
         setPhase('idle');
         setSaveIntent(null);
         setManualPlacementAvailable(MANUAL_PLACEMENT_ERROR_CODES.has(geocodeError?.code));
+        return;
+      }
+    }
+
+    const idempotencyKey = createAppraisalIdempotencyKey(createCommandIdRef.current);
+    if (createAttemptedRef.current) {
+      const previousResult = await reconcileAppraisalCreate(supabase, idempotencyKey);
+      if (previousResult.status === APPRAISAL_COMMIT_STATUS.COMMITTED) {
+        const insertedReport = previousResult.data;
+        if (continueAdding) resetForAnotherAppraisal();
+        onCancelManualPlacement?.();
+        onAdded({
+          message: continueAdding
+            ? 'Appraisal saved. Ready for another.'
+            : 'Appraisal saved and opened on the map.',
+          tone: 'success',
+          data: insertedReport,
+          report: insertedReport,
+          continueAdding,
+        });
+        return;
+      }
+      if (previousResult.status === APPRAISAL_COMMIT_STATUS.UNKNOWN) {
+        setError('The previous save could not be confirmed. Your entries are still here, and it is safe to retry after reconnecting.');
         return;
       }
     }
@@ -359,14 +441,16 @@ function AddAppraisal({
       try {
         const duplicateResult = await findPotentialAppraisalDuplicates(supabase, {
           placeId: resolvedAddress.placeId || resolvedAddress.place_id || null,
-          address: address.trim(),
-          city: city.trim(),
+          address: formatCanonicalStreetAddress(resolvedAddress) || address.trim(),
+          city: resolvedAddress.components?.city || city.trim(),
           appraisalDate: appraisalDate || null,
           effectiveDate: effectiveDate || null,
         });
         if (duplicateResult.data.length > 0) {
           setPotentialDuplicates(duplicateResult.data);
-          setStatus('A report may already exist for this property and date. Review the note below before continuing.');
+          const includesDate = Boolean(appraisalDate || effectiveDate);
+          setDuplicateIncludesDate(includesDate);
+          setStatus(`A report may already exist for this property${includesDate ? ' and date' : ''}. Review the note below before continuing.`);
           setPhase('idle');
           setSaveIntent(null);
           return;
@@ -381,7 +465,7 @@ function AddAppraisal({
     setUploadProgress(null);
     const uploadedStoragePaths = [];
     let rowCommitted = false;
-    let failureReferenceId = '';
+    let databaseMutationAttempted = false;
     const uploadController = new AbortController();
     uploadControllerRef.current = uploadController;
 
@@ -391,7 +475,6 @@ function AddAppraisal({
       try {
         const result = await uploadStorageObject(supabase, bucket, path, file, {
           signal: uploadController.signal,
-          forceResumable: true,
           contentType,
           onProgress: ({ percent }) => setUploadProgress({ label, percent }),
         });
@@ -405,13 +488,11 @@ function AddAppraisal({
         return result;
       } catch (uploadError) {
         const cancelled = isAbortError(uploadError);
-        if (!cancelled) failureReferenceId ||= createSupportReference('upload');
         recordTelemetryEvent('appraisal_mutation', {
           outcome: cancelled ? 'cancelled' : 'failed',
           errorCode: uploadError?.code || 'unknown',
           operation: 'upload',
           endpoint: 'supabase_storage',
-          referenceId: failureReferenceId,
         });
         throw uploadError;
       }
@@ -420,7 +501,8 @@ function AddAppraisal({
     try {
       let photoPath = null;
       if (photo) {
-        const photoName = createOpaqueStorageKey(photo);
+        const photoName = storagePathsRef.current.photo || createOpaqueStorageKey(photo);
+        storagePathsRef.current.photo = photoName;
         await uploadObject('photos', photoName, photo, 'property photo');
         photoPath = photoName;
         uploadedStoragePaths.push({ bucket: 'photos', path: photoName });
@@ -430,7 +512,8 @@ function AddAppraisal({
       let folderPaths = [];
 
       if (uploadType === 'pdf' && pdf) {
-        const pdfName = createOpaqueStorageKey(pdf);
+        const pdfName = storagePathsRef.current.pdf || createOpaqueStorageKey(pdf);
+        storagePathsRef.current.pdf = pdfName;
         await uploadObject('pdfs', pdfName, pdf, 'report PDF');
         pdfPath = pdfName;
         uploadedStoragePaths.push({ bucket: 'pdfs', path: pdfName });
@@ -448,8 +531,13 @@ function AddAppraisal({
           setPreparationProgress(rounded);
           setStatus(`Preparing the document folder… ${rounded}%`);
         });
-        const zipFile = new File([zipBlob], 'appraisal-documents.zip', { type: 'application/zip' });
-        const zipName = createOpaqueStorageKey('.zip');
+        const stableLastModified = Math.max(...folderFiles.map((file) => Number(file.lastModified) || 0));
+        const zipFile = new File([zipBlob], 'appraisal-documents.zip', {
+          type: 'application/zip',
+          lastModified: stableLastModified,
+        });
+        const zipName = storagePathsRef.current.folder || createOpaqueStorageKey('.zip');
+        storagePathsRef.current.folder = zipName;
         await uploadObject(
           'appraisal-folders',
           zipName,
@@ -466,8 +554,8 @@ function AddAppraisal({
       setStatus('Finishing the appraisal save…');
 
       const legacyPayload = {
-        address: address.trim(),
-        city: city.trim(),
+        address: formatCanonicalStreetAddress(resolvedAddress) || address.trim(),
+        city: resolvedAddress.components?.city || city.trim(),
         latitude: resolvedAddress.latitude,
         longitude: resolvedAddress.longitude,
         appraisal_date: appraisalDate || null,
@@ -477,7 +565,7 @@ function AddAppraisal({
       };
       const enhancedPayload = {
         ...legacyPayload,
-        idempotency_key: createAppraisalIdempotencyKey(createCommandIdRef.current),
+        idempotency_key: idempotencyKey,
         ...(resolvedAddress.normalizedAddress || toNormalizedAddressColumns(
           resolvedAddress,
           {
@@ -490,6 +578,8 @@ function AddAppraisal({
       };
       let insertError = null;
       let insertedData = null;
+      createAttemptedRef.current = true;
+      databaseMutationAttempted = true;
       if (metadataSupported === false) {
         ({ error: insertError, data: insertedData } = await insertAppraisal(supabase, enhancedPayload));
       } else {
@@ -530,30 +620,20 @@ function AddAppraisal({
         continueAdding,
       });
     } catch (saveError) {
-      const cleanupFailures = rowCommitted
-        ? []
-        : await cleanupUploadedObjects(supabase, uploadedStoragePaths);
+      const confirmedNotCommitted = saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.ABSENT;
+      const safeToCleanup = !rowCommitted && (!databaseMutationAttempted || confirmedNotCommitted);
+      const cleanupFailures = safeToCleanup
+        ? await cleanupUploadedObjects(supabase, uploadedStoragePaths)
+        : [];
       const cleanupFailed = cleanupFailures.length > 0;
       const cancelled = isAbortError(saveError);
-      const requiresSupport = !cancelled && (
-        rowCommitted
-        || failureReferenceId
-        || saveError?.isInfrastructureFailure
-        || !saveError?.isUserFacing
-      );
-      const referenceId = requiresSupport
-        ? failureReferenceId || createSupportReference('create')
-        : '';
       recordTelemetryEvent('appraisal_mutation', {
         outcome: cancelled ? 'cancelled' : 'failed',
         errorCode: saveError?.code || 'unknown',
         operation: rowCommitted ? 'create_refresh' : 'create',
         endpoint: rowCommitted
           ? undefined
-          : failureReferenceId
-            ? 'supabase_storage'
-            : 'supabase_database',
-        referenceId,
+          : databaseMutationAttempted ? 'supabase_database' : 'supabase_storage',
       });
       if (cleanupFailed) {
         recordTelemetryEvent('appraisal_mutation', {
@@ -561,27 +641,19 @@ function AddAppraisal({
           errorCode: 'cleanup_failed',
           operation: 'cleanup',
           endpoint: 'supabase_storage',
-          referenceId,
         });
       }
 
       if (cancelled) {
-        setError('Upload cancelled. No appraisal record was added.');
+        setError('Cancelled before save. Your entries and selected files are still here, so you can retry.');
       } else if (rowCommitted) {
-        setError(withSupportReference(
-          'The appraisal was saved, but the workspace could not refresh. Reopen nearby reports to confirm it.',
-          referenceId
-        ));
+        setError('The appraisal was saved, but the workspace could not refresh. Reopen nearby reports to confirm it.');
+      } else if (saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.UNKNOWN) {
+        setError('The save result could not be confirmed. Your entries are still here, uploaded files were kept safe, and retrying is safe.');
       } else if (saveError.isUserFacing) {
-        setError(withSupportReference(
-          saveError.message,
-          referenceId
-        ));
+        setError(saveError.message);
       } else {
-        setError(withSupportReference(
-          'The appraisal could not be saved. No record was added, and your form is still here. Try again or contact support.',
-          referenceId
-        ));
+        setError('The appraisal was not saved. Your entries are still here. Check your connection and retry.');
       }
     } finally {
       uploadControllerRef.current = null;
@@ -589,6 +661,10 @@ function AddAppraisal({
       setSaveIntent(null);
       setPreparationProgress(null);
       setUploadProgress(null);
+    }
+    } finally {
+      submissionLockRef.current = false;
+      setPhase('idle');
     }
   };
 
@@ -622,12 +698,37 @@ function AddAppraisal({
           <strong>Possible duplicate</strong>
           <p>
             {potentialDuplicates.length} existing report{potentialDuplicates.length === 1 ? '' : 's'} matched
-            this property and date. A newer or separate appraisal can still be saved, and no existing
+            this property{duplicateIncludesDate ? ' and date' : ''}. A newer or separate appraisal can still be saved, and no existing
             report will be overwritten.
           </p>
         </div>
       )}
-      <form onSubmit={handleSubmit} aria-busy={isBusy} noValidate>
+      {pendingAddressCorrection && (
+        <div className="appraisal-caution" role="alert">
+          <strong>Confirm the matched address</strong>
+          <p>
+            You entered “{address.trim()}, {city.trim()}”. Google matched
+            “{pendingAddressCorrection.resolvedAddress.formattedAddress}”.
+          </p>
+          <div className="appraisal-confirm-actions">
+            <button type="button" className="button button--primary" onClick={acceptMatchedAddress}>
+              Use matched address
+            </button>
+            <button
+              type="button"
+              className="button button--secondary"
+              onClick={() => {
+                setPendingAddressCorrection(null);
+                setStatus('');
+                document.getElementById('appraisal-address-street')?.focus();
+              }}
+            >
+              Keep editing
+            </button>
+          </div>
+        </div>
+      )}
+      <form aria-label="Add appraisal form" onSubmit={handleSubmit} aria-busy={isBusy} noValidate>
         <AddressPicker
           idPrefix="appraisal-address"
           address={address}
@@ -684,6 +785,7 @@ function AddAppraisal({
               className="appraisal-remove-file"
               onClick={() => {
                 setPhoto(null);
+                storagePathsRef.current.photo = null;
                 if (photoInputRef.current) photoInputRef.current.value = '';
               }}
             >
@@ -748,7 +850,8 @@ function AddAppraisal({
                 type="button"
                 className="appraisal-remove-file"
                 onClick={() => {
-                  setPdf(null);
+                setPdf(null);
+                storagePathsRef.current.pdf = null;
                   if (pdfInputRef.current) pdfInputRef.current.value = '';
                 }}
               >
@@ -792,6 +895,7 @@ function AddAppraisal({
                 className="appraisal-remove-file"
                 onClick={() => {
                   setFolderFiles([]);
+                  storagePathsRef.current.folder = null;
                   if (folderInputRef.current) folderInputRef.current.value = '';
                 }}
               >
@@ -837,6 +941,8 @@ function AddAppraisal({
           >
             {phase === 'verifying'
               ? 'Verifying address…'
+              : phase === 'validating'
+                ? 'Checking entries…'
               : phase === 'checking'
                 ? 'Checking for duplicates…'
               : phase === 'saving'

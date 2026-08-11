@@ -55,6 +55,13 @@ export const APPRAISAL_MUTATION_NOT_APPLIED_CODE = 'APPRAISAL_MUTATION_NOT_APPLI
 export const APPRAISAL_VERSION_CONFLICT_CODE = 'APPRAISAL_VERSION_CONFLICT';
 export const APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS = 15000;
 export const APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS = 8000;
+export const APPRAISAL_MUTATION_TIMEOUT_MS = 15000;
+export const APPRAISAL_RECONCILIATION_TIMEOUT_MS = 10000;
+export const APPRAISAL_COMMIT_STATUS = Object.freeze({
+  COMMITTED: 'committed',
+  ABSENT: 'absent',
+  UNKNOWN: 'unknown',
+});
 
 const CAPABILITY_UNKNOWN = 'unknown';
 const CAPABILITY_SUPPORTED = 'supported';
@@ -306,8 +313,8 @@ async function queryPotentialDuplicates(
   let query = supabase
     .from('appraisals')
     .select(duplicateSelect({ useFoundation, dateColumn }))
-    .eq(dateColumn, dateValue)
     .order('created_at', { ascending: false });
+  if (dateColumn && dateValue) query = query.eq(dateColumn, dateValue);
   if (useFoundation) query = query.is('deleted_at', null);
   if (useFoundation && placeId) {
     query = query.eq('place_id', placeId);
@@ -328,7 +335,7 @@ async function findPotentialAppraisalDuplicatesInternal(
   let dateColumn = effectiveDate ? 'effective_date' : appraisalDate ? 'appraisal_date' : null;
   let dateValue = effectiveDate || appraisalDate || null;
   const hasLegacyLocation = Boolean(String(address || '').trim() && String(city || '').trim());
-  if (!dateColumn || (!placeId && !hasLegacyLocation)) {
+  if (!placeId && !hasLegacyLocation) {
     return {
       data: [],
       matchedOn: null,
@@ -393,7 +400,7 @@ async function findPotentialAppraisalDuplicatesInternal(
   if (dateColumn === 'effective_date') metadataSchemaCapability = CAPABILITY_SUPPORTED;
   return {
     data: response.data || [],
-    matchedOn: useFoundation && placeId ? 'place_id' : 'address_city',
+    matchedOn: `${useFoundation && placeId ? 'place_id' : 'address_city'}${dateColumn ? '_date' : ''}`,
     foundationSupported: capabilityFlag(foundationSchemaCapability),
     skipped: false,
   };
@@ -493,6 +500,137 @@ function normalizeOpaqueToken(value) {
   return String(value || '').trim().replace(/[^a-zA-Z0-9_-]/g, '');
 }
 
+function markCommitStatus(error, commitStatus) {
+  const markedError = error || new Error('The result of this change could not be confirmed.');
+  markedError.commitStatus = commitStatus;
+  return markedError;
+}
+
+async function captureMutationResult(operation) {
+  try {
+    return await operation();
+  } catch (error) {
+    return {
+      data: null,
+      error: markCommitStatus(error, APPRAISAL_COMMIT_STATUS.UNKNOWN),
+    };
+  }
+}
+
+function createUnconfirmedMutationError(action) {
+  const error = new Error(
+    `The ${action} could not be confirmed. Your entries are still here, and it is safe to retry.`
+  );
+  error.name = 'AppraisalCommitUnknownError';
+  error.code = 'APPRAISAL_COMMIT_UNKNOWN';
+  error.isUserFacing = true;
+  error.commitStatus = APPRAISAL_COMMIT_STATUS.UNKNOWN;
+  return error;
+}
+
+function executeCurrentLookup(supabase, columns, column, value, signal) {
+  let query = supabase
+    .from('appraisals')
+    .select(columns)
+    .eq(column, value);
+  if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+  return query.maybeSingle();
+}
+
+async function lookupCurrentAppraisalInternal(supabase, column, value, { signal } = {}) {
+  const wantsFoundation = column !== 'id';
+  if (wantsFoundation && foundationSchemaCapability === CAPABILITY_UNSUPPORTED) {
+    return { data: null, error: migrationRequiredError(), foundationSupported: false };
+  }
+
+  let useFoundation = foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
+  let columns = useFoundation
+    ? metadataSchemaCapability === CAPABILITY_UNSUPPORTED
+      ? LEGACY_FOUNDATION_APPRAISAL_SELECT
+      : CURRENT_APPRAISAL_SELECT
+    : metadataSchemaCapability === CAPABILITY_UNSUPPORTED
+      ? LEGACY_APPRAISAL_SELECT
+      : EXTENDED_APPRAISAL_SELECT;
+  let response = await executeCurrentLookup(supabase, columns, column, value, signal);
+
+  if (useFoundation && isMissingMetadataSchemaError(response.error)) {
+    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+    columns = LEGACY_FOUNDATION_APPRAISAL_SELECT;
+    response = await executeCurrentLookup(supabase, columns, column, value, signal);
+  }
+  if (useFoundation && isMissingFoundationSchemaError(response.error)) {
+    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    if (wantsFoundation) {
+      return { data: null, error: response.error, foundationSupported: false };
+    }
+    useFoundation = false;
+    columns = metadataSchemaCapability === CAPABILITY_UNSUPPORTED
+      ? LEGACY_APPRAISAL_SELECT
+      : EXTENDED_APPRAISAL_SELECT;
+    response = await executeCurrentLookup(supabase, columns, column, value, signal);
+  }
+
+  if (!response.error && useFoundation) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+  return {
+    ...response,
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
+  };
+}
+
+async function lookupCurrentAppraisal(supabase, column, value) {
+  return runBoundedOperation(
+    ({ signal }) => lookupCurrentAppraisalInternal(
+      supabase,
+      column,
+      value,
+      { signal }
+    ),
+    {
+      label: 'Appraisal confirmation',
+      timeoutMs: APPRAISAL_RECONCILIATION_TIMEOUT_MS,
+    }
+  );
+}
+
+export async function reconcileAppraisalCreate(supabase, idempotencyKey) {
+  try {
+    const response = await lookupCurrentAppraisal(supabase, 'idempotency_key', idempotencyKey);
+    if (response.error) {
+      return { status: APPRAISAL_COMMIT_STATUS.UNKNOWN, data: null, error: response.error };
+    }
+    if (response.data?.id) {
+      return { status: APPRAISAL_COMMIT_STATUS.COMMITTED, data: response.data, error: null };
+    }
+    return { status: APPRAISAL_COMMIT_STATUS.ABSENT, data: null, error: null };
+  } catch (error) {
+    return { status: APPRAISAL_COMMIT_STATUS.UNKNOWN, data: null, error };
+  }
+}
+
+export async function fetchAppraisalForMutation(supabase, id) {
+  try {
+    return await lookupCurrentAppraisal(supabase, 'id', id);
+  } catch (error) {
+    return { data: null, error };
+  }
+}
+
+function storedValueMatches(storedValue, intendedValue) {
+  if (Array.isArray(storedValue) || Array.isArray(intendedValue)) {
+    return JSON.stringify(storedValue || []) === JSON.stringify(intendedValue || []);
+  }
+  if (storedValue === null || storedValue === undefined || intendedValue === null || intendedValue === undefined) {
+    return (storedValue ?? null) === (intendedValue ?? null);
+  }
+  return String(storedValue) === String(intendedValue);
+}
+
+function rowMatchesUpdates(row, updates) {
+  return Object.entries(updates || {}).every(([column, value]) => (
+    storedValueMatches(row?.[column], value)
+  ));
+}
+
 export function createAppraisalSubmissionId() {
   if (typeof window !== 'undefined' && window.crypto?.randomUUID) {
     return window.crypto.randomUUID();
@@ -508,33 +646,61 @@ export function createAppraisalIdempotencyKey(submissionId) {
 }
 
 async function executeInsert(supabase, payload, useFoundation) {
-  const table = supabase.from('appraisals');
-  const query = useFoundation && payload.idempotency_key
-    ? table.upsert([payload], { onConflict: 'idempotency_key', ignoreDuplicates: false })
-    : table.insert([payload]);
-  return query.select(selectForMutation(payload, useFoundation)).maybeSingle();
+  return runBoundedOperation(({ signal }) => {
+    const table = supabase.from('appraisals');
+    let query = useFoundation && payload.idempotency_key
+      ? table.upsert([payload], { onConflict: 'idempotency_key', ignoreDuplicates: true })
+      : table.insert([payload]);
+    query = query.select(selectForMutation(payload, useFoundation));
+    if (typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+    return query.maybeSingle();
+  }, {
+    label: 'Appraisal save',
+    timeoutMs: APPRAISAL_MUTATION_TIMEOUT_MS,
+  });
 }
 
 export async function insertAppraisal(supabase, payload) {
   const wantsFoundation = payloadContainsFoundation(payload);
   let useFoundation = wantsFoundation && foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
   let appliedPayload = useFoundation ? payload : withoutFoundationFields(payload);
-  let response = await executeInsert(supabase, appliedPayload, useFoundation);
+  let response = await captureMutationResult(
+    () => executeInsert(supabase, appliedPayload, useFoundation)
+  );
   if (useFoundation && isMissingFoundationSchemaError(response.error)) {
     foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
     useFoundation = false;
     appliedPayload = withoutFoundationFields(payload);
-    response = await executeInsert(supabase, appliedPayload, false);
+    response = await captureMutationResult(
+      () => executeInsert(supabase, appliedPayload, false)
+    );
   }
   if (!payloadContainsMetadata(payload) && isMissingMetadataSchemaError(response.error)) {
     metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    response = await executeInsert(supabase, appliedPayload, useFoundation);
+    response = await captureMutationResult(
+      () => executeInsert(supabase, appliedPayload, useFoundation)
+    );
+  }
+  if (useFoundation && payload.idempotency_key && (response.error || !response.data?.id)) {
+    const reconciliation = await reconcileAppraisalCreate(supabase, payload.idempotency_key);
+    if (reconciliation.status === APPRAISAL_COMMIT_STATUS.COMMITTED) {
+      response = { data: reconciliation.data, error: null };
+    } else if (reconciliation.status === APPRAISAL_COMMIT_STATUS.ABSENT) {
+      response = {
+        data: null,
+        error: markCommitStatus(response.error, APPRAISAL_COMMIT_STATUS.ABSENT),
+      };
+    } else {
+      response = { data: null, error: createUnconfirmedMutationError('save') };
+    }
   }
   const error = verifyMutationResult(response.data, response.error, 'created');
+  if (!error && response.data?.id) response.commitStatus = APPRAISAL_COMMIT_STATUS.COMMITTED;
   rememberMutationCapability(appliedPayload, error);
   return {
     data: response.data,
     error,
+    commitStatus: error?.commitStatus || response.commitStatus || APPRAISAL_COMMIT_STATUS.ABSENT,
     metadataSupported: capabilityFlag(metadataSchemaCapability),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
     idempotencySupported: useFoundation && !error,
@@ -542,30 +708,78 @@ export async function insertAppraisal(supabase, payload) {
 }
 
 async function executeUpdate(supabase, id, updates, { expectedVersion, useFoundation }) {
-  let query = supabase.from('appraisals').update(updates).eq('id', id);
-  if (expectedVersion !== undefined && useFoundation) query = query.eq('version', expectedVersion);
-  return query.select(selectForMutation(updates, useFoundation)).maybeSingle();
+  return runBoundedOperation(({ signal }) => {
+    let query = supabase.from('appraisals').update(updates).eq('id', id);
+    if (expectedVersion !== undefined && useFoundation) query = query.eq('version', expectedVersion);
+    query = query.select(selectForMutation(updates, useFoundation));
+    if (typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+    return query.maybeSingle();
+  }, {
+    label: 'Appraisal update',
+    timeoutMs: APPRAISAL_MUTATION_TIMEOUT_MS,
+  });
 }
 
 export async function updateAppraisal(supabase, id, updates, { expectedVersion } = {}) {
   const wantsFoundation = payloadContainsFoundation(updates) || expectedVersion !== undefined;
   let useFoundation = wantsFoundation && foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
   let appliedUpdates = useFoundation ? updates : withoutFoundationFields(updates);
-  let response = await executeUpdate(supabase, id, appliedUpdates, { expectedVersion, useFoundation });
+  let response = await captureMutationResult(
+    () => executeUpdate(supabase, id, appliedUpdates, { expectedVersion, useFoundation })
+  );
   if (useFoundation && isMissingFoundationSchemaError(response.error)) {
     foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+    if (expectedVersion !== undefined) {
+      const error = migrationRequiredError();
+      error.message = 'Safe editing is temporarily unavailable. Ask an administrator to finish the database update.';
+      return {
+        data: null,
+        error,
+        metadataSupported: capabilityFlag(metadataSchemaCapability),
+        foundationSupported: false,
+        concurrencySupported: false,
+        commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+      };
+    }
     useFoundation = false;
     appliedUpdates = withoutFoundationFields(updates);
-    response = await executeUpdate(supabase, id, appliedUpdates, { useFoundation: false });
+    response = await captureMutationResult(
+      () => executeUpdate(supabase, id, appliedUpdates, { useFoundation: false })
+    );
   }
   if (!payloadContainsMetadata(updates) && isMissingMetadataSchemaError(response.error)) {
     metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    response = await executeUpdate(
-      supabase,
-      id,
-      appliedUpdates,
-      { expectedVersion, useFoundation }
+    response = await captureMutationResult(
+      () => executeUpdate(
+        supabase,
+        id,
+        appliedUpdates,
+        { expectedVersion, useFoundation }
+      )
     );
+  }
+
+  if (response.error && !isMissingFoundationSchemaError(response.error) && !isMissingMetadataSchemaError(response.error)) {
+    const stored = await fetchAppraisalForMutation(supabase, id);
+    if (stored.data?.id && rowMatchesUpdates(stored.data, appliedUpdates)) {
+      response = { data: stored.data, error: null };
+    } else if (stored.error || !stored.data?.id) {
+      response = { data: null, error: createUnconfirmedMutationError('update') };
+    } else if (
+      expectedVersion !== undefined
+      && Number(stored.data.version) !== Number(expectedVersion)
+    ) {
+      response = {
+        data: null,
+        error: createMutationNotAppliedError(
+          'updated',
+          id,
+          APPRAISAL_VERSION_CONFLICT_CODE
+        ),
+      };
+    } else {
+      response.error = markCommitStatus(response.error, APPRAISAL_COMMIT_STATUS.ABSENT);
+    }
   }
   const error = verifyMutationResult(
     response.data,
@@ -578,6 +792,8 @@ export async function updateAppraisal(supabase, id, updates, { expectedVersion }
   return {
     data: response.data,
     error,
+    commitStatus: error?.commitStatus
+      || (error ? APPRAISAL_COMMIT_STATUS.ABSENT : APPRAISAL_COMMIT_STATUS.COMMITTED),
     metadataSupported: capabilityFlag(metadataSchemaCapability),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
     concurrencySupported: useFoundation && !error,
@@ -592,13 +808,50 @@ function migrationRequiredError() {
 }
 
 async function archiveAppraisal(supabase, id, { expectedVersion, now }) {
-  let query = supabase
-    .from('appraisals')
-    .update({ deleted_at: now })
-    .eq('id', id)
-    .is('deleted_at', null);
-  if (expectedVersion !== undefined) query = query.eq('version', expectedVersion);
-  return query.select(selectForMutation({ deleted_at: now }, true)).maybeSingle();
+  return runBoundedOperation(({ signal }) => {
+    let query = supabase
+      .from('appraisals')
+      .update({ deleted_at: now })
+      .eq('id', id)
+      .is('deleted_at', null);
+    if (expectedVersion !== undefined) query = query.eq('version', expectedVersion);
+    query = query.select(selectForMutation({ deleted_at: now }, true));
+    if (typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+    return query.maybeSingle();
+  }, {
+    label: 'Appraisal archive',
+    timeoutMs: APPRAISAL_MUTATION_TIMEOUT_MS,
+  });
+}
+
+async function reconcileArchiveState(
+  supabase,
+  id,
+  { shouldBeArchived, expectedVersion, originalError }
+) {
+  const stored = await fetchAppraisalForMutation(supabase, id);
+  if (stored.error || !stored.data?.id) {
+    return { data: null, error: createUnconfirmedMutationError(shouldBeArchived ? 'archive' : 'restore') };
+  }
+  const isArchived = Boolean(stored.data.deleted_at);
+  if (isArchived === shouldBeArchived) return { data: stored.data, error: null };
+  if (
+    expectedVersion !== undefined
+    && Number(stored.data.version) !== Number(expectedVersion)
+  ) {
+    return {
+      data: null,
+      error: createMutationNotAppliedError(
+        shouldBeArchived ? 'archived' : 'restored',
+        id,
+        APPRAISAL_VERSION_CONFLICT_CODE
+      ),
+    };
+  }
+  return {
+    data: null,
+    error: markCommitStatus(originalError, APPRAISAL_COMMIT_STATUS.ABSENT),
+  };
 }
 
 export async function deleteAppraisal(
@@ -609,7 +862,9 @@ export async function deleteAppraisal(
   if (foundationSchemaCapability === CAPABILITY_UNSUPPORTED) {
     return { data: null, error: migrationRequiredError(), deletedId: null, archived: false };
   }
-  const response = await archiveAppraisal(supabase, id, { expectedVersion, now });
+  const response = await captureMutationResult(
+    () => archiveAppraisal(supabase, id, { expectedVersion, now })
+  );
   let finalResponse = response;
   if (isMissingFoundationSchemaError(finalResponse.error)) {
     foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
@@ -617,7 +872,16 @@ export async function deleteAppraisal(
   }
   if (isMissingMetadataSchemaError(finalResponse.error)) {
     metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    finalResponse = await archiveAppraisal(supabase, id, { expectedVersion, now });
+    finalResponse = await captureMutationResult(
+      () => archiveAppraisal(supabase, id, { expectedVersion, now })
+    );
+  }
+  if (finalResponse.error) {
+    finalResponse = await reconcileArchiveState(supabase, id, {
+      shouldBeArchived: true,
+      expectedVersion,
+      originalError: finalResponse.error,
+    });
   }
   if (!finalResponse.error) foundationSchemaCapability = CAPABILITY_SUPPORTED;
   const error = verifyMutationResult(
@@ -632,39 +896,58 @@ export async function deleteAppraisal(
     error,
     deletedId: error ? null : finalResponse.data.id,
     archived: !error,
+    commitStatus: error?.commitStatus
+      || (error ? APPRAISAL_COMMIT_STATUS.ABSENT : APPRAISAL_COMMIT_STATUS.COMMITTED),
   };
+}
+
+async function executeRestore(supabase, id, expectedVersion) {
+  return runBoundedOperation(({ signal }) => {
+    let query = supabase
+      .from('appraisals')
+      .update({ deleted_at: null, deleted_by: null })
+      .eq('id', id);
+    if (expectedVersion !== undefined) query = query.eq('version', expectedVersion);
+    query = query.select(selectForMutation({ deleted_at: null }, true));
+    if (typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+    return query.maybeSingle();
+  }, {
+    label: 'Appraisal restore',
+    timeoutMs: APPRAISAL_MUTATION_TIMEOUT_MS,
+  });
 }
 
 export async function restoreAppraisal(supabase, id, { expectedVersion } = {}) {
   if (foundationSchemaCapability === CAPABILITY_UNSUPPORTED) {
     return { data: null, error: migrationRequiredError(), foundationSupported: false };
   }
-  let query = supabase
-    .from('appraisals')
-    .update({ deleted_at: null, deleted_by: null })
-    .eq('id', id);
-  if (expectedVersion !== undefined) query = query.eq('version', expectedVersion);
-  let response = await query.select(selectForMutation({ deleted_at: null }, true)).maybeSingle();
+  let response = await captureMutationResult(
+    () => executeRestore(supabase, id, expectedVersion)
+  );
   if (isMissingFoundationSchemaError(response.error)) {
     foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
     return { data: null, error: migrationRequiredError(), foundationSupported: false };
   }
   if (isMissingMetadataSchemaError(response.error)) {
     metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    let retry = supabase
-      .from('appraisals')
-      .update({ deleted_at: null, deleted_by: null })
-      .eq('id', id);
-    if (expectedVersion !== undefined) retry = retry.eq('version', expectedVersion);
-    response = await retry
-      .select(selectForMutation({ deleted_at: null }, true))
-      .maybeSingle();
+    response = await captureMutationResult(
+      () => executeRestore(supabase, id, expectedVersion)
+    );
+  }
+  if (response.error) {
+    response = await reconcileArchiveState(supabase, id, {
+      shouldBeArchived: false,
+      expectedVersion,
+      originalError: response.error,
+    });
   }
   if (!response.error) foundationSchemaCapability = CAPABILITY_SUPPORTED;
   const error = verifyMutationResult(response.data, response.error, 'restored', id, expectedVersion);
   return {
     data: response.data,
     error,
+    commitStatus: error?.commitStatus
+      || (error ? APPRAISAL_COMMIT_STATUS.ABSENT : APPRAISAL_COMMIT_STATUS.COMMITTED),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
   };
 }

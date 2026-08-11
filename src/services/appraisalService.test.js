@@ -1,8 +1,10 @@
 import {
+  APPRAISAL_COMMIT_STATUS,
   APPRAISAL_MUTATION_NOT_APPLIED_CODE,
   APPRAISAL_VERSION_CONFLICT_CODE,
   APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS,
   APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS,
+  APPRAISAL_MUTATION_TIMEOUT_MS,
   CURRENT_APPRAISAL_SELECT,
   EXTENDED_APPRAISAL_SELECT,
   createAppraisalIdempotencyKey,
@@ -15,6 +17,7 @@ import {
   isMissingFoundationSchemaError,
   isMissingMetadataSchemaError,
   resetAppraisalSchemaCapabilities,
+  restoreAppraisal,
   updateAppraisal,
 } from './appraisalService';
 import { OPERATION_ERROR_CODES } from './operation';
@@ -68,6 +71,7 @@ function createMutationClient(responses = []) {
     insert: jest.fn(() => query),
     upsert: jest.fn(() => query),
     update: jest.fn(() => query),
+    select: jest.fn(() => query),
   };
   return { client: { from: jest.fn(() => table) }, table, query };
 }
@@ -264,8 +268,35 @@ describe('appraisal service schema compatibility', () => {
     });
     expect(result).toEqual({
       data: [duplicate],
-      matchedOn: 'address_city',
+      matchedOn: 'address_city_date',
       foundationSupported: false,
+      skipped: false,
+    });
+  });
+
+  it('checks the property even when employees leave both dates blank', async () => {
+    const duplicate = { id: 'existing', address: '10 Example Road', city: 'Aurora' };
+    const client = createDuplicateClient(() => Promise.resolve({
+      data: [duplicate],
+      error: null,
+    }));
+
+    const result = await findPotentialAppraisalDuplicates(client, {
+      placeId: 'google-place-id',
+      address: '10 Example Road',
+      city: 'Aurora',
+    });
+
+    expect(client.calls[0].filters).toEqual(expect.arrayContaining([
+      ['is', 'deleted_at', null],
+      ['eq', 'place_id', 'google-place-id'],
+    ]));
+    expect(client.calls[0].filters).not.toEqual(expect.arrayContaining([
+      expect.arrayContaining(['eq', 'appraisal_date']),
+    ]));
+    expect(result).toMatchObject({
+      data: [duplicate],
+      matchedOn: 'place_id',
       skipped: false,
     });
   });
@@ -350,7 +381,7 @@ describe('safe appraisal mutations', () => {
 
     expect(table.upsert).toHaveBeenCalledWith([payload], {
       onConflict: 'idempotency_key',
-      ignoreDuplicates: false,
+      ignoreDuplicates: true,
     });
     expect(table.insert).not.toHaveBeenCalled();
     expect(query.select).toHaveBeenCalledWith(CURRENT_APPRAISAL_SELECT);
@@ -360,6 +391,68 @@ describe('safe appraisal mutations', () => {
       foundationSupported: true,
       idempotencySupported: true,
     });
+  });
+
+  it('returns the original row for the same idempotency key without overwriting it', async () => {
+    const original = {
+      id: 'original-record',
+      idempotency_key: 'appraisal-opaque-submission',
+      city: 'Aurora',
+      version: 1,
+    };
+    const { client, table } = createMutationClient([
+      { data: null, error: null },
+      { data: original, error: null },
+    ]);
+    const retryPayload = {
+      address: '10 Example Road',
+      city: 'Newmarket',
+      idempotency_key: 'appraisal-opaque-submission',
+    };
+
+    const result = await insertAppraisal(client, retryPayload);
+
+    expect(table.upsert).toHaveBeenCalledWith([retryPayload], {
+      onConflict: 'idempotency_key',
+      ignoreDuplicates: true,
+    });
+    expect(result).toMatchObject({
+      data: original,
+      error: null,
+      commitStatus: APPRAISAL_COMMIT_STATUS.COMMITTED,
+    });
+    expect(result.data.city).toBe('Aurora');
+  });
+
+  it('reconciles a timed-out create before reporting its result', async () => {
+    jest.useFakeTimers();
+    const committed = {
+      id: 'committed-after-timeout',
+      idempotency_key: 'appraisal-timeout-key',
+      version: 1,
+    };
+    const { client, query } = createMutationClient();
+    query.maybeSingle
+      .mockImplementationOnce(() => new Promise(() => {}))
+      .mockResolvedValueOnce({ data: committed, error: null });
+
+    try {
+      const pending = insertAppraisal(client, {
+        address: '10 Example Road',
+        idempotency_key: 'appraisal-timeout-key',
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+      jest.advanceTimersByTime(APPRAISAL_MUTATION_TIMEOUT_MS);
+
+      await expect(pending).resolves.toMatchObject({
+        data: committed,
+        error: null,
+        commitStatus: APPRAISAL_COMMIT_STATUS.COMMITTED,
+      });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('falls back without normalized fields when the additive foundation is not deployed', async () => {
@@ -436,6 +529,46 @@ describe('safe appraisal mutations', () => {
     });
   });
 
+  it('reconciles an ambiguous update response against the stored row', async () => {
+    const networkError = { message: 'response was interrupted' };
+    const committed = { id: 'record-id', locality: 'Aurora', version: 4 };
+    const { client } = createMutationClient([
+      { data: null, error: networkError },
+      { data: committed, error: null },
+    ]);
+
+    const result = await updateAppraisal(
+      client,
+      'record-id',
+      { locality: 'Aurora' },
+      { expectedVersion: 3 }
+    );
+
+    expect(result).toMatchObject({
+      data: committed,
+      error: null,
+      commitStatus: APPRAISAL_COMMIT_STATUS.COMMITTED,
+    });
+  });
+
+  it('keeps an update uncertain when neither the response nor reconciliation is trustworthy', async () => {
+    const { client } = createMutationClient([
+      { data: null, error: { message: 'response was interrupted' } },
+      { data: null, error: { message: 'lookup failed' } },
+    ]);
+
+    const result = await updateAppraisal(client, 'record-id', { locality: 'Aurora' });
+
+    expect(result).toMatchObject({
+      data: null,
+      error: {
+        code: 'APPRAISAL_COMMIT_UNKNOWN',
+        commitStatus: APPRAISAL_COMMIT_STATUS.UNKNOWN,
+      },
+      commitStatus: APPRAISAL_COMMIT_STATUS.UNKNOWN,
+    });
+  });
+
   it('archives instead of removing a report and refuses an unsafe legacy fallback', async () => {
     const archived = { id: 'record-id', deleted_at: '2026-08-07T20:00:00.000Z', version: 2 };
     const first = createMutationClient([{ data: archived, error: null }]);
@@ -461,6 +594,45 @@ describe('safe appraisal mutations', () => {
       error: { code: 'APPRAISAL_ARCHIVE_MIGRATION_REQUIRED' },
     });
     expect(second.table).not.toHaveProperty('delete');
+  });
+
+  it('reconciles ambiguous archive and restore responses without repeating the mutation', async () => {
+    const archived = { id: 'record-id', deleted_at: '2026-08-07T20:00:00.000Z', version: 2 };
+    const archive = createMutationClient([
+      { data: null, error: { message: 'archive response interrupted' } },
+      { data: archived, error: null },
+    ]);
+
+    const archiveResult = await deleteAppraisal(archive.client, 'record-id', {
+      expectedVersion: 1,
+      now: archived.deleted_at,
+    });
+
+    expect(archiveResult).toMatchObject({
+      data: archived,
+      error: null,
+      archived: true,
+      commitStatus: APPRAISAL_COMMIT_STATUS.COMMITTED,
+    });
+    expect(archive.table.update).toHaveBeenCalledTimes(1);
+
+    resetAppraisalSchemaCapabilities();
+    const restored = { id: 'record-id', deleted_at: null, version: 3 };
+    const restore = createMutationClient([
+      { data: null, error: { message: 'restore response interrupted' } },
+      { data: restored, error: null },
+    ]);
+
+    const restoreResult = await restoreAppraisal(restore.client, 'record-id', {
+      expectedVersion: 2,
+    });
+
+    expect(restoreResult).toMatchObject({
+      data: restored,
+      error: null,
+      commitStatus: APPRAISAL_COMMIT_STATUS.COMMITTED,
+    });
+    expect(restore.table.update).toHaveBeenCalledTimes(1);
   });
 
   it('keeps the generic mutation error for an unversioned zero-row update', async () => {

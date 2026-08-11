@@ -1,24 +1,23 @@
 const EVENT_FIELDS = Object.freeze({
-  app_boot: ['outcome', 'errorCode', 'online', 'durationBucket', 'endpoint', 'referenceId'],
-  auth_sign_in: ['outcome', 'errorCode', 'online', 'durationBucket', 'endpoint', 'referenceId'],
-  auth_sign_out: ['outcome', 'errorCode', 'online', 'durationBucket', 'endpoint', 'referenceId'],
+  app_boot: ['outcome', 'errorCode', 'online', 'durationBucket', 'endpoint'],
+  auth_sign_in: ['outcome', 'errorCode', 'online', 'durationBucket', 'endpoint'],
+  auth_sign_out: ['outcome', 'errorCode', 'online', 'durationBucket', 'endpoint'],
   map_reports_load: [
-    'outcome', 'errorCode', 'online', 'durationBucket', 'resultBucket', 'endpoint', 'referenceId',
+    'outcome', 'errorCode', 'online', 'durationBucket', 'resultBucket', 'endpoint',
   ],
   address_lookup: [
-    'outcome', 'errorCode', 'source', 'durationBucket', 'endpoint', 'googleStatus', 'referenceId',
+    'outcome', 'errorCode', 'source', 'durationBucket', 'endpoint', 'googleStatus',
   ],
   appraisal_mutation: [
-    'outcome', 'errorCode', 'operation', 'durationBucket', 'endpoint', 'referenceId',
+    'outcome', 'errorCode', 'operation', 'durationBucket', 'endpoint',
   ],
   document_open: [
-    'outcome', 'errorCode', 'documentType', 'durationBucket', 'endpoint', 'referenceId',
+    'outcome', 'errorCode', 'documentType', 'durationBucket', 'endpoint',
   ],
 });
 
 const SAFE_VALUE = /^[a-z0-9_.:-]{1,48}$/i;
 const SAFE_BUILD_VALUE = /^[a-z0-9_.-]{1,64}$/i;
-const SAFE_REFERENCE_ID = /^[A-Z0-9]{1,10}-[A-Z0-9]{8}$/;
 const SAFE_ENDPOINTS = new Set([
   'google_geocoding',
   'google_places',
@@ -47,14 +46,6 @@ const APP_RELEASE = SAFE_BUILD_VALUE.test(process.env.REACT_APP_RELEASE || '')
   : process.env.NODE_ENV || 'unknown';
 let telemetrySink = null;
 
-export function createSupportReference(prefix = 'support') {
-  const safePrefix = String(prefix).replace(/[^a-z0-9]/gi, '').slice(0, 10).toUpperCase() || 'SUPPORT';
-  const random = (typeof window !== 'undefined' ? window.crypto?.randomUUID?.() : null)
-    ?.replace(/-/g, '').slice(0, 8)
-    || Math.random().toString(36).slice(2, 10);
-  return `${safePrefix}-${random.toUpperCase()}`;
-}
-
 export function sanitizeTelemetryAttributes(eventName, attributes = {}) {
   const allowed = EVENT_FIELDS[eventName] || [];
   return Object.fromEntries(allowed.flatMap((key) => {
@@ -64,9 +55,6 @@ export function sanitizeTelemetryAttributes(eventName, attributes = {}) {
     }
     if (key === 'googleStatus') {
       return typeof value === 'string' && SAFE_GOOGLE_STATUSES.has(value) ? [[key, value]] : [];
-    }
-    if (key === 'referenceId') {
-      return typeof value === 'string' && SAFE_REFERENCE_ID.test(value) ? [[key, value]] : [];
     }
     if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) {
       return [[key, value]];
