@@ -4,6 +4,18 @@ Appraisal Map is an authenticated workspace for appraisal teams to find and revi
 
 Nearby reports are research candidates. Appraisal Map does not select comparables, calculate property values, or replace an appraiser’s professional judgment.
 
+## Screenshots
+
+### Map workspace
+
+![Appraisal Map workspace showing clustered reports around Southern Ontario](docs/assets/appraisal-map-overview.png)
+
+Map data ©2026 Google.
+
+### Add appraisal
+
+![Blank Add appraisal form with address, dates, optional property details, and document upload controls](docs/assets/add-appraisal-form.png)
+
 ## Capabilities
 
 - Explore reports in the current map area with marker clustering and distance, property type, and date filters.
