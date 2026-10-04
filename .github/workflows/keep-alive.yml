@@ -31,23 +31,45 @@ jobs:
           : "${SUPABASE_URL:?Missing REACT_APP_SUPABASE_URL repository secret}"
           : "${SUPABASE_ANON_KEY:?Missing REACT_APP_SUPABASE_ANON_KEY repository secret}"
 
-          curl \
-            --fail-with-body \
-            --silent \
-            --show-error \
-            --retry 3 \
-            --retry-all-errors \
-            --retry-delay 10 \
-            --connect-timeout 15 \
-            --max-time 45 \
-            --request POST \
-            --output /dev/null \
-            "${SUPABASE_URL%/}/storage/v1/object/list/photos" \
-            --header "apikey: ${SUPABASE_ANON_KEY}" \
-            --header "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
-            --header "Content-Type: application/json" \
-            --data '{"limit":1,"offset":0,"prefix":""}'
+          # Capture body and HTTP status separately so a provider-side billing
+          # restriction (HTTP 402) can be reported as a known third-party issue
+          # instead of failing the scheduled keep-alive workflow.
+          response_body="$(mktemp)"
+          http_status="$(
+            curl \
+              --silent \
+              --show-error \
+              --retry 3 \
+              --retry-all-errors \
+              --retry-delay 10 \
+              --connect-timeout 15 \
+              --max-time 45 \
+              --request POST \
+              --output "${response_body}" \
+              --write-out '%{http_code}' \
+              "${SUPABASE_URL%/}/storage/v1/object/list/photos" \
+              --header "apikey: ${SUPABASE_ANON_KEY}" \
+              --header "Authorization: Bearer ${SUPABASE_ANON_KEY}" \
+              --header "Content-Type: application/json" \
+              --data '{"limit":1,"offset":0,"prefix":""}'
+          )"
 
+          if [ "${http_status}" = "402" ]; then
+            echo "::warning title=Check failed - third-party issue::Supabase keep-alive check failed. The Supabase project is restricted on the provider side (HTTP 402), so this is a third-party service issue and not a repository problem."
+            echo "Check failed: error log due to third-party (Supabase) service issue (HTTP 402)."
+            echo "Provider response: $(cat "${response_body}")"
+            rm -f "${response_body}"
+            exit 0
+          fi
+
+          if [ "${http_status}" -lt 200 ] || [ "${http_status}" -ge 300 ]; then
+            echo "Supabase probe failed with HTTP ${http_status}." >&2
+            cat "${response_body}" >&2
+            rm -f "${response_body}"
+            exit 1
+          fi
+
+          rm -f "${response_body}"
           echo "Supabase read-only database activity probe succeeded."
 
   keep-schedule-enabled:
