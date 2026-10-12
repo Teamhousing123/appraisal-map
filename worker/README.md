@@ -31,6 +31,9 @@ pause at 450,000,000 database bytes. Metadata rows are limited to 8 KiB.
 Report data uses single-use gateway permits and a conservative daily transfer
 budget. Unknown transfer outcomes retain their full reservation for that day.
 The file and request budgets are defined in limits.mjs. These limits assume a
+dedicated account. Worker calls to Supabase are also limited to 1,000 per UTC
+day so file metadata and authentication checks cannot grow without a bound.
+Independent backups use a separate, small transfer schedule. These limits assume a
 dedicated account. Privileged external writes can bypass application controls.
 
 This system cannot provide unlimited online storage for free. At capacity,

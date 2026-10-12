@@ -1,6 +1,6 @@
 export const PART_BYTES = 8 * 1024 * 1024;
 export const LINK_SECONDS = 600;
-export const DAILY_LIMITS = Object.freeze({ request: 40000, readRequest: 20000, maintenance: 2000, classA: 2000, classB: 19000, maintenanceB: 1000 });
+export const DAILY_LIMITS = Object.freeze({ request: 40000, readRequest: 20000, maintenance: 2000, classA: 2000, classB: 19000, maintenanceB: 1000, upstreamRequest: 1000 });
 export const FILE_LIMITS = Object.freeze({ photos: 15 * 1024 * 1024, pdfs: 40 * 1024 * 1024, 'appraisal-folders': 104 * 1024 * 1024 });
 
 export function validateUpload(input) {
@@ -30,6 +30,8 @@ export function completedParts(file) {
 export function chargeBudget(state, kind, day, limits = DAILY_LIMITS) {
   if (!Object.hasOwn(limits, kind)) throw new Error('Unknown operation budget.');
   const next = state?.day === day ? { ...state } : { day, ...Object.fromEntries(Object.keys(limits).map((key) => [key, 0])) };
+  // A newly introduced counter starts at zero; existing counters stay charged.
+  if (!Object.hasOwn(next, kind)) next[kind] = 0;
   if (!Number.isSafeInteger(next[kind]) || next[kind] >= limits[kind]) return { allowed: false, state: next };
   next[kind] += 1;
   return { allowed: true, state: next };

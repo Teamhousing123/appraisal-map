@@ -31,6 +31,7 @@ async function boundedJson(response, maximum = 32768) {
 async function rpc(env, name, body, bearer, privileged = false) {
   const credential = privileged ? env.SUPABASE_SERVICE_ROLE_KEY : env.SUPABASE_PUBLISHABLE_KEY;
   if (!credential) throw failure('Storage setup is incomplete.', 503);
+  await permit(env, 'upstreamRequest');
   const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`, {
     method: 'POST', headers: { apikey: credential, Authorization: `Bearer ${privileged ? credential : bearer}`, 'Content-Type': 'application/json', 'x-appraisal-storage-auth': env.STORAGE_RPC_SECRET || '' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(12000),
@@ -47,6 +48,7 @@ async function authenticate(request, env, write = false) {
   if (!bearer || bearer.length > 8192) throw failure('Sign in to continue.', 401);
   let cached = authenticatedCache.get(bearer);
   if (!cached || cached.expiresAt <= Date.now()) {
+    await permit(env, 'upstreamRequest');
     const response = await fetch(`${env.SUPABASE_URL}/auth/v1/user`, {
       headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, Authorization: authorization }, signal: AbortSignal.timeout(10000),
     });
