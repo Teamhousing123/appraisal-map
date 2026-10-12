@@ -518,6 +518,10 @@ function AppraisalDetailPanel({
         return result;
       } catch (uploadError) {
         const cancelled = isAbortError(uploadError);
+        if (cancelled) {
+          const field = bucket === 'photos' ? 'photo' : bucket === 'pdfs' ? 'pdf' : 'folder';
+          storagePathsRef.current[field] = null;
+        }
         recordTelemetryEvent('appraisal_mutation', {
           outcome: cancelled ? 'cancelled' : 'failed',
           errorCode: uploadError?.code || 'unknown',

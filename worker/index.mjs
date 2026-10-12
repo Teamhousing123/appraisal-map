@@ -167,13 +167,18 @@ async function finishUpload(env, auth, reservation) {
   const parts = completedParts(file);
   const key = `${file.bucket}/${file.object_key}`;
   await permit(env, 'classA');
-  let object;
-  try { object = await env.FILES.resumeMultipartUpload(key, file.multipart_id).complete(parts); }
+  let completionError;
+  try { await env.FILES.resumeMultipartUpload(key, file.multipart_id).complete(parts); }
   catch (error) {
-    // Completion can succeed before the response is lost. Verify the immutable
-    // object identity before treating that outcome as completed.
-    await permit(env, 'classB'); object = await env.FILES.head(key);
-    if (!object || object.customMetadata?.reservation !== reservation || object.customMetadata?.sha256 !== file.sha256) throw error;
+    completionError = error;
+  }
+  // Read the stored metadata: completion responses can omit custom metadata,
+  // and a completed write can survive a lost response or a repeated request.
+  await permit(env, 'classB');
+  const object = await env.FILES.head(key);
+  if (!object) {
+    if (completionError) throw completionError;
+    throw failure('The completed upload is awaiting verification. Retry shortly.', 409);
   }
   if (object.size !== Number(file.bytes) || object.customMetadata?.reservation !== reservation || object.customMetadata?.sha256 !== file.sha256) throw failure('The completed file did not match its reservation.', 409);
   file = await rpc(env, 'appraisal_file_service_change', { p_reservation_id: reservation, p_action: 'ready', p_bytes: object.size }, null, true);

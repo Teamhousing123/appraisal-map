@@ -619,7 +619,7 @@ test('reports a blocking upload failure without exposing file or address data', 
   expect(JSON.stringify(telemetry)).not.toMatch(/Private Home|Example Road|Aurora|\.jpg/i);
 });
 
-test('cancels an active large upload without creating a row or clearing the form', async () => {
+test('preserves the cancelled form and retries with a fresh upload key', async () => {
   const abort = jest.fn(async () => undefined);
   Upload.mockImplementation(() => ({
     abort,
@@ -648,6 +648,16 @@ test('cancels an active large upload without creating a row or clearing the form
   expect(abort).toHaveBeenCalledWith(true);
   expect(screen.getByLabelText('Street address')).toHaveValue('10 Example Road');
   expect(screen.getByText('Private Home.jpg')).toBeInTheDocument();
+  const cancelledKey = Upload.mock.calls[0][1].metadata.objectName;
+  Upload.mockImplementation((file, options) => ({
+    abort,
+    findPreviousUploads: jest.fn(async () => []),
+    resumeFromPreviousUpload: jest.fn(),
+    start: jest.fn(() => options.onSuccess()),
+  }));
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+  await waitFor(() => expect(insertAppraisal).toHaveBeenCalledTimes(1));
+  expect(Upload.mock.calls[1][1].metadata.objectName).not.toBe(cancelledKey);
 });
 
 test('warns about a same-property match with blank optional dates without overwriting it', async () => {
