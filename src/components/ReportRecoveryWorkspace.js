@@ -4,7 +4,6 @@ import { CURRENT_APPRAISAL_SELECT } from '../services/appraisalService';
 import { createProtectedFileLink, isR2StorageEnabled } from '../services/cloudflareStorage';
 import { formatDateOnly } from '../domain/dates';
 import BrandLogo from './BrandLogo';
-import StorageStatus from './StorageStatus';
 
 export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason }) {
   const [reports, setReports] = useState([]);
@@ -54,7 +53,6 @@ export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason }
           <button type="button" className="button button--secondary" onClick={onShowMap || (() => window.location.reload())}>{onShowMap ? 'Show map' : 'Retry map'}</button>
           <button type="button" className="button button--quiet" onClick={onSignOut}>Sign out</button>
         </nav>
-        <StorageStatus />
       </header>
       <section className="recovery-workspace" aria-labelledby="recovery-title">
         <h1 id="recovery-title">Your reports</h1>

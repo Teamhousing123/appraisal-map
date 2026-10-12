@@ -33,7 +33,6 @@ import SubjectSearch from './components/SubjectSearch';
 import NearbyWorkspace from './components/NearbyWorkspace';
 import AppraisalDetailPanel from './components/AppraisalDetailPanel';
 import BrandLogo from './components/BrandLogo';
-import StorageStatus from './components/StorageStatus';
 import ReportRecoveryWorkspace from './components/ReportRecoveryWorkspace';
 import './Map.css';
 
@@ -1255,7 +1254,6 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
             {signingOut ? 'Signing out…' : 'Sign out'}
           </button>
         </nav>
-        <StorageStatus />
         {!canMutate && (
           <div className="map-access-notice" role="status">
             <span>

@@ -4,6 +4,12 @@ The React app uses Supabase authentication and a same-origin Worker gateway.
 The Worker stores files in a private R2 bucket. Supabase retains appraisal
 records, staff roles, file reservations, and recovery evidence.
 
+New attachments go directly to R2. They are not staged in Supabase Storage.
+After verified source cleanup, normal app uploads therefore do not consume
+Supabase's 1 GB file allowance. Legacy authenticated storage writes are blocked
+during cutover. Retire migration credentials after final source verification.
+The staff interface does not display provider quotas or backup counters.
+
 Set `REACT_APP_STORAGE_PROVIDER=r2` for the Cloudflare build. The default
 continues to support the old storage transport during migration. The optional
 `REACT_APP_STORAGE_API_URL` points to a separate gateway; the normal deployment
@@ -20,8 +26,9 @@ Use the account, private R2 binding, and SQLite Durable Object in wrangler.jsonc
 
 ## Admission limits
 
-Ordinary file storage stops at 8,000,000,000 bytes. A warning starts at
-6,000,000,000 bytes. Every reservation counts until confirmed provider cleanup.
+Ordinary R2 file storage stops at 8,000,000,000 bytes. The administrative status
+endpoint reports a warning threshold of 6,000,000,000 bytes. Every reservation
+counts until confirmed provider cleanup.
 Report references, including archived reports, block file deletion. Imported
 objects without report references remain preserved. Completed new files must
 receive an independently verified backup before cleanup can remove them.
@@ -33,8 +40,8 @@ budget. Unknown transfer outcomes retain their full reservation for that day.
 The file and request budgets are defined in limits.mjs. These limits assume a
 dedicated account. Worker calls to Supabase are also limited to 1,000 per UTC
 day so file metadata and authentication checks cannot grow without a bound.
-Independent backups use a separate, small transfer schedule. These limits assume a
-dedicated account. Privileged external writes can bypass application controls.
+Independent backups use a separate, small transfer schedule. Privileged external
+writes can bypass application controls.
 
 This system cannot provide unlimited online storage for free. At capacity,
 keep the verified recovery copy and arrange an archive before increasing the
