@@ -1,4 +1,5 @@
 import { createClient } from '@supabase/supabase-js';
+import { createProtectedDataFetch, isR2StorageEnabled } from './services/cloudflareStorage';
 
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL;
 const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY;
@@ -56,6 +57,9 @@ export const supportEmail = readSupportEmail(process.env.REACT_APP_SUPPORT_EMAIL
 export const supabase = supabaseConfigurationError
   ? null
   : createClient(supabaseUrl, supabaseAnonKey, {
+      ...(isR2StorageEnabled() && typeof window !== 'undefined' && typeof window.fetch === 'function'
+        ? { global: { fetch: createProtectedDataFetch(supabaseUrl, window.fetch.bind(window)) } }
+        : {}),
       auth: {
         autoRefreshToken: true,
         detectSessionInUrl: false,

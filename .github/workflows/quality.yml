@@ -41,6 +41,9 @@ jobs:
       - name: Run tests and accessibility checks
         run: npm run test:ci
 
+      - name: Verify storage admission limits
+        run: node --test worker/limits.test.mjs
+
       - name: Build production bundle
         env:
           DISABLE_ESLINT_PLUGIN: "true"

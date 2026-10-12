@@ -469,7 +469,7 @@ export async function resolveAddressSuggestion(
       try {
         const place = suggestion.placePrediction.toPlace();
         await place.fetchFields({
-          fields: ['id', 'formattedAddress', 'location', 'addressComponents', 'primaryType'],
+          fields: ['id', 'formattedAddress', 'location', 'addressComponents'],
         });
         return normalizeResolvedPlace(place, suggestion.description);
       } catch (error) {

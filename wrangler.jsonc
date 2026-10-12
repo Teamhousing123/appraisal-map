@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "appraisal-map",
+  "main": "worker/index.mjs",
+  "account_id": "0891da5d94d78efc2fe60893984bb1e9",
+  "compatibility_date": "2026-10-11",
+  "assets": {
+    "directory": "./build",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "appraisal-map-production" }],
+  "durable_objects": { "bindings": [{ "name": "STORAGE_BUDGET", "class_name": "StorageBudget" }] },
+  "migrations": [{ "tag": "r2-budget-v1", "new_sqlite_classes": ["StorageBudget"] }],
+  "vars": { "SUPABASE_URL": "https://fnixwexxgwlwesdeitut.supabase.co" },
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": false }
+}
