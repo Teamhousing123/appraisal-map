@@ -19,6 +19,11 @@
 .env.test.local
 .env.production.local
 .idea/
+supabase/.temp/
+.wrangler/
+.dev.vars
+.dev.vars.*
+*.private.json
 
 npm-debug.log*
 yarn-debug.log*

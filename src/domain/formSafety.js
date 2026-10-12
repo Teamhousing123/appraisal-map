@@ -1,4 +1,5 @@
 import { addressFingerprint } from './geocoding';
+import { cleanupR2Object, isR2StorageEnabled } from '../services/cloudflareStorage';
 
 const MEBIBYTE = 1024 * 1024;
 
@@ -175,7 +176,9 @@ export async function cleanupUploadedObjects(supabase, paths = []) {
   ).values());
 
   const results = await Promise.allSettled(uniquePaths.map(async ({ bucket, path }) => {
-    const { error } = await supabase.storage.from(bucket).remove([path]);
+    const { error } = isR2StorageEnabled()
+      ? await cleanupR2Object(supabase, bucket, path)
+      : await supabase.storage.from(bucket).remove([path]);
     if (error) throw error;
   }));
 

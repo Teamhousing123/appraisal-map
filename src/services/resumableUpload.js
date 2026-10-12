@@ -1,4 +1,5 @@
 import { Upload } from 'tus-js-client';
+import { isR2StorageEnabled, uploadR2Object } from './cloudflareStorage';
 import {
   OPERATION_ERROR_CODES,
   OperationError,
@@ -139,6 +140,7 @@ export async function uploadStorageObject(
   file,
   options = {}
 ) {
+  if (isR2StorageEnabled()) return uploadR2Object(supabase, bucket, path, file, options);
   const useStandardUpload = !supabase?.auth?.getSession
     || !Number.isFinite(file?.size)
     || (!options.forceResumable && file.size < STANDARD_UPLOAD_LIMIT_BYTES);

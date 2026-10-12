@@ -28,10 +28,12 @@ import {
 } from './domain/filters';
 import { fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
 import { recordTelemetryEvent } from './services/telemetry';
+import { createProtectedFileLink, isR2StorageEnabled } from './services/cloudflareStorage';
 import SubjectSearch from './components/SubjectSearch';
 import NearbyWorkspace from './components/NearbyWorkspace';
 import AppraisalDetailPanel from './components/AppraisalDetailPanel';
 import BrandLogo from './components/BrandLogo';
+import ReportRecoveryWorkspace from './components/ReportRecoveryWorkspace';
 import './Map.css';
 
 const AddAppraisal = lazy(() => import('./AddAppraisal'));
@@ -42,7 +44,7 @@ const DEFAULT_ZOOM = 9;
 const MAP_IDLE_DEBOUNCE_MS = 300;
 const AUTOCOMPLETE_DEBOUNCE_MS = 260;
 const GOOGLE_MAP_LIBRARIES = ['places'];
-const SIGNED_URL_TTL_SECONDS = 3600;
+const SIGNED_URL_TTL_SECONDS = isR2StorageEnabled() ? 600 : 3600;
 const SIGNED_URL_REFRESH_BUFFER_MS = 60 * 1000;
 const REMOTE_OPERATION_TIMEOUT_MS = 15000;
 const APP_BOUNDS = SUPPORTED_MAP_BOUNDS;
@@ -293,6 +295,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const [signingOut, setSigningOut] = useState(false);
   const [refreshingAccess, setRefreshingAccess] = useState(false);
   const [googleAuthFailed, setGoogleAuthFailed] = useState(false);
+  const [reportListMode, setReportListMode] = useState(() => window.location.hash === '#reports');
 
   const mapRef = useRef(null);
   const mapIdleTimerRef = useRef(null);
@@ -572,7 +575,9 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     if (cached && cached.expiresAt - SIGNED_URL_REFRESH_BUFFER_MS > Date.now()) return cached.url;
 
     const { data, error } = await withTimeout(
-      supabase.storage
+      isR2StorageEnabled()
+        ? createProtectedFileLink(supabase, bucket, path, downloadName)
+        : supabase.storage
         .from(bucket)
         .createSignedUrl(
           path,
@@ -1179,18 +1184,11 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     fitMapToSubjectRadius(subject, Number(filters.radiusKm) || 10);
   }, [filters.radiusKm, fitMapToSubjectRadius, subject]);
 
-  if (loadError || googleAuthFailed) {
+  if (loadError || googleAuthFailed || reportListMode) {
     return (
-      <main className="map-fatal" role="alert">
-        <BrandLogo className="map-fatal__logo" />
-        <h1>The map could not be loaded</h1>
-        <p>
-          {googleAuthFailed
-            ? 'The Google Maps key was rejected. An administrator needs to check its API and website restrictions.'
-            : 'Check the connection and mapping configuration, then reload the page.'}
-        </p>
-        <button type="button" className="button button--primary" onClick={() => window.location.reload()}>Reload</button>
-      </main>
+      <ReportRecoveryWorkspace onSignOut={handleSignOut}
+        onShowMap={reportListMode && !loadError && !googleAuthFailed ? () => { window.location.hash = ''; setReportListMode(false); } : undefined}
+        reason={reportListMode ? 'The report list is ready.' : googleAuthFailed ? 'Google Maps is unavailable for this website.' : 'The map could not load.'} />
     );
   }
 
@@ -1227,6 +1225,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
           placeholder={`Search addresses in ${SERVICE_AREA.name}`}
         />
         <nav className="map-header__actions" aria-label="Workspace actions">
+          <button type="button" className="button button--quiet" onClick={() => runWorkspaceAction(() => { window.location.hash = 'reports'; setReportListMode(true); })}>Report list</button>
           <button type="button" className="button button--secondary" onClick={() => {
             runWorkspaceAction(() => {
               setPanelOpen((open) => !open);
