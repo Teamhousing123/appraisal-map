@@ -1,0 +1,9 @@
+{
+  "redirects": [
+    {
+      "source": "/:path*",
+      "destination": "https://appraisal-map.appraisal-map.workers.dev/:path*",
+      "permanent": false
+    }
+  ]
+}

@@ -26,7 +26,7 @@ Map data ©2026 Google.
 
 ## How it works
 
-The React client uses Google Maps Platform for the map, Places address search, and geocoding. Supabase provides authentication, Postgres/PostgREST for appraisal records, and Storage for source files. Map queries are bounded to the viewed area and paginated. Comparison distance is straight-line distance; it is not a travel distance or a valuation adjustment.
+The React client uses Google Maps Platform for the map, Places address search, and geocoding. Supabase provides authentication and appraisal records. The Cloudflare Worker protects report requests and serves attachments from private R2 storage. New attachments go directly to R2. Map queries are bounded to the viewed area and paginated. Comparison distance is straight-line distance; it is not a travel distance or a valuation adjustment.
 
 The application is configured for a Southern Ontario service area. Records and uploaded source documents are supplied by the appraisal team; this repository does not include a public listing feed or a sample property dataset. Available property facts and dates depend on what staff recorded in the source reports.
 
@@ -56,6 +56,23 @@ The app runs at `http://localhost:3000`. Use test accounts and non-production da
 - `npm run build` — creates the production bundle.
 - `npm run verify:build` — checks the generated build output.
 - `npm audit --audit-level=high` — checks installed dependencies for high or critical advisories.
+
+## Production deployment
+
+The production app is at https://appraisal-map.appraisal-map.workers.dev/.
+The former Vercel address redirects to this app. Vercel is not the deployment
+target for the Worker or its API.
+
+Merge changes only after the quality workflow passes. Build the tested commit
+with the browser configuration and `REACT_APP_STORAGE_PROVIDER=r2`, then run
+`npx wrangler deploy` from the repository with the intended Cloudflare account.
+Keep the existing Worker secrets in Cloudflare; never place them in the build.
+After deployment, check staff sign-in, report reads, protected attachments,
+and address search. See [the private storage operating guide](worker/README.md)
+for required limits, backup evidence, and Worker configuration.
+
+Independent backups must remain current. The migration recovery copy and its
+scheduled backup configuration are private and are not included in this repository.
 
 ## License and data rights
 
