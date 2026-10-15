@@ -1,6 +1,7 @@
 import { webcrypto } from 'crypto';
 import { runInThisContext } from 'vm';
-import { fileSha256, uploadR2Object, createProtectedFileLink, createProtectedDataFetch } from './cloudflareStorage';
+import { fileSha256, uploadR2Object, createProtectedFileLink, createProtectedDataFetch, isR2StorageEnabled } from './cloudflareStorage';
+import { uploadStorageObject } from './resumableUpload';
 
 const hash = '9f64a747e1b97f131fabb6b447296c9b6f0201e79fb3c5356e6c77e89b6a806a';
 const supabase = { auth: { getSession: jest.fn(async () => ({ data: { session: { access_token: 'test-token', user: { id: 'test-user' } } } })) } };
@@ -14,6 +15,30 @@ beforeEach(() => {
   supabase.auth.getSession.mockResolvedValue({ data: { session: { access_token: 'test-token', user: { id: 'test-user' } } } });
 });
 afterEach(() => { jest.restoreAllMocks(); });
+
+test('production uploads use R2 even with missing or legacy provider configuration', async () => {
+  const previousEnvironment = process.env.NODE_ENV;
+  const previousProvider = process.env.REACT_APP_STORAGE_PROVIDER;
+  const storage = { from: jest.fn() };
+  try {
+    process.env.NODE_ENV = 'production';
+    for (const provider of [undefined, 'supabase', 'r2']) {
+      if (provider === undefined) delete process.env.REACT_APP_STORAGE_PROVIDER;
+      else process.env.REACT_APP_STORAGE_PROVIDER = provider;
+      expect(isR2StorageEnabled()).toBe(true);
+      fetch.mockResolvedValueOnce(response({ state: 'uploading', parts: {} }))
+        .mockResolvedValueOnce(response({ partNumber: 1, bytes: 4 }))
+        .mockResolvedValueOnce(response({ state: 'ready', bytes: 4, sha256: hash }));
+      expect((await uploadStorageObject({ ...supabase, storage }, 'pdfs', key, file)).data.path).toBe(key);
+    }
+    expect(storage.from).not.toHaveBeenCalled();
+    expect(fetch.mock.calls.filter(([url]) => url === '/api/uploads')).toHaveLength(3);
+  } finally {
+    process.env.NODE_ENV = previousEnvironment;
+    if (previousProvider === undefined) delete process.env.REACT_APP_STORAGE_PROVIDER;
+    else process.env.REACT_APP_STORAGE_PROVIDER = previousProvider;
+  }
+});
 test('hashes the exact file contents', async () => { expect(await fileSha256(file)).toBe(hash); });
 test('reserves, uploads and verifies before returning a saved path', async () => {
   fetch.mockResolvedValueOnce(response({ state: 'uploading', parts: {} })).mockResolvedValueOnce(response({ partNumber: 1, bytes: 4 })).mockResolvedValueOnce(response({ state: 'ready', bytes: 4, sha256: hash }));

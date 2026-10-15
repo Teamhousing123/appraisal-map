@@ -94,3 +94,33 @@ begin
 end $$;
 rollback;
 select 'Independent backup hold, incorrect hash denial, and verified cleanup release passed' as result;
+
+-- Even a permissive legacy policy must not reopen production Storage writes.
+begin;
+grant usage on schema storage to authenticated;
+grant insert,update,delete,select on storage.objects to authenticated;
+create policy quota_test_permissive on storage.objects for all to authenticated
+  using(true) with check(true);
+set local role authenticated;
+do $$
+declare bucket_name text; denied boolean;
+begin
+  foreach bucket_name in array array['photos','pdfs','appraisal-folders'] loop
+    denied:=false;
+    begin
+      insert into storage.objects(bucket_id,name) values(bucket_name,'quota-guard-verification');
+    exception when insufficient_privilege then denied:=true;
+    end;
+    if not denied then raise exception 'Legacy Storage accepted an upload into %',bucket_name; end if;
+  end loop;
+end $$;
+reset role;
+do $$
+begin
+  if (select count(*) from pg_policies where schemaname='storage' and tablename='objects'
+      and policyname like 'appraisal_r2_legacy_%' and permissive='RESTRICTIVE')<>3 then
+    raise exception 'A restrictive legacy Storage guard is missing';
+  end if;
+end $$;
+rollback;
+select 'Legacy Storage writes remain blocked despite permissive policies' as result;

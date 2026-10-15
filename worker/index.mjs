@@ -237,6 +237,7 @@ async function proxyData(request, env, auth, url) {
     if (!input || typeof input !== 'object' || (Array.isArray(input) && (request.method !== 'POST' || input.length !== 1))) throw failure('Save one report at a time.', 400);
     body = JSON.stringify(input);
   }
+  await permit(env, 'upstreamRequest');
   const response = await fetch(target, { method: request.method, headers, body, signal: AbortSignal.timeout(14000) });
   const reader = response.body?.getReader(); const chunks = []; let size = 0;
   if (reader) {

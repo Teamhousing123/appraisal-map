@@ -32,7 +32,7 @@ export function chargeBudget(state, kind, day, limits = DAILY_LIMITS) {
   const next = state?.day === day ? { ...state } : { day, ...Object.fromEntries(Object.keys(limits).map((key) => [key, 0])) };
   // A newly introduced counter starts at zero; existing counters stay charged.
   if (!Object.hasOwn(next, kind)) next[kind] = 0;
-  if (!Number.isSafeInteger(next[kind]) || next[kind] >= limits[kind]) return { allowed: false, state: next };
+  if (!Number.isSafeInteger(next[kind]) || next[kind] < 0 || next[kind] >= limits[kind]) return { allowed: false, state: next };
   next[kind] += 1;
   return { allowed: true, state: next };
 }

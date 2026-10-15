@@ -3,7 +3,11 @@ import { OPERATION_ERROR_CODES, OperationError } from './operation';
 const PART_BYTES = 8 * 1024 * 1024;
 const RETRY_DELAYS = [0, 1000, 2500, 5000];
 
-export function isR2StorageEnabled() { return process.env.REACT_APP_STORAGE_PROVIDER === 'r2'; }
+// Production attachments must never fall back to Supabase Storage when a
+// deployment omits the optional local-development transport setting.
+export function isR2StorageEnabled() {
+  return process.env.NODE_ENV === 'production' || process.env.REACT_APP_STORAGE_PROVIDER === 'r2';
+}
 export function storageApiBase() { return (process.env.REACT_APP_STORAGE_API_URL || '').replace(/\/$/, ''); }
 
 function cancelled() {

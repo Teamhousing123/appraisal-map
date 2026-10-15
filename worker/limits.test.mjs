@@ -51,3 +51,17 @@ test('download names cannot inject HTTP headers or escape paths', () => {
   assert.ok(!/[\r\n"\\/]/.test(name));
   assert.equal(safeDownloadName(null, 'pdfs', 'opaque'), 'appraisal-report.pdf');
 });
+
+test('all operation counters stop at their cap and reject corrupted state', () => {
+  for (const [kind, limit] of Object.entries(DAILY_LIMITS)) {
+    const last = chargeBudget({ day: '2026-10-15', [kind]: limit - 1 }, kind, '2026-10-15');
+    assert.equal(last.allowed, true);
+    assert.equal(chargeBudget(last.state, kind, '2026-10-15').allowed, false);
+    for (const value of [-1, NaN, Infinity, '0', 0.5]) {
+      assert.equal(chargeBudget({ day: '2026-10-15', [kind]: value }, kind, '2026-10-15').allowed, false);
+    }
+  }
+  // Each admission calls one Durable Object and writes at most one budget row.
+  // Keep room under the 100,000/day Free request and SQLite write allowances.
+  assert.ok(Object.values(DAILY_LIMITS).reduce((total, limit) => total + limit, 0) <= 85000);
+});

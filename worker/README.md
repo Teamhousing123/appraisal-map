@@ -10,8 +10,9 @@ Supabase's 1 GB file allowance. Legacy authenticated storage writes are blocked
 during cutover. Retire migration credentials after final source verification.
 The staff interface does not display provider quotas or backup counters.
 
-Set `REACT_APP_STORAGE_PROVIDER=r2` for the Cloudflare build. The default
-continues to support the old storage transport during migration. The optional
+Production builds always use the R2 gateway, including when the provider setting
+is missing or says `supabase`. Set `REACT_APP_STORAGE_PROVIDER=r2` to test the
+same transport during local development. The optional
 `REACT_APP_STORAGE_API_URL` points to a separate gateway; the normal deployment
 uses the same origin and needs no cross-origin configuration.
 
@@ -42,6 +43,9 @@ dedicated account. Worker calls to Supabase are also limited to 1,000 per UTC
 day so file metadata and authentication checks cannot grow without a bound.
 Independent backups use a separate, small transfer schedule. Privileged external
 writes can bypass application controls.
+
+See [quota control audit](../docs/quota-controls.md) for the enforced boundaries
+and the provider/account controls that require separate verification.
 
 This system cannot provide unlimited online storage for free. At capacity,
 keep the verified recovery copy and arrange an archive before increasing the
