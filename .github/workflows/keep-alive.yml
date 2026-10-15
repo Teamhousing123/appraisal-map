@@ -5,20 +5,14 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+
+concurrency:
+  group: supabase-health-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  health:
-    runs-on: ubuntu-latest
-    timeout-minutes: 3
-    steps:
-      - name: Check real database access
-        env:
-          SUPABASE_URL: ${{ secrets.REACT_APP_SUPABASE_URL }}
-          SUPABASE_ANON_KEY: ${{ secrets.REACT_APP_SUPABASE_ANON_KEY }}
-        run: |
-          set -euo pipefail
-          result=$(curl --fail --silent --show-error --connect-timeout 15 --max-time 45 \
-            --request POST "${SUPABASE_URL%/}/rest/v1/rpc/appraisal_health_check" \
-            --header "apikey: ${SUPABASE_ANON_KEY}" \
-            --header "Content-Type: application/json" --data '{}')
-          test "$result" = 'true'
-          echo 'Database health check passed.'
+  check:
+    uses: ./.github/workflows/database-health.yml
+    secrets:
+      SUPABASE_URL: ${{ secrets.REACT_APP_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.REACT_APP_SUPABASE_ANON_KEY }}

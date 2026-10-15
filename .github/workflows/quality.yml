@@ -44,6 +44,9 @@ jobs:
       - name: Verify storage admission limits
         run: node --test worker/limits.test.mjs
 
+      - name: Verify database health recovery and watchdog
+        run: python3 -m unittest discover -s scripts -p 'test_database_health.py' -v
+
       - name: Build production bundle
         env:
           DISABLE_ESLINT_PLUGIN: "true"

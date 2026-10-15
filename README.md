@@ -74,6 +74,10 @@ for required limits, backup evidence, and Worker configuration.
 Independent backups must remain current. The migration recovery copy and its
 scheduled backup configuration are private and are not included in this repository.
 
+Database pings have bounded request retries, a recovery runner after failure, and
+a separate schedule watchdog. See [database health operations](docs/database-health.md)
+for verification, the independent Worker schedule, and provider restriction recovery.
+
 ## License and data rights
 
 Copyright © 2026 Teamhousing123. All rights reserved. This repository is proprietary; public visibility does not grant permission to use, copy, modify, or distribute its code without separate written permission. Google Maps Platform, Supabase, and any source appraisal documents or data are subject to their respective owners’ terms and rights.

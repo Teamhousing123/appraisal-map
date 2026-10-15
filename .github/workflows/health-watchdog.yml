@@ -1,0 +1,40 @@
+name: Supabase health watchdog
+
+on:
+  schedule:
+    - cron: '43 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: supabase-health-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  freshness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      required: ${{ steps.freshness.outputs.required }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check for a recent successful primary run
+        id: freshness
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 scripts/database-health.py watchdog
+
+  check:
+    needs: freshness
+    # If the history check itself fails, probe rather than silently skip.
+    if: ${{ always() && !cancelled() && needs.freshness.outputs.required != 'false' }}
+    uses: ./.github/workflows/database-health.yml
+    secrets:
+      SUPABASE_URL: ${{ secrets.REACT_APP_SUPABASE_URL }}
+      SUPABASE_ANON_KEY: ${{ secrets.REACT_APP_SUPABASE_ANON_KEY }}
