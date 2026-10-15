@@ -58,6 +58,7 @@ function createCommandId() {
 
 function AddAppraisal({
   onAdded,
+  onCancel,
   metadataSupported = null,
   onWorkspaceStateChange,
   manualPlacement = { active: false, location: null, confirmed: false },
@@ -624,6 +625,8 @@ function AddAppraisal({
         continueAdding,
       });
     } catch (saveError) {
+      setStatus('');
+      setUploadProgress(null);
       const confirmedNotCommitted = saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.ABSENT;
       const safeToCleanup = !rowCommitted && (!databaseMutationAttempted || confirmedNotCommitted);
       const cleanupFailures = safeToCleanup
@@ -674,9 +677,12 @@ function AddAppraisal({
 
   return (
     <section className="add-appraisal-panel" aria-labelledby="add-appraisal-title">
+      <div className="workspace-heading workspace-heading--with-back">
+        {onCancel && <button type="button" className="button button--quiet" onClick={onCancel} disabled={isBusy}>← Back to reports</button>}
       <h2 id="add-appraisal-title" className="add-appraisal-title">
         Add appraisal
       </h2>
+      </div>
       <p className="add-appraisal-intro">
         Verify the full civic address before any files are uploaded. All report and property
         details are optional.
@@ -733,6 +739,42 @@ function AddAppraisal({
         </div>
       )}
       <form aria-label="Add appraisal form" onSubmit={handleSubmit} aria-busy={isBusy} noValidate>
+        <div className="add-appraisal-actions am-form-actions">
+          <button
+            className="add-appraisal-submit"
+            type="submit"
+            value="open"
+            disabled={isBusy}
+            onClick={() => { saveIntentRef.current = 'open'; }}
+          >
+            {phase === 'verifying'
+              ? 'Verifying address…'
+              : phase === 'validating'
+                ? 'Checking entries…'
+              : phase === 'checking'
+                ? 'Checking for duplicates…'
+              : phase === 'saving'
+                ? 'Saving appraisal…'
+                : potentialDuplicates.length > 0
+                  ? 'Save anyway'
+                  : 'Save appraisal'}
+          </button>
+          <button
+            className="button button--secondary add-appraisal-repeat"
+            type="submit"
+            value="add_another"
+            disabled={isBusy}
+            onClick={() => { saveIntentRef.current = 'add_another'; }}
+          >
+            {isBusy && saveIntent === 'add_another'
+              ? 'Saving and preparing another…'
+              : potentialDuplicates.length > 0
+                ? 'Save anyway and add another'
+                : 'Save and add another'}
+          </button>
+        </div>
+        <section className="am-form-section" aria-labelledby="add-address-heading">
+        <h3 id="add-address-heading">Property address</h3>
         <AddressPicker
           idPrefix="appraisal-address"
           address={address}
@@ -744,6 +786,9 @@ function AddAppraisal({
           errors={fieldErrors}
         />
 
+        </section>
+        <section className="am-form-section" aria-labelledby="add-facts-heading">
+        <h3 id="add-facts-heading">Report dates and property facts</h3>
         <AppraisalFormFields
           reportDate={appraisalDate}
           effectiveDate={effectiveDate}
@@ -762,6 +807,9 @@ function AddAppraisal({
           onPropertyDetailChange={handlePropertyDetailChange}
         />
 
+        </section>
+        <section className="am-form-section" aria-labelledby="add-files-heading">
+        <h3 id="add-files-heading">Source files</h3>
         <div className="appraisal-field">
           <label className="appraisal-label" htmlFor="appraisal-photo">
             House photo <span className="appraisal-optional">Optional</span>
@@ -909,6 +957,7 @@ function AddAppraisal({
           </div>
         )}
 
+        </section>
         {preparationProgress !== null && (
           <progress
             className="appraisal-progress"
@@ -935,40 +984,7 @@ function AddAppraisal({
           </div>
         )}
 
-        <div className="add-appraisal-actions">
-          <button
-            className="add-appraisal-submit"
-            type="submit"
-            value="open"
-            disabled={isBusy}
-            onClick={() => { saveIntentRef.current = 'open'; }}
-          >
-            {phase === 'verifying'
-              ? 'Verifying address…'
-              : phase === 'validating'
-                ? 'Checking entries…'
-              : phase === 'checking'
-                ? 'Checking for duplicates…'
-              : phase === 'saving'
-                ? 'Saving appraisal…'
-                : potentialDuplicates.length > 0
-                  ? 'Save anyway'
-                  : 'Save appraisal'}
-          </button>
-          <button
-            className="button button--secondary add-appraisal-repeat"
-            type="submit"
-            value="add_another"
-            disabled={isBusy}
-            onClick={() => { saveIntentRef.current = 'add_another'; }}
-          >
-            {isBusy && saveIntent === 'add_another'
-              ? 'Saving and preparing another…'
-              : potentialDuplicates.length > 0
-                ? 'Save anyway and add another'
-                : 'Save and add another'}
-          </button>
-        </div>
+
       </form>
     </section>
   );

@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import NearbyWorkspace from './NearbyWorkspace';
 
 const report = {
@@ -234,12 +234,12 @@ test('does not calculate differences from invalid transient subject facts', () =
 
 test('omits comparison rows without candidate data but keeps reference date and distance', () => {
   renderWorkspace({ subject, view: 'compare', candidates: [report] });
-
-  expect(screen.queryByText('Property type')).not.toBeInTheDocument();
-  expect(screen.queryByText('Reported living area')).not.toBeInTheDocument();
-  expect(screen.queryByText('Reported year built')).not.toBeInTheDocument();
-  expect(screen.getAllByText('Reference date').length).toBeGreaterThan(0);
-  expect(screen.getAllByText('Straight-line distance').length).toBeGreaterThan(0);
+  const comparison = within(screen.getByRole('region', { name: 'Compare selected candidates' }));
+  expect(comparison.queryByText('Property type')).not.toBeInTheDocument();
+  expect(comparison.queryByText('Reported living area')).not.toBeInTheDocument();
+  expect(comparison.queryByText('Reported year built')).not.toBeInTheDocument();
+  expect(comparison.getAllByText('Reference date').length).toBeGreaterThan(0);
+  expect(comparison.getAllByText('Straight-line distance').length).toBeGreaterThan(0);
 });
 
 test('disables comparison report actions when no source document is attached', () => {

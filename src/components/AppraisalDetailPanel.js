@@ -130,9 +130,27 @@ function AppraisalDetailPanel({
   metadataSupported,
   canMutate = true,
   onWorkspaceStateChange,
+  runWorkspaceAction = (action) => action?.(),
 }) {
   const [photoState, setPhotoState] = useState({ status: 'idle', url: null });
   const [editing, setEditing] = useState(false);
+  const screenRef = useRef(null);
+  const editReturnFocusRef = useRef(null);
+  const previousEditingRef = useRef(false);
+  useEffect(() => {
+    const wasEditing = previousEditingRef.current;
+    previousEditingRef.current = editing;
+    const frame = window.requestAnimationFrame(() => {
+      const panel = screenRef.current?.closest('.workspace-panel');
+      if (panel) panel.scrollTop = 0;
+      if (!editing && wasEditing && editReturnFocusRef.current?.isConnected) {
+        editReturnFocusRef.current.focus({ preventScroll: true });
+      } else {
+        screenRef.current?.querySelector('h2')?.focus({ preventScroll: true });
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [editing]);
   const [form, setForm] = useState(() => initialFormState(appraisal));
   const formRef = useRef(form);
   const geocodeRequestRef = useRef(0);
@@ -675,6 +693,8 @@ function AppraisalDetailPanel({
       setEditing(false);
       onUpdated(updateMessage, updatedAppraisal);
     } catch (saveError) {
+      setStatus('');
+      setUploadProgress(null);
       const confirmedNotCommitted = saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.ABSENT
         || isAppraisalVersionConflictError(saveError)
         || isMissingMetadataSchemaError(saveError);
@@ -765,12 +785,12 @@ function AppraisalDetailPanel({
 
   if (editing) {
     return (
-      <section className="detail-panel detail-panel--editing" aria-labelledby="edit-appraisal-title">
+      <section ref={screenRef} className="detail-panel detail-panel--editing" aria-labelledby="edit-appraisal-title">
         <div className="workspace-heading workspace-heading--with-back">
-          <button type="button" className="icon-button" onClick={resetEditing} aria-label="Cancel editing" disabled={formBusy}>
-            <BackIcon />
+          <button type="button" className="button button--quiet" onClick={() => runWorkspaceAction(resetEditing)} aria-label="Cancel editing" disabled={formBusy}>
+            <BackIcon /> Cancel editing
           </button>
-          <h2 id="edit-appraisal-title">Edit appraisal</h2>
+          <h2 id="edit-appraisal-title" tabIndex="-1">Edit appraisal</h2>
         </div>
         <form
           className="detail-form"
@@ -779,6 +799,12 @@ function AppraisalDetailPanel({
           onSubmit={handleSave}
           noValidate
         >
+          <div className="detail-form__actions am-form-actions">
+            <button type="submit" className="button button--primary" disabled={formBusy}>
+              {verifyingAddress ? 'Verifying address…' : saving ? 'Saving…' : 'Save changes'}
+            </button>
+            <button type="button" className="button button--secondary" onClick={() => runWorkspaceAction(resetEditing)} disabled={formBusy}>Cancel</button>
+          </div>
           {error && (
             <div ref={errorSummaryRef} className="form-alert" role="alert" tabIndex="-1">
               {error}
@@ -810,6 +836,8 @@ function AppraisalDetailPanel({
               </div>
             </div>
           )}
+          <section className="am-form-section" aria-labelledby="edit-address-heading">
+          <h3 id="edit-address-heading">Property address</h3>
           <AddressPicker
             idPrefix="edit-address"
             address={form.address}
@@ -827,6 +855,9 @@ function AppraisalDetailPanel({
               <strong>{addressMatch.formattedAddress}</strong>
             </div>
           )}
+          </section>
+          <section className="am-form-section" aria-labelledby="edit-facts-heading">
+          <h3 id="edit-facts-heading">Report dates and property facts</h3>
           <AppraisalFormFields
             reportDate={form.reportDate}
             effectiveDate={form.effectiveDate}
@@ -838,6 +869,9 @@ function AppraisalDetailPanel({
             onEffectiveDateChange={(value) => updateForm('effectiveDate', value)}
             onPropertyDetailChange={handlePropertyDetailChange}
           />
+          </section>
+          <section className="am-form-section" aria-labelledby="edit-files-heading">
+          <h3 id="edit-files-heading">Source files and replacements</h3>
           <FilePicker
             key={newPhoto?.name || 'empty-photo'}
             id="edit-photo"
@@ -946,6 +980,7 @@ function AppraisalDetailPanel({
               </span>
             </label>
           )}
+          </section>
           {uploadProgress && (
             <div className="appraisal-upload-progress" role="status">
               <span>Uploading {uploadProgress.label}</span>
@@ -960,12 +995,7 @@ function AppraisalDetailPanel({
               </button>
             </div>
           )}
-          <div className="detail-form__actions">
-            <button type="submit" className="button button--primary" disabled={formBusy}>
-              {verifyingAddress ? 'Verifying address…' : saving ? 'Saving…' : 'Save changes'}
-            </button>
-            <button type="button" className="button button--secondary" onClick={resetEditing} disabled={formBusy}>Cancel</button>
-          </div>
+
         </form>
       </section>
     );
@@ -981,16 +1011,10 @@ function AppraisalDetailPanel({
   const openingDocument = openingReportId === appraisal.id;
 
   return (
-    <section className="detail-panel" aria-labelledby="appraisal-detail-title">
+    <section ref={screenRef} className="detail-panel" aria-labelledby="appraisal-detail-title">
       <div className="workspace-heading workspace-heading--with-back detail-panel__heading">
-        <button type="button" className="icon-button" onClick={onBack} aria-label="Back to nearby reports"><BackIcon /></button>
-        <h2 id="appraisal-detail-title">Report details</h2>
-      </div>
-
-      <div className={`detail-photo detail-photo--${photoState.status}`}>
-        {photoState.url ? <img src={photoState.url} alt={`Property at ${appraisal.address}`} /> : (
-          <span>{photoState.status === 'loading' ? 'Loading property photo…' : photoState.status === 'error' ? 'Photo unavailable' : 'No property photo'}</span>
-        )}
+        <button type="button" className="button button--quiet" onClick={onBack} aria-label="Back to nearby reports"><BackIcon /> Back to reports</button>
+        <h2 id="appraisal-detail-title" tabIndex="-1">Report details</h2>
       </div>
 
       <div className="detail-panel__body">
@@ -1004,16 +1028,6 @@ function AppraisalDetailPanel({
         {appraisal.address_verification_status === 'manual' && (
           <p className="address-review-status">Manually placed · needs review</p>
         )}
-        <dl className="detail-facts">
-          <div><dt>{dateLabel}</dt><dd>{formatDateOnly(dateValue)}</dd></div>
-          {appraisal.effective_date && appraisal.appraisal_date && (
-            <div><dt>Report date</dt><dd>{formatDateOnly(appraisal.appraisal_date)}</dd></div>
-          )}
-          <div><dt>Property type</dt><dd>{formatPropertyType(appraisal.property_type)}</dd></div>
-          <div><dt>Reported living area</dt><dd>{formatReportedLivingArea(appraisal.reported_living_area_sq_ft)}</dd></div>
-          <div><dt>Reported year built</dt><dd>{formatYearBuilt(appraisal.year_built)}</dd></div>
-        </dl>
-
         {hasPdf ? (
           <button
             type="button"
@@ -1057,7 +1071,7 @@ function AppraisalDetailPanel({
 
         {canMutate && (
           <div className="maintenance-actions">
-            <button type="button" className="button button--secondary" onClick={() => setEditing(true)}>Edit report</button>
+            <button type="button" className="button button--secondary" onClick={(event) => { editReturnFocusRef.current = event.currentTarget; setEditing(true); }}>Edit report</button>
             {!confirmDelete ? (
               <button type="button" className="button button--secondary" onClick={() => setConfirmDelete(true)}>Archive…</button>
             ) : (
@@ -1071,6 +1085,22 @@ function AppraisalDetailPanel({
             )}
           </div>
         )}
+
+        <dl className="detail-facts">
+          <div><dt>{dateLabel}</dt><dd>{formatDateOnly(dateValue)}</dd></div>
+          {appraisal.effective_date && appraisal.appraisal_date && (
+            <div><dt>Report date</dt><dd>{formatDateOnly(appraisal.appraisal_date)}</dd></div>
+          )}
+          <div><dt>Property type</dt><dd>{formatPropertyType(appraisal.property_type)}</dd></div>
+          <div><dt>Reported living area</dt><dd>{formatReportedLivingArea(appraisal.reported_living_area_sq_ft)}</dd></div>
+          <div><dt>Reported year built</dt><dd>{formatYearBuilt(appraisal.year_built)}</dd></div>
+        </dl>
+
+        <div className={`detail-photo detail-photo--${photoState.status}`}>
+          {photoState.url ? <img src={photoState.url} alt={`Property at ${appraisal.address}`} /> : (
+          <span>{photoState.status === 'loading' ? 'Loading property photo…' : photoState.status === 'error' ? 'Photo unavailable' : 'No property photo'}</span>
+        )}
+        </div>
       </div>
     </section>
   );

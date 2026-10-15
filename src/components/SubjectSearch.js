@@ -63,7 +63,7 @@ function SubjectSearch({
   return (
     <div className="subject-search">
       <div className="subject-search__field">
-        <label htmlFor={inputId} className="sr-only">
+        <label htmlFor={inputId} className="subject-search__label">
           Search for a subject property
         </label>
         <span className="subject-search__icon"><SearchIcon /></span>
@@ -72,6 +72,8 @@ function SubjectSearch({
           type="search"
           role="combobox"
           aria-autocomplete="list"
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? `${inputId}-error` : undefined}
           aria-expanded={suggestions.length > 0}
           aria-controls={listboxId}
           aria-activedescendant={
@@ -107,6 +109,9 @@ function SubjectSearch({
           </ul>
         )}
       </div>
+      <button type="button" className="button button--secondary subject-search__submit" onClick={onSubmit} disabled={busy || !value.trim()}>
+        {busy ? 'Searching…' : 'Search'}
+      </button>
       {subject && (
         <button
           type="button"
@@ -117,10 +122,10 @@ function SubjectSearch({
           <span className="subject-search__clear-copy">
             <span>{subject.address}</span>
           </span>
-          <span aria-hidden="true">×</span>
+          <span>Clear subject</span>
         </button>
       )}
-      {error && <p className="subject-search__error" role="alert">{error}</p>}
+      {error && <p id={`${inputId}-error`} className="subject-search__error" role="alert">{error}</p>}
     </div>
   );
 }

@@ -17,16 +17,16 @@ beforeEach(() => {
 test('signs in with a trimmed email and keeps password visibility user controlled', async () => {
   render(<Login supportEmail="help@example.com" />);
 
-  fireEvent.change(screen.getByLabelText('Email'), {
+  fireEvent.change(screen.getByLabelText('Staff email'), {
     target: { value: '  staff@example.com  ' },
   });
   const password = screen.getByLabelText('Password');
   fireEvent.change(password, { target: { value: 'test-password' } });
 
   expect(password).toHaveAttribute('type', 'password');
-  fireEvent.click(screen.getByRole('button', { name: 'Show' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Show password' }));
   expect(password).toHaveAttribute('type', 'text');
-  expect(screen.getByRole('button', { name: 'Hide' })).toHaveAttribute('aria-pressed', 'true');
+  expect(screen.getByRole('button', { name: 'Hide password' })).toHaveAttribute('aria-pressed', 'true');
 
   fireEvent.click(screen.getByRole('button', { name: 'Sign in' }));
 
@@ -34,7 +34,7 @@ test('signs in with a trimmed email and keeps password visibility user controlle
     email: 'staff@example.com',
     password: 'test-password',
   }));
-  expect(screen.getByRole('link', { name: 'Get sign-in help' }))
+  expect(screen.getByRole('link', { name: 'Contact your administrator' }))
     .toHaveAttribute('href', 'mailto:help@example.com');
 });
 
@@ -44,7 +44,7 @@ test('shows a calm, actionable message for invalid credentials', async () => {
   });
   render(<Login />);
 
-  fireEvent.change(screen.getByLabelText('Email'), {
+  fireEvent.change(screen.getByLabelText('Staff email'), {
     target: { value: 'staff@example.com' },
   });
   fireEvent.change(screen.getByLabelText('Password'), {

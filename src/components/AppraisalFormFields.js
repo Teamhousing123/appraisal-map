@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React from 'react';
 import { PROPERTY_TYPE_OPTIONS } from '../domain/appraisalFields';
 import './AppraisalFormFields.css';
 
@@ -23,20 +23,6 @@ function AppraisalFormFields({
   onEffectiveDateChange,
   onPropertyDetailChange,
 }) {
-  const hasPropertyErrors = Boolean(
-    errors.propertyType || errors.reportedLivingAreaSqFt || errors.yearBuilt
-  );
-  const hasPropertyValues = Boolean(
-    propertyDetails.propertyType
-    || propertyDetails.reportedLivingAreaSqFt
-    || propertyDetails.yearBuilt
-  );
-  const [detailsOpen, setDetailsOpen] = useState(hasPropertyValues);
-
-  useEffect(() => {
-    if (hasPropertyErrors || hasPropertyValues) setDetailsOpen(true);
-  }, [hasPropertyErrors, hasPropertyValues]);
-
   return (
     <>
       <div className="appraisal-date-grid">
@@ -76,12 +62,8 @@ function AppraisalFormFields({
         </p>
       )}
 
-      <details
-        className="appraisal-optional-details"
-        open={detailsOpen || hasPropertyErrors}
-        onToggle={(event) => setDetailsOpen(event.currentTarget.open)}
-      >
-        <summary>Property details (optional)</summary>
+      <fieldset className="appraisal-optional-details" disabled={disabled}>
+        <legend>Property facts <span className="appraisal-optional">Optional</span></legend>
         <p className="appraisal-helper">
           Copy only clearly reported facts. Leave a field blank when the report is unclear.
         </p>
@@ -168,7 +150,7 @@ function AppraisalFormFields({
             <FieldError id="appraisal-year-built-error" message={errors.yearBuilt} />
           </div>
         </div>
-      </details>
+      </fieldset>
     </>
   );
 }

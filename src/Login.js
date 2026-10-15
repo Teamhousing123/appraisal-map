@@ -4,6 +4,7 @@ import BrandLogo from './components/BrandLogo';
 import { OPERATION_ERROR_CODES, runBoundedOperation } from './services/operation';
 import { recordTelemetryEvent } from './services/telemetry';
 import './Login.css';
+import './presentation.css';
 
 const LOGIN_TIMEOUT_MS = 12000;
 
@@ -68,8 +69,7 @@ function Login({ supportEmail = '', message = '' }) {
   };
 
   return (
-    <main className="login-page">
-      <div className="login-backdrop" aria-hidden="true" />
+    <main className="login-page am-ui">
 
       <section className="login-shell" aria-labelledby="login-title">
         <div className="login-brand">
@@ -79,8 +79,9 @@ function Login({ supportEmail = '', message = '' }) {
 
         <div className="login-card">
           <div className="login-card__intro">
-            <h1 id="login-title">Welcome back</h1>
-            <p>Sign in to find nearby appraisal reports and review property evidence.</p>
+            <p className="login-eyebrow">Completed report research</p>
+            <h1 id="login-title">Staff sign in</h1>
+            <p>Access your organization’s completed appraisal reports.</p>
           </div>
 
           <form onSubmit={handleLogin} noValidate>
@@ -92,7 +93,7 @@ function Login({ supportEmail = '', message = '' }) {
             )}
 
             <div className="field-group">
-              <label htmlFor="login-email">Email</label>
+              <label htmlFor="login-email">Staff email</label>
               <input
                 id="login-email"
                 type="email"
@@ -126,9 +127,10 @@ function Login({ supportEmail = '', message = '' }) {
                   type="button"
                   className="password-field__toggle"
                   aria-pressed={showPassword}
+                  aria-label={showPassword ? 'Hide password' : 'Show password'}
                   onClick={() => setShowPassword((visible) => !visible)}
                 >
-                  {showPassword ? 'Hide' : 'Show'}
+                  {showPassword ? 'Hide password' : 'Show password'}
                 </button>
               </div>
             </div>
@@ -139,12 +141,14 @@ function Login({ supportEmail = '', message = '' }) {
             </button>
           </form>
 
-          <p className="login-card__support">
-            Authorized staff only.{' '}
+          <section className="login-card__support" aria-labelledby="login-help-title">
+            <h2 id="login-help-title">Need help signing in?</h2>
+            <p>Staff accounts are provided by your organization.</p>
             {supportEmail
-              ? <a href={`mailto:${supportEmail}`}>Get sign-in help</a>
-              : 'Ask your administrator if you need access.'}
-          </p>
+              ? <a href={`mailto:${supportEmail}`}>Contact your administrator</a>
+              : <p>Contact your administrator for access or password assistance.</p>}
+          </section>
+          <p className="login-security">Authorized staff access only</p>
         </div>
       </section>
     </main>

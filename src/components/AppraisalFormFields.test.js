@@ -27,7 +27,7 @@ test('renders labelled report and optional property fields', () => {
 
   expect(screen.getByLabelText(/Report date/i)).toHaveAttribute('type', 'date');
   expect(screen.getByLabelText(/Effective date/i)).toHaveAttribute('type', 'date');
-  expect(screen.getByText('Property details (optional)')).toBeInTheDocument();
+  expect(screen.getByRole('group', { name: /Property facts.*Optional/i })).toBeVisible();
   expect(screen.getByLabelText('Property type')).toBeInTheDocument();
   expect(screen.getByLabelText(/Reported living area \(square feet\)/i)).toHaveAttribute('type', 'number');
   expect(screen.getByLabelText('Reported year built')).toHaveAttribute('type', 'number');
@@ -77,7 +77,7 @@ test('associates validation and date warnings with their inputs', () => {
   expect(screen.getByText('Enter a whole number greater than zero.')).toBeInTheDocument();
 });
 
-test('opens optional property details when the report already has stored values', () => {
+test('keeps stored property facts visible without opening a disclosure', () => {
   renderFields({
     propertyDetails: {
       propertyType: PROPERTY_TYPE_OPTIONS[0].value,
@@ -86,5 +86,7 @@ test('opens optional property details when the report already has stored values'
     },
   });
 
-  expect(screen.getByRole('group')).toHaveAttribute('open');
+  expect(screen.getByRole('group')).toBeVisible();
+  expect(screen.getByLabelText('Property type')).toBeVisible();
+  expect(screen.getByLabelText('Property type')).toHaveValue(PROPERTY_TYPE_OPTIONS[0].value);
 });

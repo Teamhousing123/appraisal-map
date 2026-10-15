@@ -1,5 +1,6 @@
 import React from 'react';
 import BrandLogo from './BrandLogo';
+import '../presentation.css';
 
 class AppErrorBoundary extends React.Component {
   constructor(props) {
@@ -21,7 +22,7 @@ class AppErrorBoundary extends React.Component {
     if (!this.state.hasError) return this.props.children;
 
     return (
-      <main className="app-recovery" aria-labelledby="app-recovery-title">
+      <main className="app-recovery am-ui" aria-labelledby="app-recovery-title">
         <BrandLogo className="app-recovery__logo" />
         <h1 id="app-recovery-title">This screen did not open</h1>
         <p>

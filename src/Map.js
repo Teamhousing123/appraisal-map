@@ -35,6 +35,7 @@ import AppraisalDetailPanel from './components/AppraisalDetailPanel';
 import BrandLogo from './components/BrandLogo';
 import ReportRecoveryWorkspace from './components/ReportRecoveryWorkspace';
 import './Map.css';
+import './presentation.css';
 
 const AddAppraisal = lazy(() => import('./AddAppraisal'));
 
@@ -312,6 +313,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const panelReturnFocusRef = useRef(null);
   const previousPanelOpenRef = useRef(true);
   const previousPanelModeRef = useRef('nearby');
+  const nearbyPositionRef = useRef({ top: 0, reportId: null, label: '', visibleCount: 60, factsOpen: false });
+  const screenObserverRef = useRef(null);
   const discardReturnFocusRef = useRef(null);
 
   const { isLoaded, loadError } = useJsApiLoader({
@@ -543,9 +546,32 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   useEffect(() => {
     const previousMode = previousPanelModeRef.current;
     previousPanelModeRef.current = panelMode;
-    if (!panelOpen || previousMode === panelMode) return undefined;
-    const frame = window.requestAnimationFrame(focusPanelHeading);
-    return () => window.cancelAnimationFrame(frame);
+    if (!panelOpen) return undefined;
+    const panel = workspacePanelRef.current;
+    const frame = window.requestAnimationFrame(() => {
+      if (!panel) return;
+      if (panelMode === 'nearby' && previousMode !== 'nearby') {
+        panel.scrollTop = nearbyPositionRef.current.top;
+        const record = Array.from(panel.querySelectorAll('[data-report-id]')).find((element) => String(element.dataset.reportId) === String(nearbyPositionRef.current.reportId));
+        const target = Array.from(record?.querySelectorAll('button,input') || []).find((element) => element.getAttribute('aria-label') === nearbyPositionRef.current.label || element.textContent.trim() === nearbyPositionRef.current.label);
+        if (target) target.focus({ preventScroll: true });
+        else focusPanelHeading();
+      } else if (previousMode !== panelMode) {
+        panel.scrollTop = 0;
+        focusPanelHeading();
+      }
+    });
+    // The Add screen is lazy: wait for its real heading, not its loading placeholder.
+    if (panel && panelMode === 'add') {
+      screenObserverRef.current = new MutationObserver(() => {
+        if (panel.querySelector('#add-appraisal-title')) {
+          focusPanelHeading();
+          screenObserverRef.current?.disconnect();
+        }
+      });
+      screenObserverRef.current.observe(panel, { childList: true, subtree: true });
+    }
+    return () => { window.cancelAnimationFrame(frame); screenObserverRef.current?.disconnect(); };
   }, [focusPanelHeading, panelMode, panelOpen]);
 
   const preparedReports = useMemo(() => appraisals.map((report) => ({
@@ -935,6 +961,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     if (!archivedAppraisal?.id) return;
     showToast({
       tone: 'info',
+      recoveryId: String(archivedAppraisal.id),
       message: 'Restoring the archived report…',
       persistent: true,
     });
@@ -959,7 +986,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       lastSuccessfulBoundsKeyRef.current = null;
       lastSuccessfulQueryBoundsRef.current = null;
       focusReportOnMap(restored);
-      showToast({ tone: 'success', message: 'Report restored.' });
+      showToast({ tone: 'success', recoveryId: String(archivedAppraisal.id), recoveryResolved: true, message: 'Report restored.' });
       recordTelemetryEvent('appraisal_mutation', {
         outcome: 'success',
         operation: 'restore',
@@ -968,6 +995,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     } catch (error) {
       showToast({
         tone: 'error',
+        recoveryId: String(archivedAppraisal.id),
         title: 'Report not restored',
         message: error?.commitStatus === 'unknown'
           ? 'The restore could not be confirmed. Check your connection; retrying is safe.'
@@ -1004,6 +1032,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     refreshCurrentBounds();
     showToast({
       tone: 'success',
+      recoveryId: archivedAppraisal?.id && canMutate ? String(archivedAppraisal.id) : null,
       title: 'Report archived',
       message: typeof message === 'string'
         ? message
@@ -1194,7 +1223,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   return (
     <main className="map-app">
-      <header className="map-header">
+      <header className={`map-header am-ui${panelOpen && panelMode !== 'nearby' ? ' am-header--focused' : ''}`}>
         <div className="map-brand" aria-label="Appraisal Map">
           <BrandLogo className="map-brand__logo" />
           <span className="map-brand__copy">
@@ -1204,6 +1233,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
             )}
           </span>
         </div>
+        <div className="am-research-search" hidden={panelOpen && panelMode !== 'nearby'}>
         <SubjectSearch
           value={searchTerm}
           onChange={requestAutocomplete}
@@ -1224,18 +1254,19 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
           error={searchError}
           placeholder={`Search addresses in ${SERVICE_AREA.name}`}
         />
+        </div>
         <nav className="map-header__actions" aria-label="Workspace actions">
           <button type="button" className="button button--quiet" onClick={() => runWorkspaceAction(() => { window.location.hash = 'reports'; setReportListMode(true); })}>Report list</button>
-          <button type="button" className="button button--secondary" onClick={() => {
+          <button type="button" className="button button--secondary am-map-toggle" onClick={() => {
             runWorkspaceAction(() => {
               setPanelOpen((open) => !open);
               if (!panelOpen) setPanelMode('nearby');
             });
           }}>
-            <MapIcon /> {panelOpen ? 'Hide panel' : 'Show reports'}
+            <MapIcon /><span className="am-toggle-desktop">{panelOpen ? 'Hide reports' : 'Show reports'}</span><span className="am-toggle-narrow">{panelOpen ? 'Show map' : 'Show reports'}</span>
           </button>
           {canMutate && (
-            <button type="button" className="button button--primary" onClick={() => {
+            <button type="button" className="button button--primary am-add-action" onClick={() => {
               if (panelMode === 'add') return;
               runWorkspaceAction(() => {
                 setPanelMode('add');
@@ -1286,7 +1317,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         )}
       </header>
 
-      <div className="map-stage">
+      <div className={`map-stage am-layout${panelOpen ? ' am-layout--reports' : ''}${panelMode === 'compare' ? ' am-layout--compare' : ''}${panelOpen && ['add', 'detail', 'compare'].includes(panelMode) ? ' am-layout--full' : ''}${manualPlacement.active ? ' am-layout--placing' : ''}`} >
+        <div className="am-map-canvas">
         {!isLoaded ? (
           <div className="map-loading" role="status">
             <span aria-hidden="true" />
@@ -1340,6 +1372,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
           </div>
         )}
 
+        </div>
+
         {manualPlacement.active && (
           <div className="manual-placement-guide" role="status">
             <div>
@@ -1377,24 +1411,41 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         {panelOpen && (
           <aside
             ref={workspacePanelRef}
-            className={`workspace-panel workspace-panel--${panelMode}${manualPlacement.active ? ' workspace-panel--placing' : ''}`}
+            className={`am-ui workspace-panel workspace-panel--${panelMode}${manualPlacement.active ? ' workspace-panel--placing' : ''}`}
             aria-label="Appraisal workspace panel"
             tabIndex="-1"
+            onClickCapture={(event) => {
+              if (panelMode !== 'nearby') return;
+              const control = event.target.closest('button,input');
+              const record = control?.closest('[data-report-id]');
+              nearbyPositionRef.current = {
+                ...nearbyPositionRef.current,
+                top: event.currentTarget.scrollTop,
+                reportId: record?.dataset.reportId || null,
+                label: control?.getAttribute('aria-label') || control?.textContent.trim() || '',
+                factsOpen: Boolean(event.currentTarget.querySelector('.subject-facts')?.open),
+              };
+            }}
           >
             <button
               type="button"
-              className="workspace-panel__close icon-button"
+              className="workspace-panel__close button button--quiet"
+              hidden={panelMode !== 'nearby'}
               onClick={() => {
-                runWorkspaceAction(() => setPanelOpen(false));
+                runWorkspaceAction(() => {
+                  if (panelMode === 'nearby') setPanelOpen(false);
+                  else setPanelMode('nearby');
+                });
               }}
-              aria-label="Close workspace panel"
+              aria-label={panelMode === 'nearby' ? 'Close workspace panel' : 'Back to reports'}
             >
-              ×
+              {panelMode === 'nearby' ? 'Close' : 'Back'}
             </button>
             {panelMode === 'add' ? (
               <Suspense fallback={<div className="panel-loader" role="status">Loading form…</div>}>
                 <AddAppraisal
                   onAdded={handleAdded}
+                  onCancel={() => runWorkspaceAction(() => setPanelMode('nearby'))}
                   metadataSupported={metadataSupported}
                   onWorkspaceStateChange={handleWorkspaceStateChange}
                   manualPlacement={manualPlacement}
@@ -1417,9 +1468,11 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 openingReportId={openingReportId}
                 metadataSupported={metadataSupported}
                 canMutate={canMutate}
+                runWorkspaceAction={runWorkspaceAction}
                 onWorkspaceStateChange={handleWorkspaceStateChange}
               />
-            ) : (
+            ) : null}
+            <div hidden={panelMode === 'add' || panelMode === 'detail'}>
               <NearbyWorkspace
                 subject={subject}
                 onSubjectFactChange={handleSubjectFactChange}
@@ -1447,7 +1500,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 onOpenReport={handleOpenReport}
                 openingReportId={openingReportId}
                 onHoverReport={setHoveredReportId}
-                view={panelMode}
+                view={panelMode === 'compare' ? 'compare' : 'nearby'}
                 onCompare={() => {
                   if (!subject) showToast('Set a subject property before comparing reports.');
                   else setPanelMode('compare');
@@ -1456,14 +1509,14 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 onRemoveCandidate={handleRemoveCandidate}
                 onRetry={refreshCurrentBounds}
               />
-            )}
+            </div>
           </aside>
         )}
 
         {discardAction && (
           <div className="calm-dialog-backdrop" role="presentation">
             <section
-              className="calm-dialog"
+              className="calm-dialog am-ui"
               role="dialog"
               aria-modal="true"
               aria-labelledby="discard-dialog-title"

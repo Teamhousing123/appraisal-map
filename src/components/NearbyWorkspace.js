@@ -279,17 +279,8 @@ function Filters({
           </button>
         </div>
       )}
-      <details className="report-filters" open={activeCount > 0}>
-        <summary>
-          <span>Filter reports</span>
-          <span>{activeCount > 0 ? `${activeCount} active` : 'Optional'}</span>
-        </summary>
-        {!subject && (
-          <p id="subject-filter-guidance" className="report-filters__guidance">
-            Set a subject property above to use radius, nearest-first sorting, and candidate comparison.
-          </p>
-        )}
-        <div className="report-filters__grid">
+      <section className="report-filters" aria-label="Report filters">
+        <div className="report-filters__grid am-primary-filters">
           <label>
             <span>Radius</span>
             <select
@@ -315,6 +306,26 @@ function Filters({
               ))}
             </select>
           </label>
+          <label className="report-filters__sort">
+            <span>Sort</span>
+            <select
+              value={filters.sortBy}
+              aria-describedby={!subject ? 'subject-filter-guidance' : undefined}
+              onChange={(event) => onChange('sortBy', event.target.value)}
+            >
+              <option value="distance" disabled={!subject}>Nearest first</option>
+              <option value="newest">Newest reference date first</option>
+            </select>
+          </label>
+        </div>
+        {!subject && (
+          <p id="subject-filter-guidance" className="report-filters__guidance">
+            Set a subject to enable radius and comparison.
+          </p>
+        )}
+        <details className="am-date-filters" open={Boolean(filters.dateFrom || filters.dateTo || dateRangeError)}>
+          <summary>Reference date filter</summary>
+          <div className="am-date-grid">
           <label>
             <span>Reference date from</span>
             <input
@@ -342,28 +353,14 @@ function Filters({
               {dateRangeError}
             </p>
           )}
-          <label className="report-filters__sort">
-            <span>Sort</span>
-            <select
-              value={filters.sortBy}
-              aria-describedby={!subject ? 'subject-filter-guidance' : undefined}
-              onChange={(event) => onChange('sortBy', event.target.value)}
-            >
-              <option value="distance" disabled={!subject}>Nearest first</option>
-              <option value="newest">Newest reference date first</option>
-            </select>
-          </label>
-        </div>
+          </div>
+          <p>Reference date uses the effective date when recorded; otherwise it uses the report date.</p>
+        </details>
         <div className="report-filters__footer">
-          <p aria-live="polite">
-            Reference date uses the effective date when recorded; otherwise it uses the report date.
-            {omissionMessages.length > 0 ? ` ${omissionMessages.join(' ')}` : ''}
-          </p>
-          <button type="button" className="button button--quiet" onClick={onReset} disabled={activeCount === 0}>
-            Clear filters
-          </button>
+          {omissionMessages.length > 0 && <p aria-live="polite">{omissionMessages.join(' ')}</p>}
+          {activeCount > 0 && <button type="button" className="button button--quiet" onClick={onReset}>Clear filters</button>}
         </div>
-      </details>
+      </section>
     </>
   );
 }
@@ -386,6 +383,7 @@ function ReportCard({
 
   return (
     <article
+      data-report-id={report.id}
       className={`report-card${selected ? ' is-selected' : ''}`}
       onMouseEnter={() => onHover(report.id)}
       onMouseLeave={() => onHover(null)}
@@ -405,6 +403,20 @@ function ReportCard({
       {report.address_verification_status === 'manual' && (
         <p className="address-review-status">Manually placed · needs review</p>
       )}
+      <div className="report-card__actions">
+        <button
+          type="button"
+          className="button button--report"
+          onClick={() => onOpenReport(report)}
+          disabled={!hasDocument || openingReport}
+        >
+          <DocumentIcon />
+          {openingReport ? 'Preparing…' : documentLabel}
+        </button>
+        <button type="button" className="button button--quiet" onClick={() => onDetails(report)}>
+          Report details <ArrowIcon />
+        </button>
+      </div>
       <dl className="report-card__facts">
         <div>
           <dt>{date.label}</dt>
@@ -428,20 +440,6 @@ function ReportCard({
         )}
       </dl>
       {!hasMetadata && <p className="report-card__sparse">Property details not recorded</p>}
-      <div className="report-card__actions">
-        <button
-          type="button"
-          className="button button--report"
-          onClick={() => onOpenReport(report)}
-          disabled={!hasDocument || openingReport}
-        >
-          <DocumentIcon />
-          {openingReport ? 'Preparing…' : documentLabel}
-        </button>
-        <button type="button" className="button button--quiet" onClick={() => onDetails(report)}>
-          Details <ArrowIcon />
-        </button>
-      </div>
       <label className={`candidate-toggle${selected ? ' is-selected' : ''}${selectionDisabled ? ' is-disabled' : ''}`}>
         <input
           type="checkbox"
@@ -504,8 +502,8 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
   return (
     <section className="comparison-view" aria-labelledby="comparison-title">
       <div className="workspace-heading workspace-heading--with-back">
-        <button type="button" className="icon-button" onClick={onBack} aria-label="Back to nearby reports">
-          <ArrowIcon direction="left" />
+        <button type="button" className="button button--quiet" onClick={onBack} aria-label="Back to nearby reports">
+          <ArrowIcon direction="left" /> Back to reports
         </button>
         <h2 id="comparison-title">Compare selected candidates</h2>
       </div>
@@ -522,12 +520,25 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
               <th scope="col" className="comparison-subject-heading">
                 <span>Subject</span>
                 <strong>{subject.address}</strong>
+                <small>This session only</small>
               </th>
               {candidates.map((candidate) => (
                 <th scope="col" key={candidate.id}>
                   <span>Candidate</span>
                   <strong>{candidate.address}</strong>
-                  <button type="button" onClick={() => onRemove(candidate.id)}>Remove</button>
+                  <small>{candidate.city}</small>
+                  <small>{reportReferenceDate(candidate).label}: {reportReferenceDate(candidate).formatted}</small>
+                  <button type="button" onClick={() => onRemove(candidate.id)}>Remove candidate</button>
+                  <button
+                    type="button"
+                    className="button button--report"
+                    onClick={() => onOpenReport(candidate)}
+                    disabled={!hasReportDocument(candidate) || openingReportId === candidate.id}
+                  >
+                    <DocumentIcon /> {openingReportId === candidate.id
+                      ? 'Preparing…'
+                      : documentActionLabel(candidate)}
+                  </button>
                 </th>
               ))}
             </tr>
@@ -540,24 +551,6 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
                 {candidates.map((candidate) => <td key={candidate.id}>{row.candidate(subject, candidate)}</td>)}
               </tr>
             ))}
-            <tr className="comparison-report-row">
-              <th scope="row">Source report</th>
-              <td>Current subject</td>
-              {candidates.map((candidate) => (
-                <td key={candidate.id}>
-                  <button
-                    type="button"
-                    className="button button--report"
-                    onClick={() => onOpenReport(candidate)}
-                    disabled={!hasReportDocument(candidate) || openingReportId === candidate.id}
-                  >
-                    <DocumentIcon /> {openingReportId === candidate.id
-                      ? 'Preparing…'
-                      : documentActionLabel(candidate)}
-                  </button>
-                </td>
-              ))}
-            </tr>
           </tbody>
         </table>
       </div>
@@ -570,18 +563,9 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
         {candidates.map((candidate) => (
           <article key={candidate.id} className="comparison-mobile__card">
             <header>
-              <div><span>Candidate</span><h3>{candidate.address}</h3></div>
-              <button type="button" onClick={() => onRemove(candidate.id)}>Remove</button>
+              <div><span>Candidate</span><h3>{candidate.address}</h3><p>{candidate.city}</p><p>{reportReferenceDate(candidate).label}: {reportReferenceDate(candidate).formatted}</p></div>
+              <button type="button" onClick={() => onRemove(candidate.id)}>Remove candidate</button>
             </header>
-            <dl>
-              {visibleComparisonRows.map((row) => (
-                <div key={row.label}>
-                  <dt>{row.label}</dt>
-                  <dd><span>Subject</span>{row.subject(subject)}</dd>
-                  <dd><span>Candidate</span>{row.candidate(subject, candidate)}</dd>
-                </div>
-              ))}
-            </dl>
             <button
               type="button"
               className="button button--report"
@@ -592,6 +576,16 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
                 ? 'Preparing…'
                 : documentActionLabel(candidate)}
             </button>
+            <dl>
+              {visibleComparisonRows.map((row) => (
+                <div key={row.label}>
+                  <dt>{row.label}</dt>
+                  <dd><span>Subject</span>{row.subject(subject)}</dd>
+                  <dd><span>Candidate</span>{row.candidate(subject, candidate)}</dd>
+                </div>
+              ))}
+            </dl>
+
           </article>
         ))}
       </div>
@@ -650,8 +644,9 @@ function NearbyWorkspace({
     yearBuilt: subjectFactErrors.yearBuilt ? null : subject.yearBuilt,
   } : subject;
 
-  if (view === 'compare') {
-    return (
+  return (
+    <>
+      {view === 'compare' && (
       <ComparisonView
         subject={validatedSubject}
         candidates={candidates}
@@ -660,10 +655,8 @@ function NearbyWorkspace({
         onOpenReport={onOpenReport}
         openingReportId={openingReportId}
       />
-    );
-  }
-
-  return (
+      )}
+      <div hidden={view === 'compare'}>
     <section className="nearby-workspace" aria-labelledby="nearby-title">
       <div className="workspace-heading">
         <h2 id="nearby-title">{subject ? 'Reports near this property' : 'Reports in this map area'}</h2>
@@ -671,11 +664,7 @@ function NearbyWorkspace({
           {reports.length}
         </span>
       </div>
-      <p className="workspace-intro">
-        {subject
-          ? 'Nearby reports are starting points, not appraiser-selected comparables.'
-          : 'Search for a subject property to calculate distance and compare physical facts.'}
-      </p>
+      {subject && <p className="workspace-intro">Nearby reports are starting points, not selected comparables.</p>}
 
       {subject && (
         <SubjectFacts
@@ -786,6 +775,8 @@ function NearbyWorkspace({
         </div>
       )}
     </section>
+      </div>
+    </>
   );
 }
 

@@ -1,6 +1,6 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import MapView from './Map';
 import { fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
 import { supabase } from './supabaseClient';
@@ -79,7 +79,7 @@ jest.mock('./components/AppraisalDetailPanel', () => function TestDetailPanel({
   onOpenReport,
 }) {
   return (
-    <section>
+    <section aria-label="Report details">
       <h2>Report details</h2>
       <span>{appraisal.address}</span>
       <button
@@ -222,7 +222,7 @@ test('keeps repeat entry open and preserves the normal save-to-detail behavior',
 
   fireEvent.click(screen.getByRole('button', { name: 'Save normally' }));
   expect(await screen.findByRole('heading', { name: 'Report details' })).toBeInTheDocument();
-  expect(screen.getByText('20 Example Road')).toBeInTheDocument();
+  expect(within(screen.getByRole('region', { name: 'Report details' })).getByText('20 Example Road')).toBeVisible();
 });
 
 test('offers persistent Undo with the archived version and restores the report', async () => {
@@ -254,7 +254,7 @@ test('offers persistent Undo with the archived version and restores the report',
     { expectedVersion: 2 }
   );
   expect(await screen.findByRole('heading', { name: 'Report details' })).toBeInTheDocument();
-  expect(showToast).toHaveBeenCalledWith({ tone: 'success', message: 'Report restored.' });
+  expect(showToast).toHaveBeenCalledWith({ tone: 'success', recoveryId: report.id, recoveryResolved: true, message: 'Report restored.' });
 });
 
 test('uses a same-tab action when a protected PDF popup is blocked', async () => {

@@ -3,12 +3,18 @@ import { supabase, supabaseConfigurationError, supportEmail } from './supabaseCl
 import BrandLogo from './components/BrandLogo';
 import { runBoundedOperation } from './services/operation';
 import { recordTelemetryEvent } from './services/telemetry';
+import { canMutateAppraisals } from './domain/access';
 import './App.css';
+import './presentation.css';
 
 const Login = lazy(() => import('./Login'));
 const Map = lazy(() => import('./Map'));
 
 const SESSION_TIMEOUT_MS = 10000;
+
+function noticeScope(session) {
+  return `${session?.user?.id || ''}:${canMutateAppraisals(session) ? 'write' : 'read'}`;
+}
 
 function SupportLink() {
   if (!supportEmail) return <span>Contact your Appraisal Map administrator.</span>;
@@ -37,6 +43,8 @@ function normalizeNotice(notice) {
       }
       : null;
   return {
+    recoveryId: notice.recoveryId || null,
+    recoveryResolved: Boolean(notice.recoveryResolved),
     title: typeof notice.title === 'string' ? notice.title : '',
     message: notice.message,
     tone,
@@ -55,11 +63,21 @@ function App() {
   const [startupIssue, setStartupIssue] = useState('');
   const [sessionAttempt, setSessionAttempt] = useState(0);
   const [notice, setNotice] = useState(null);
+  const [archiveRecovery, setArchiveRecovery] = useState(null);
   const [noticeActionBusy, setNoticeActionBusy] = useState(false);
   const [isOnline, setIsOnline] = useState(() => navigator.onLine !== false);
   const [loginMessage, setLoginMessage] = useState('');
   const toastTimerRef = useRef(null);
   const sessionRef = useRef(null);
+  const currentNoticeScope = noticeScope(session);
+  const canRestore = canMutateAppraisals(session);
+
+  useEffect(() => {
+    setArchiveRecovery(null);
+    setNotice(null);
+    setNoticeActionBusy(false);
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+  }, [currentNoticeScope]);
 
   useEffect(() => {
     if (supabaseConfigurationError || !supabase) {
@@ -126,7 +144,13 @@ function App() {
   const showToast = useCallback((nextNotice) => {
     const normalizedNotice = normalizeNotice(nextNotice);
     if (!normalizedNotice) return;
+    normalizedNotice.scope = noticeScope(sessionRef.current);
 
+    if (normalizedNotice.recoveryId) {
+      setArchiveRecovery((current) => normalizedNotice.recoveryResolved
+        ? (current?.recoveryId === normalizedNotice.recoveryId ? null : current)
+        : normalizedNotice);
+    }
     setNoticeActionBusy(false);
     setNotice(normalizedNotice);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
@@ -135,8 +159,14 @@ function App() {
     }
   }, []);
 
-  const runNoticeAction = useCallback(async (actionToRun) => {
-    if (noticeActionBusy || typeof actionToRun?.onClick !== 'function') return;
+  const showSessionToast = useCallback((nextNotice) => {
+    if (currentNoticeScope !== noticeScope(sessionRef.current)) return;
+    showToast(nextNotice);
+  }, [currentNoticeScope, showToast]);
+
+  const runNoticeAction = useCallback(async (actionToRun, expectedScope) => {
+    if (expectedScope !== noticeScope(sessionRef.current)
+      || noticeActionBusy || typeof actionToRun?.onClick !== 'function') return;
     setNoticeActionBusy(true);
     try {
       await actionToRun.onClick();
@@ -170,7 +200,7 @@ function App() {
     return (
       <>
         {offlineNotice}
-        <main className="app-recovery" aria-labelledby="app-startup-title">
+        <main className="app-recovery am-ui" aria-labelledby="app-startup-title">
           <BrandLogo className="app-recovery__logo" />
           <h1 id="app-startup-title">
             {configurationIssue ? 'Appraisal Map needs setup' : 'We couldn’t check your session'}
@@ -203,14 +233,30 @@ function App() {
   }
 
   return (
-    <div className="app-root">
+    <div className="app-root am-shell">
       {offlineNotice}
       <Suspense fallback={appLoader}>
-        <Map session={session} onSessionChange={handleSessionChange} showToast={showToast} />
+        <Map session={session} onSessionChange={handleSessionChange} showToast={showSessionToast} />
       </Suspense>
-      {notice && (
+      {archiveRecovery && archiveRecovery.scope === currentNoticeScope && canRestore && (
+        <section className="am-ui am-archive-recovery" aria-label="Archive recovery">
+          <span
+            role={archiveRecovery.tone === 'error' ? 'alert' : 'status'}
+            aria-live={archiveRecovery.tone === 'error' ? 'assertive' : 'polite'}
+            aria-atomic="true"
+          >
+            <strong>{archiveRecovery.title}</strong>{' '}
+            {archiveRecovery.message}
+          </span>
+          {archiveRecovery.action && <button type="button" className="button button--secondary" onClick={() => runNoticeAction(archiveRecovery.action, archiveRecovery.scope)} disabled={noticeActionBusy}>
+            {noticeActionBusy ? archiveRecovery.action.busyLabel : archiveRecovery.action.label}
+          </button>}
+          <button type="button" className="button button--quiet" onClick={() => { setArchiveRecovery(null); setNotice((current) => current === archiveRecovery ? null : current); }}>Dismiss recovery</button>
+        </section>
+      )}
+      {notice && notice !== archiveRecovery && notice.scope === currentNoticeScope && (!notice.recoveryId || canRestore) && (
         <div
-          className={`app-toast app-toast--${notice.tone}`}
+          className={`am-ui app-toast app-toast--${notice.tone}`}
           role={notice.tone === 'error' ? 'alert' : 'status'}
           aria-live={notice.tone === 'error' ? 'assertive' : 'polite'}
         >
@@ -221,7 +267,7 @@ function App() {
           {notice.action?.onClick && (
             <button
               type="button"
-              onClick={() => runNoticeAction(notice.action)}
+              onClick={() => runNoticeAction(notice.action, notice.scope)}
               disabled={noticeActionBusy}
             >
               {noticeActionBusy ? notice.action.busyLabel : notice.action.label}

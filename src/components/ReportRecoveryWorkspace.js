@@ -3,7 +3,9 @@ import { supabase } from '../supabaseClient';
 import { CURRENT_APPRAISAL_SELECT } from '../services/appraisalService';
 import { createProtectedFileLink, isR2StorageEnabled } from '../services/cloudflareStorage';
 import { formatDateOnly } from '../domain/dates';
+import { formatPropertyType } from '../domain/appraisalFields';
 import BrandLogo from './BrandLogo';
+import '../presentation.css';
 
 export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason }) {
   const [reports, setReports] = useState([]);
@@ -25,7 +27,7 @@ export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason }
   useEffect(() => { const controller = new AbortController(); load(0, controller.signal); return () => controller.abort(); }, [load]);
   const filtered = useMemo(() => {
     const term = query.trim().toLowerCase();
-    return reports.filter((report) => `${report.address || ''} ${report.city || ''} ${report.property_type || ''}`.toLowerCase().includes(term));
+    return reports.filter((report) => `${report.address || ''} ${report.city || ''} ${report.property_type || ''} ${formatPropertyType(report.property_type)}`.toLowerCase().includes(term));
   }, [query, reports]);
   const open = async (report) => {
     const bucket = report.pdf_url ? 'pdfs' : 'appraisal-folders';
@@ -47,14 +49,14 @@ export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason }
   };
   return (
     <main className="map-app recovery-app">
-      <header className="map-header recovery-header">
+      <header className="map-header recovery-header am-ui">
         <div className="map-brand"><BrandLogo className="map-brand__logo" /><strong>Appraisal Map</strong></div>
         <nav className="map-header__actions" aria-label="Workspace actions">
           <button type="button" className="button button--secondary" onClick={onShowMap || (() => window.location.reload())}>{onShowMap ? 'Show map' : 'Retry map'}</button>
           <button type="button" className="button button--quiet" onClick={onSignOut}>Sign out</button>
         </nav>
       </header>
-      <section className="recovery-workspace" aria-labelledby="recovery-title">
+      <section className="recovery-workspace am-ui" aria-labelledby="recovery-title">
         <h1 id="recovery-title">Your reports</h1>
         <p className="recovery-notice">{reason} You can search reports and open their files here.</p>
         <div className="recovery-tools">
@@ -66,7 +68,7 @@ export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason }
         <ul className="recovery-reports">
           {filtered.map((report) => (
             <li key={report.id}>
-              <div><h2>{report.address || 'Address not provided'}</h2><p>{report.city} · {formatDateOnly(report.appraisal_date)}{report.property_type ? ` · ${report.property_type}` : ''}</p></div>
+              <div><h2>{report.address || 'Address not provided'}</h2><p>{report.city} · {report.effective_date ? 'Effective date' : 'Report date'}: {formatDateOnly(report.effective_date || report.appraisal_date)}{report.property_type ? ` · ${formatPropertyType(report.property_type)}` : ''}</p></div>
               <button type="button" className="button button--primary" disabled={opening === report.id || (!report.pdf_url && !report.folder_files?.length)} onClick={() => open(report)}>
                 {opening === report.id ? 'Preparing file…' : report.pdf_url ? 'Open PDF' : report.folder_files?.length ? 'Download folder' : 'No document'}
               </button>

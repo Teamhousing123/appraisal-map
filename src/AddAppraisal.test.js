@@ -475,7 +475,7 @@ test('saves and resets the full form for an intentional repeated-entry workflow'
   insertAppraisal.mockResolvedValue({ error: null, data: createdReport });
   render(<AddAppraisal onAdded={onAdded} metadataSupported />);
   fillRequiredAddress();
-  fireEvent.change(screen.getByLabelText(/Report date/i), {
+  fireEvent.change(screen.getByLabelText(/Report date/i, { selector: 'input' }), {
     target: { value: '2026-08-01' },
   });
   fireEvent.change(screen.getByLabelText(/Effective date/i), {
@@ -495,7 +495,7 @@ test('saves and resets the full form for an intentional repeated-entry workflow'
   })));
   expect(screen.getByLabelText('Street address')).toHaveValue('');
   expect(screen.getByLabelText('City')).toHaveValue('');
-  expect(screen.getByLabelText(/Report date/i)).toHaveValue('');
+  expect(screen.getByLabelText(/Report date/i, { selector: 'input' })).toHaveValue('');
   expect(screen.getByLabelText(/Effective date/i)).toHaveValue('');
   expect(screen.getByLabelText('Property type')).toHaveValue('');
   expect(screen.getByText('Appraisal saved. Add the next address when ready.')).toBeInTheDocument();

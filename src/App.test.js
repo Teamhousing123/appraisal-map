@@ -4,6 +4,8 @@ import App from './App';
 import { supabase } from './supabaseClient';
 
 const mockNoticeAction = jest.fn();
+let mockAuthStateChange;
+let mockLatestToast;
 
 jest.mock('./supabaseClient', () => ({
   supabaseConfigurationError: '',
@@ -21,9 +23,17 @@ jest.mock('./Login', () => function TestLogin() {
 });
 
 jest.mock('./Map', () => function TestMap({ showToast }) {
+  mockLatestToast = showToast;
   return (
     <main>
       Test map
+      <button type="button" onClick={() => showToast({
+        recoveryId: 'archived-report',
+        title: 'Report archived',
+        message: 'Archived report recovery.',
+        persistent: true,
+        action: { label: 'Restore archived report', onClick: mockNoticeAction },
+      })}>Show archive recovery</button>
       <button
         type="button"
         onClick={() => showToast({
@@ -50,8 +60,9 @@ jest.mock('./Map', () => function TestMap({ showToast }) {
 
 beforeEach(() => {
   jest.clearAllMocks();
-  supabase.auth.onAuthStateChange.mockReturnValue({
-    data: { subscription: { unsubscribe: jest.fn() } },
+  supabase.auth.onAuthStateChange.mockImplementation((callback) => {
+    mockAuthStateChange = callback;
+    return { data: { subscription: { unsubscribe: jest.fn() } } };
   });
 });
 
@@ -101,4 +112,70 @@ test('supports callback notice actions and same-tab protected links', async () =
     'target',
     '_self'
   );
+});
+
+test.each(['account change', 'editing access removed'])(
+  'clears archive recovery and ignores old callbacks after %s',
+  async (change) => {
+    const editor = { user: { id: 'staff-one', app_metadata: { role: 'editor' } } };
+    supabase.auth.getSession.mockResolvedValue({ data: { session: editor }, error: null });
+    render(<App />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Show archive recovery' }));
+    expect(screen.getByRole('button', { name: 'Restore archived report' })).toBeInTheDocument();
+    const previousSessionToast = mockLatestToast;
+
+    if (change === 'account change') {
+      await act(async () => mockAuthStateChange('SIGNED_OUT', null));
+    }
+    expect(Boolean(screen.queryByText('Test sign-in screen'))).toBe(change === 'account change');
+    const nextSession = change === 'account change'
+      ? { user: { id: 'staff-two', app_metadata: { role: 'editor' } } }
+      : { user: { id: 'staff-one', app_metadata: { role: 'viewer' } } };
+    await act(async () => mockAuthStateChange('TOKEN_REFRESHED', nextSession));
+    expect(await screen.findByText('Test map')).toBeInTheDocument();
+    expect(screen.queryByRole('region', { name: 'Archive recovery' })).not.toBeInTheDocument();
+
+    await act(async () => previousSessionToast({
+      recoveryId: 'archived-report',
+      message: 'Late recovery from the previous session.',
+      persistent: true,
+      action: { label: 'Restore archived report', onClick: mockNoticeAction },
+    }));
+    expect(screen.queryByText('Late recovery from the previous session.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Restore archived report' })).not.toBeInTheDocument();
+    expect(mockNoticeAction).not.toHaveBeenCalled();
+  }
+);
+
+test('announces archive recovery and restore errors without including action controls', async () => {
+  const editor = { user: { id: 'staff-one', app_metadata: { role: 'editor' } } };
+  supabase.auth.getSession.mockResolvedValue({ data: { session: editor }, error: null });
+  render(<App />);
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Show archive recovery' }));
+  expect(screen.getByRole('status')).toHaveTextContent('Archived report recovery.');
+  expect(screen.getByRole('status')).not.toContainElement(
+    screen.getByRole('button', { name: 'Restore archived report' })
+  );
+
+  await act(async () => mockLatestToast({
+    recoveryId: 'archived-report',
+    message: 'Restoring the archived report…',
+    persistent: true,
+  }));
+  expect(screen.getByRole('status')).toHaveTextContent('Restoring the archived report…');
+
+  await act(async () => mockLatestToast({
+    recoveryId: 'archived-report',
+    tone: 'error',
+    title: 'Report not restored',
+    message: 'Check your connection; retrying is safe.',
+    persistent: true,
+    action: { label: 'Try again', onClick: mockNoticeAction },
+  }));
+  expect(screen.getByRole('alert')).toHaveTextContent('Report not restored');
+  expect(screen.getByRole('alert')).toHaveTextContent('Check your connection; retrying is safe.');
+  expect(screen.getByRole('alert')).not.toContainElement(screen.getByRole('button', { name: 'Try again' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Dismiss recovery' }));
+  expect(screen.queryByRole('region', { name: 'Archive recovery' })).not.toBeInTheDocument();
 });
