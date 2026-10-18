@@ -1,10 +1,10 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   GARAGE_CAPACITY_OPTIONS,
   NOT_RECORDED_LABEL,
   PROPERTY_TYPE_OPTIONS,
   formatGarageCapacity,
-  formatLotFrontage,
+  formatLotFrontageFact,
   formatPropertyType,
   formatReportedLivingArea,
   formatYearBuilt,
@@ -296,7 +296,7 @@ function Filters({
   if (frontageRangeSet && !filters.includeMissingFrontage && missingFrontage > 0) {
     omissionMessages.push(describeMissingReports(
       missingFrontage,
-      'without a recorded frontage',
+      'without a frontage measurement',
       'frontage filter'
     ));
   }
@@ -487,7 +487,7 @@ function Filters({
                   checked={Boolean(filters.includeMissingFrontage)}
                   onChange={(event) => applyFilters({ includeMissingFrontage: event.target.checked })}
                 />
-                <span>Include reports without a recorded frontage</span>
+                <span>Include reports with no frontage measurement (Not recorded or Not applicable)</span>
               </label>
               <label className="am-fact-filters__garage">
                 <span>Garage capacity</span>
@@ -604,7 +604,7 @@ const comparisonRows = [
   { label: 'Reported year built', subject: (subject) => formatYearBuilt(subject.yearBuilt), candidate: (subject, candidate) => formatYearBuilt(candidate.year_built) },
   { label: 'Year difference', subject: () => 'Reference', candidate: getYearDifference },
   { label: 'Garage capacity', subject: () => NOT_RECORDED_LABEL, candidate: (subject, candidate) => formatGarageCapacity(candidate.garage_capacity) },
-  { label: 'Lot frontage', subject: () => NOT_RECORDED_LABEL, candidate: (subject, candidate) => formatLotFrontage(candidate.lot_frontage_ft) },
+  { label: 'Lot frontage', subject: () => NOT_RECORDED_LABEL, candidate: (subject, candidate) => formatLotFrontageFact(candidate) },
   { label: 'Reference date', alwaysVisible: true, subject: () => 'Not applicable', candidate: (subject, candidate) => {
     const date = reportReferenceDate(candidate);
     return `${date.label}: ${date.formatted}`;
@@ -750,17 +750,36 @@ function NearbyWorkspace({
   onRefresh,
   lastUpdatedAt = null,
   factsSupported = null,
+  initialVisibleCount = null,
+  onVisibleCountChange = null,
+  resultResetKey = 0,
 }) {
-  const [visibleReportCount, setVisibleReportCount] = useState(REPORT_BATCH_SIZE);
+  const [visibleReportCount, setVisibleReportCount] = useState(() => (
+    Number.isFinite(initialVisibleCount) && initialVisibleCount > 0
+      ? initialVisibleCount
+      : REPORT_BATCH_SIZE
+  ));
   const [now, setNow] = useState(() => Date.now());
-  const reportResultKey = useMemo(
-    () => reports.map((report) => String(report.id)).join('\u001f'),
-    [reports]
-  );
+  const previousResetKeyRef = useRef(null);
+
+  // Collapse back to the first batch only on deliberate result changes
+  // (filters, subject, exploration fetches) signalled by resultResetKey --
+  // not on refresh content churn. The first run is skipped so a remount
+  // with restored results keeps its initialVisibleCount.
+  useEffect(() => {
+    if (previousResetKeyRef.current === null) {
+      previousResetKeyRef.current = resultResetKey;
+      return;
+    }
+    if (previousResetKeyRef.current !== resultResetKey) {
+      previousResetKeyRef.current = resultResetKey;
+      setVisibleReportCount(REPORT_BATCH_SIZE);
+    }
+  }, [resultResetKey]);
 
   useEffect(() => {
-    setVisibleReportCount(REPORT_BATCH_SIZE);
-  }, [reportResultKey]);
+    onVisibleCountChange?.(visibleReportCount);
+  }, [visibleReportCount, onVisibleCountChange]);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), FRESHNESS_TICK_MS);
@@ -850,7 +869,7 @@ function NearbyWorkspace({
           <div>
             <strong>Reports could not be refreshed</strong>
             <span>
-              Showing the last successfully loaded reports. They may not match the current map area.
+              {error}
               {lastUpdatedLabel ? ` Last updated ${lastUpdatedLabel}.` : ''}
             </span>
           </div>

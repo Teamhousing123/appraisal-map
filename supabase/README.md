@@ -18,6 +18,12 @@ Apply `migrations` in filename order:
 5. `20261018000100_add_appraisal_primary_facts.sql` adds the optional `garage_capacity` (text
    code) and `lot_frontage_ft` (`numeric(7,2)`, feet) columns with validated check constraints.
    Existing rows keep `NULL`, which the application shows as "Not recorded"; no value is backfilled.
+6. `20261018000200_add_appraisal_lot_frontage_status.sql` adds the nullable
+   `lot_frontage_status` text column. Its only allowed value is `'not_applicable'`, and a check
+   keeps it `NULL` whenever `lot_frontage_ft` has a measurement. The three frontage states are:
+   a measurement (`lot_frontage_ft` set, status `NULL`), "Not applicable" (`lot_frontage_ft`
+   `NULL`, status `'not_applicable'` — the report states there is no street frontage, such as a
+   condominium unit), and "Not recorded" (both `NULL`). No backfill.
 
 The schema migrations do not delete or rewrite appraisal rows or private files. The policy
 migration changes only policies and grants on `public.appraisals`; it deliberately does not replace
@@ -38,6 +44,10 @@ only and must never run in production).
 - `primary_facts.integration.sql` checks the primary-fact columns: schema shape, every garage
   code, frontage bounds and rejections, legacy readback, edit preservation, version and change-log
   behaviour, filter semantics, and viewer/anonymous access. Every block rolls back.
+- `lot_frontage_status.integration.sql` checks the frontage status column: schema shape and
+  constraints, all three states, status/measurement rejection in both directions, state
+  switching and clearing, change-log naming, range/include-missing filter semantics, and
+  viewer/anonymous access. Every block rolls back.
 
 Run them with the local `psql` (for example through the Supabase CLI's database container) after
 `supabase db reset` has applied the migrations.

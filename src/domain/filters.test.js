@@ -258,6 +258,39 @@ describe('primary fact filters', () => {
     });
   });
 
+  it('treats Not applicable frontage as missing for ranges and counts', () => {
+    const naReports = [
+      { id: 'measured', lot_frontage_ft: 40.5, lot_frontage_status: null },
+      { id: 'na', lot_frontage_ft: null, lot_frontage_status: 'not_applicable' },
+      { id: 'blank', lot_frontage_ft: null, lot_frontage_status: null },
+    ];
+
+    // A range never matches a not-applicable row.
+    expect(ids(filterReports(naReports, { frontageMin: '30' }))).toEqual(['measured']);
+    // Include-missing covers both Not recorded and Not applicable.
+    expect(ids(filterReports(naReports, {
+      frontageMin: '30',
+      includeMissingFrontage: true,
+    }))).toEqual(['measured', 'na', 'blank']);
+    // The omission counter counts it as missing (no measurement).
+    expect(countReportsMissingFilterData(naReports).frontage).toBe(2);
+  });
+
+  it('describes a frontage range as including not recorded or not applicable', () => {
+    const descriptions = describeActiveFilters({
+      frontageMin: '40',
+      frontageMax: '60',
+      includeMissingFrontage: true,
+    });
+    expect(descriptions).toHaveLength(1);
+    expect(descriptions[0].label)
+      .toBe('Frontage: 40–60 ft (including not recorded or not applicable)');
+    expect(describeActiveFilters({
+      livingAreaMin: '1500',
+      includeMissingLivingArea: true,
+    })[0].label).toBe('Living area: at least 1,500 sq ft (including unrecorded)');
+  });
+
   it('describes one-sided ranges and the not-recorded garage choice', () => {
     expect(describeActiveFilters({ livingAreaMin: '1500' })[0].label)
       .toBe('Living area: at least 1,500 sq ft');

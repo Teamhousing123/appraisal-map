@@ -77,6 +77,24 @@ select
   timestamptz '2024-01-01 00:00:00+00' - make_interval(mins => n)
 from generate_series(1, 650) as n;
 
+-- Three rows whose frontage is explicitly Not applicable (status set, ft NULL).
+insert into public.appraisals (
+  id, address, city, latitude, longitude, appraisal_date, effective_date,
+  property_type, lot_frontage_status, created_at
+)
+select
+  gen_random_uuid(),
+  format('%s Synthetic No-Frontage Place', n),
+  'Testville',
+  43.68 + n / 1000.0,
+  -79.42 - n / 1000.0,
+  date '2021-03-01' + n,
+  null,
+  'condominium_apartment',
+  'not_applicable',
+  timestamptz '2026-10-02 12:00:00+00' - make_interval(mins => n)
+from generate_series(1, 3) as n;
+
 -- Archived rows must stay invisible to ordinary reads.
 insert into public.appraisals (
   id, address, city, latitude, longitude, appraisal_date, created_at, deleted_at
@@ -99,5 +117,6 @@ select
   count(*) filter (where deleted_at is not null) as archived_rows,
   count(*) filter (where address ilike '%beyond%' and deleted_at is null) as beyond_rows,
   count(*) filter (where garage_capacity is not null and deleted_at is null) as garage_recorded,
-  count(*) filter (where lot_frontage_ft is not null and deleted_at is null) as frontage_recorded
+  count(*) filter (where lot_frontage_ft is not null and deleted_at is null) as frontage_recorded,
+  count(*) filter (where lot_frontage_status = 'not_applicable' and deleted_at is null) as frontage_not_applicable
 from public.appraisals;

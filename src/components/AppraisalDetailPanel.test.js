@@ -534,3 +534,86 @@ test('shows a facts-schema-required update error and rolls back the replacement 
   expect(uploadObject).toHaveBeenCalledTimes(1);
   await waitFor(() => expect(removeObject).toHaveBeenCalledTimes(1));
 });
+
+test('shows Not applicable frontage in the view and opens the editor with the box ticked', () => {
+  renderPanel({
+    appraisal: { ...appraisal, lot_frontage_ft: null, lot_frontage_status: 'not_applicable' },
+  });
+
+  expect(screen.getByText('Frontage')).toBeInTheDocument();
+  expect(screen.getByText('Not applicable')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  expect(screen.getByLabelText('Frontage not applicable')).toBeChecked();
+  expect(screen.getByLabelText('Lot frontage (feet)')).toBeDisabled();
+});
+
+test('saves a measurement with a null status after unticking Not applicable', async () => {
+  renderPanel({
+    appraisal: { ...appraisal, lot_frontage_ft: null, lot_frontage_status: 'not_applicable' },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.click(screen.getByLabelText('Frontage not applicable'));
+  expect(screen.getByLabelText('Lot frontage (feet)')).toBeEnabled();
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '40.5' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({ lot_frontage_ft: 40.5, lot_frontage_status: null }),
+  );
+});
+
+test('saves Not applicable with a null measurement after ticking the box', async () => {
+  renderPanel({
+    appraisal: { ...appraisal, lot_frontage_ft: 30, lot_frontage_status: null },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.click(screen.getByLabelText('Frontage not applicable'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({ lot_frontage_ft: null, lot_frontage_status: 'not_applicable' }),
+  );
+});
+
+test('sends both frontage fields null when Not applicable is unticked without a measurement', async () => {
+  renderPanel({
+    appraisal: { ...appraisal, lot_frontage_ft: null, lot_frontage_status: 'not_applicable' },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.click(screen.getByLabelText('Frontage not applicable'));
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({ lot_frontage_ft: null, lot_frontage_status: null }),
+  );
+});
+
+test('strips the frontage status from updates when the facts schema is unavailable', async () => {
+  renderPanel({ factsSupported: false });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText(/Report date/i, { selector: 'input' }), {
+    target: { value: '2026-10-01' },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  const updates = updateAppraisal.mock.calls[0][2];
+  expect(updates).not.toHaveProperty('lot_frontage_status');
+  expect(updates).not.toHaveProperty('lot_frontage_ft');
+  expect(updates).not.toHaveProperty('garage_capacity');
+  expect(updates).toMatchObject({ appraisal_date: '2026-10-01' });
+});

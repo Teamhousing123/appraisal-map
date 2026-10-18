@@ -2,7 +2,7 @@ import { formatDateOnly, getReferenceDate, isDateOnly } from './dates';
 import {
   NOT_RECORDED_LABEL,
   formatGarageCapacity,
-  formatLotFrontage,
+  formatLotFrontageFact,
   formatPropertyType,
   formatReportedLivingArea,
   formatYearBuilt,
@@ -54,7 +54,7 @@ export function getPrimaryFacts(
     {
       key: 'frontage',
       label: 'Frontage',
-      value: formatLotFrontage(report.lot_frontage_ft),
+      value: formatLotFrontageFact(report),
     }
   );
 

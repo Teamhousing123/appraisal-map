@@ -15,5 +15,22 @@
   "migrations": [{ "tag": "r2-budget-v1", "new_sqlite_classes": ["StorageBudget"] }],
   "vars": { "SUPABASE_URL": "https://fnixwexxgwlwesdeitut.supabase.co" },
   "triggers": { "crons": ["*/15 * * * *"] },
-  "observability": { "enabled": false }
+  "observability": { "enabled": false },
+  "env": {
+    "staging": {
+      "name": "appraisal-map-staging",
+      "assets": {
+        "directory": "./build-staging",
+        "binding": "ASSETS",
+        "not_found_handling": "single-page-application",
+        "run_worker_first": ["/api/*"]
+      },
+      "r2_buckets": [{ "binding": "FILES", "bucket_name": "appraisal-map-staging" }],
+      "durable_objects": { "bindings": [{ "name": "STORAGE_BUDGET", "class_name": "StorageBudget" }] },
+      "migrations": [{ "tag": "r2-budget-v1", "new_sqlite_classes": ["StorageBudget"] }],
+      "vars": { "SUPABASE_URL": "https://zmjqtmmpjfzrerxyzbfh.supabase.co" },
+      "triggers": { "crons": ["*/15 * * * *"] },
+      "observability": { "enabled": false }
+    }
+  }
 }

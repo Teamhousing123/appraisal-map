@@ -142,7 +142,8 @@ test('keeps previous rows on error and retries with Try again', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
 
   const alert = await screen.findByRole('alert');
-  expect(alert).toHaveTextContent('The search could not finish.');
+  expect(alert).toHaveTextContent('Refresh failed.');
+  expect(alert).toHaveTextContent('may be out of date');
   expect(screen.getByRole('heading', { name: '1 Example Road' })).toBeInTheDocument();
 
   searchAppraisals.mockResolvedValueOnce({ data: reports(2, 'retry'), count: 2, hasMore: false, term: '' });
@@ -263,3 +264,297 @@ test('typing a new term never shows a no-match message before the response', asy
   resolveNew({ data: [], count: 0, hasMore: false, term: 'zzz' });
   expect(await screen.findByText(/No saved reports match “zzz”/)).toBeInTheDocument();
 });
+
+test('shows the frontage Not applicable state on a recovered report', async () => {
+  searchAppraisals.mockResolvedValue({
+    data: [{
+      id: 'report-na',
+      address: '10 Example Road',
+      city: 'Aurora',
+      lot_frontage_ft: null,
+      lot_frontage_status: 'not_applicable',
+      pdf_url: 'private/report-na.pdf',
+    }],
+    count: 1,
+    hasMore: false,
+    term: '',
+  });
+  renderWorkspace();
+
+  await screen.findByRole('heading', { name: '10 Example Road' });
+  expect(screen.getByText('Frontage')).toBeInTheDocument();
+  expect(screen.getByText('Not applicable')).toBeInTheDocument();
+});
+
+const snapshot = (overrides = {}) => ({
+  query: '',
+  appliedTerm: '',
+  reports: reports(200, 'saved'),
+  count: 260,
+  hasMore: true,
+  lastUpdatedAt: new Date('2026-08-10T15:00:00Z'),
+  completedAt: new Date('2026-08-10T15:00:00Z'),
+  factsSupported: true,
+  scrollY: 0,
+  ...overrides,
+});
+
+test('refresh re-reads the full loaded extent atomically and keeps focus on the button', async () => {
+  let resolveRefresh;
+  searchAppraisals.mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve; }));
+  renderWorkspace({ initialState: snapshot() });
+
+  await screen.findByText(/Showing 200 of 260 reports/);
+  const refreshButton = screen.getByRole('button', { name: 'Refresh reports' });
+  refreshButton.focus();
+  fireEvent.click(refreshButton);
+
+  await waitFor(() => expect(refreshButton).toHaveAttribute('aria-disabled', 'true'));
+  expect(refreshButton).toBeEnabled();
+
+  // Clicking again while busy is a no-op guarded by the click handler.
+  fireEvent.click(refreshButton);
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1));
+  expect(searchAppraisals).toHaveBeenCalledWith(
+    supabase,
+    expect.objectContaining({ term: '', offset: 0, pageSize: 200 })
+  );
+
+  await act(async () => {
+    resolveRefresh({ data: reports(200, 'fresh'), count: 260, hasMore: true, term: '' });
+  });
+
+  await screen.findByText(/Showing 200 of 260 reports/);
+  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(screen.getByRole('heading', { name: '1 Example Road' })).toBeInTheDocument();
+  expect(refreshButton).toHaveFocus();
+}, 30000);
+
+test('refresh beyond 1,000 loaded records pages in 500-row steps and keeps all rows on failure', async () => {
+  // Rows without documents keep the 1,100-row render cheap enough for jsdom.
+  const loaded = reports(1100, 'loaded').map(({ pdf_url, ...row }) => row);
+  const page = (offset, pageSize) => ({
+    data: Array.from({ length: pageSize }, (_, index) => ({
+      id: `ref-${offset + index}`,
+      address: `Refreshed ${offset + index}`,
+      city: 'Aurora',
+    })),
+    count: 1500,
+    hasMore: true,
+    term: '',
+  });
+  renderWorkspace({ initialState: snapshot({ reports: loaded, count: 1500 }) });
+
+  await screen.findByText(/Showing 1,100 of 1,500 reports/);
+
+  searchAppraisals.mockImplementation((client, { offset, pageSize }) => (
+    Promise.resolve(page(offset, pageSize))
+  ));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(3));
+  expect(searchAppraisals.mock.calls.map(([, options]) => [options.offset, options.pageSize]))
+    .toEqual([[0, 500], [500, 500], [1000, 100]]);
+  await screen.findByText(/Showing 1,100 of 1,500 reports/);
+  expect(screen.getAllByRole('listitem')).toHaveLength(1100);
+  expect(screen.getByRole('heading', { name: 'Refreshed 0' })).toBeInTheDocument();
+  const statusBefore = screen.getByText(/Showing 1,100 of 1,500 reports/).textContent;
+
+  // A mid-refresh failure leaves the previous extent untouched.
+  searchAppraisals.mockReset();
+  searchAppraisals.mockImplementation((client, { offset, pageSize }) => (
+    offset === 1000
+      ? Promise.reject(new Error('network'))
+      : Promise.resolve(page(offset, pageSize))
+  ));
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+
+  // Role queries are expensive against 1,100 rendered rows; allow slow polls.
+  const alert = await screen.findByRole('alert', {}, { timeout: 30000 });
+  expect(alert).toHaveTextContent('Refresh failed.');
+  expect(alert).toHaveTextContent('may be out of date');
+  expect(screen.getAllByRole('listitem')).toHaveLength(1100);
+  expect(screen.getByRole('heading', { name: 'Refreshed 0' })).toBeInTheDocument();
+  expect(screen.getByText(/Showing 1,100 of 1,500 reports/).textContent).toBe(statusBefore);
+}, 120000);
+
+test('a remounted list resumes a typed-but-unapplied query', async () => {
+  searchAppraisals.mockResolvedValue({ data: reports(2, 'oak'), count: 2, hasMore: false, term: 'oak' });
+  renderWorkspace({ initialState: snapshot({ query: 'oak', appliedTerm: '' }) });
+
+  // The restored rows render immediately and the pending query runs.
+  expect(screen.getByLabelText('Search reports')).toHaveValue('oak');
+  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
+  expect(searchAppraisals).toHaveBeenCalledWith(
+    supabase,
+    expect.objectContaining({ term: 'oak', offset: 0 })
+  );
+  await screen.findByText(/Showing 2 of 2 reports/);
+  expect(screen.getAllByRole('listitem')).toHaveLength(2);
+});
+
+test('a remounted list re-issues a search that was in flight when it unmounted', async () => {
+  let resolveSearch;
+  searchAppraisals.mockImplementation(() => new Promise((resolve) => { resolveSearch = resolve; }));
+  const { unmount } = renderWorkspace();
+
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
+  fireEvent.change(screen.getByLabelText('Search reports'), { target: { value: 'oak' } });
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(2), { timeout: 2000 });
+
+  // Leave while the request is in flight; unmount aborts it.
+  unmount();
+  resolveSearch({ data: [], count: 0, hasMore: false, term: 'oak' });
+
+  searchAppraisals.mockResolvedValue({ data: reports(2, 'oak'), count: 2, hasMore: false, term: 'oak' });
+  renderWorkspace({ initialState: snapshot({ query: 'oak', appliedTerm: '' }) });
+
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(3), { timeout: 2000 });
+  expect(searchAppraisals).toHaveBeenLastCalledWith(
+    supabase,
+    expect.objectContaining({ term: 'oak' })
+  );
+  await screen.findByText(/Showing 2 of 2 reports/);
+});
+
+test('a remounted list still runs its first search when nothing completed before leaving', async () => {
+  const { unmount } = renderWorkspace();
+  // Left during the initial debounce: the snapshot carries no completedAt.
+  unmount();
+  renderWorkspace({
+    initialState: {
+      query: '', appliedTerm: '', reports: [], count: null, hasMore: false,
+      lastUpdatedAt: null, completedAt: null, factsSupported: null, scrollY: 0,
+    },
+  });
+  // A snapshot that never completed a search must not flash the empty state
+  // during the resumed debounce.
+  expect(screen.queryByText('No active reports are available.')).not.toBeInTheDocument();
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
+  expect(searchAppraisals).toHaveBeenCalledWith(
+    supabase,
+    expect.objectContaining({ term: '', offset: 0 })
+  );
+});
+
+test('a remounted list re-runs an initial search that was in flight on unmount', async () => {
+  searchAppraisals.mockImplementation(() => new Promise(() => {}));
+  const { unmount } = renderWorkspace();
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
+  // Left with the initial request still in flight; unmount aborts it.
+  unmount();
+  renderWorkspace({
+    initialState: {
+      query: '', appliedTerm: '', reports: [], count: null, hasMore: false,
+      lastUpdatedAt: null, completedAt: null, factsSupported: null, scrollY: 0,
+    },
+  });
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(2), { timeout: 2000 });
+  expect(searchAppraisals).toHaveBeenLastCalledWith(
+    supabase,
+    expect.objectContaining({ term: '', offset: 0 })
+  );
+});
+
+test('a refresh superseded by a new query stops paging the old term', async () => {
+  const loaded = reports(600, 'loaded').map(({ pdf_url, ...row }) => row);
+  renderWorkspace({ initialState: snapshot({ reports: loaded, count: 900 }) });
+  await screen.findByText(/Showing 600 of 900 reports/);
+
+  // Look the controls up by visible text/label instead of role+name: computing
+  // accessible names over the 600-row list is expensive enough to starve the
+  // debounce timer. Accessible-name coverage lives in the small-fixture tests.
+  const refreshButton = screen.getByText('Refresh reports', { selector: 'button' });
+  const searchInput = screen.getByLabelText('Search reports');
+
+  // Pending like a real request: resolves only via its caller and rejects
+  // when the request controller aborts it, like real searchAppraisals.
+  searchAppraisals.mockImplementation((client, options) => {
+    if (options.term === 'aurora') {
+      return Promise.resolve({
+        data: reports(3, 'aurora'),
+        count: 3,
+        hasMore: false,
+        term: 'aurora',
+        factsSupported: true,
+      });
+    }
+    return new Promise((resolve, reject) => {
+      options.signal?.addEventListener('abort', () =>
+        reject(new DOMException('The operation was aborted.', 'AbortError')));
+    });
+  });
+
+  fireEvent.click(refreshButton);
+  expect(searchAppraisals).toHaveBeenCalledTimes(1);
+  expect(searchAppraisals).toHaveBeenCalledWith(
+    supabase,
+    expect.objectContaining({ term: '', offset: 0, pageSize: 500 })
+  );
+
+  // Supersede mid-flight: the new query replaces the request controller,
+  // aborting the refresh before its second page can issue.
+  fireEvent.change(searchInput, { target: { value: 'aurora' } });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 700)); });
+
+  expect(searchAppraisals).toHaveBeenCalledTimes(2);
+  expect(searchAppraisals).toHaveBeenLastCalledWith(
+    supabase,
+    expect.objectContaining({ term: 'aurora', offset: 0 })
+  );
+  expect(searchAppraisals.mock.calls
+    .filter(([, options]) => options.term === '' && options.offset >= 500)).toHaveLength(0);
+
+  await screen.findByText(/Showing 3 of 3 reports/);
+  expect(screen.getByText(/matching “aurora”/)).toBeInTheDocument();
+}, 30000);
+
+test('a remounted list with an applied term restores rows without searching and snapshots on exit', async () => {
+  const scrollSpy = jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+  const onShowMap = jest.fn();
+  const lastUpdatedAt = new Date('2026-08-10T15:00:00Z');
+  renderWorkspace({
+    initialState: snapshot({
+      query: 'oak',
+      appliedTerm: 'oak',
+      count: 250,
+      lastUpdatedAt,
+      scrollY: 120,
+    }),
+    onShowMap,
+  });
+
+  await screen.findByText(/Showing 200 of 250 reports matching “oak”/);
+  expect(screen.getByLabelText('Search reports')).toHaveValue('oak');
+  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(screen.getByRole('heading', { name: 'Your reports' })).toHaveFocus();
+  expect(scrollSpy).toHaveBeenCalledWith(0, 120);
+
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+  expect(searchAppraisals).not.toHaveBeenCalled();
+
+  searchAppraisals.mockResolvedValueOnce({ data: reports(10, 'more'), count: 250, hasMore: false, term: 'oak', factsSupported: true });
+  fireEvent.click(screen.getByRole('button', { name: 'Load 100 more' }));
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1));
+  expect(searchAppraisals).toHaveBeenLastCalledWith(
+    supabase,
+    expect.objectContaining({ term: 'oak', offset: 200 })
+  );
+  await screen.findByText(/Showing 210 of 250 reports/);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  expect(onShowMap).toHaveBeenCalledWith(expect.objectContaining({
+    query: 'oak',
+    appliedTerm: 'oak',
+    count: 250,
+    hasMore: false,
+    factsSupported: true,
+    completedAt: expect.any(Date),
+    scrollY: expect.any(Number),
+  }));
+  expect(onShowMap.mock.calls[0][0].reports).toHaveLength(210);
+  expect(onShowMap.mock.calls[0][0].lastUpdatedAt).toBeInstanceOf(Date);
+  scrollSpy.mockRestore();
+}, 30000);

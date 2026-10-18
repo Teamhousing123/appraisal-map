@@ -2,7 +2,7 @@ import React from 'react';
 import '@testing-library/jest-dom';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import MapView from './Map';
-import { fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
+import { fetchAppraisalsInBounds, restoreAppraisal, searchAppraisals } from './services/appraisalService';
 import {
   getAddressPredictions,
   resolveAddressSuggestion,
@@ -20,6 +20,8 @@ const mockMap = {
     getSouthWest: () => ({ lat: () => mockBounds.south, lng: () => mockBounds.west }),
   }),
   getZoom: () => 10,
+  getCenter: () => ({ toJSON: () => ({ lat: 43.7, lng: -79.4 }) }),
+  setCenter: jest.fn(),
   fitBounds: jest.fn(),
   panBy: jest.fn(),
   panTo: jest.fn(),
@@ -49,6 +51,7 @@ jest.mock('./services/appraisalService', () => ({
   ...jest.requireActual('./services/appraisalService'),
   fetchAppraisalsInBounds: jest.fn(),
   restoreAppraisal: jest.fn(),
+  searchAppraisals: jest.fn(),
 }));
 
 jest.mock('./domain/geocoding', () => ({
@@ -166,6 +169,7 @@ const report = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  window.location.hash = '';
   window.google = { maps: {} };
   mockSkipIdle = false;
   mockBounds = { north: 44, south: 43, east: -78, west: -80 };
@@ -182,6 +186,7 @@ beforeEach(() => {
     data: { ...report, deleted_at: null, deleted_by: null, version: 3 },
     error: null,
   });
+  searchAppraisals.mockResolvedValue({ data: [], count: 0, hasMore: false, term: '' });
   supabase.storage.from.mockReset();
 });
 
@@ -520,3 +525,305 @@ test('updates a selected candidate’s primary facts after the report is edited'
   expect(within(rowFor('Garage capacity')).getByText('Double')).toBeInTheDocument();
   expect(within(rowFor('Lot frontage')).getByText('40.5 ft')).toBeInTheDocument();
 });
+
+test('shows the frontage Not applicable state on a report card', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: [{ ...report, lot_frontage_ft: null, lot_frontage_status: 'not_applicable' }],
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  render(
+    <MapView
+      session={{ user: { app_metadata: { role: 'editor' } } }}
+      showToast={jest.fn()}
+    />
+  );
+
+  const card = await screen.findByRole('article');
+  expect(within(card).getByText('Frontage')).toBeInTheDocument();
+  expect(within(card).getByText('Not applicable')).toBeInTheDocument();
+});
+
+test('a failed refresh keeps the last complete results and warns they may be out of date', async () => {
+  const second = { ...report, id: 'report-2', address: '20 Second Road' };
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: [report, second],
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '10 Example Road' });
+  await screen.findByRole('heading', { name: '20 Second Road' });
+  const statusBefore = screen.getByText(/Showing 2 of 2 matching reports/).textContent;
+  const updatedTime = statusBefore.match(/Updated (.+)$/)?.[1];
+
+  fetchAppraisalsInBounds.mockImplementation((client, bounds, options) => {
+    options?.onProgress?.({ data: [report], count: 2 });
+    return Promise.reject(new Error('network'));
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+
+  expect(await screen.findByText(/may be out of date/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '20 Second Road' })).toBeInTheDocument();
+  const banner = screen.getByText(/Last updated/);
+  expect(banner.textContent).toContain(updatedTime);
+});
+
+test('an in-progress fetch never replaces complete results and a failed pan keeps them', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: [report],
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '10 Example Road' });
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1));
+
+  const pending = [];
+  fetchAppraisalsInBounds.mockImplementation((client, bounds, options) => {
+    options?.onProgress?.({ data: [{ ...report, id: 'partial-b', address: '1 Partial Road' }], count: 1 });
+    return new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  });
+
+  mockBounds = { north: 50, south: 49, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // The first page of the next fetch must not displace the complete result.
+  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: '1 Partial Road' })).not.toBeInTheDocument();
+
+  // Pan again before that request settles: it is superseded, and the new one fails.
+  mockBounds = { north: 60, south: 59, east: -60, west: -62 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+  await act(async () => { pending[1].reject(new Error('network')); });
+
+  expect(await screen.findByText(/may be out of date/)).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.getAllByText(/may be out of date/)).toHaveLength(1);
+
+  // The superseded request can neither fail nor succeed over the current results.
+  await act(async () => { pending[0].reject(new Error('network')); });
+  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  await act(async () => {
+    pending[0].resolve({
+      data: [{ ...report, id: 'stale-b', address: '5 Stale Road' }],
+      truncated: false,
+      metadataSupported: true,
+      factsSupported: true,
+    });
+  });
+  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: '5 Stale Road' })).not.toBeInTheDocument();
+});
+
+test('a failed first load clears the partial page and shows the generic error', async () => {
+  let rejectFetch;
+  fetchAppraisalsInBounds.mockImplementation((client, bounds, options) => {
+    options?.onProgress?.({ data: [report], count: 2 });
+    return new Promise((resolve, reject) => { rejectFetch = reject; });
+  });
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+
+  expect(await screen.findByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.getByText(/1 of 2 loaded so far/)).toBeInTheDocument();
+
+  await act(async () => { rejectFetch(new Error('network')); });
+
+  expect(await screen.findByRole('alert')).toHaveTextContent('Check your connection and retry this map area.');
+  expect(screen.queryByRole('heading', { name: '10 Example Road' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Updated/)).not.toBeInTheDocument();
+});
+
+const subjectLookup = () => {
+  window.google = {
+    maps: {
+      places: { AutocompleteSessionToken: class AutocompleteSessionToken {} },
+      LatLngBounds: class LatLngBounds {},
+    },
+  };
+  getAddressPredictions.mockResolvedValue([{
+    place_id: 'subject-place',
+    placeId: 'subject-place',
+    description: '30 Subject Street, Aurora, ON',
+  }]);
+  resolveAddressSuggestion.mockResolvedValue({
+    placeId: 'subject-place',
+    place_id: 'subject-place',
+    formattedAddress: '30 Subject Street, Aurora, ON, Canada',
+    latitude: 43.7,
+    longitude: -79.4,
+    components: {
+      streetNumber: '30',
+      route: 'Subject Street',
+      streetAddress: '30 Subject Street',
+      city: 'Aurora',
+      administrativeAreaCode: 'ON',
+      countryCode: 'CA',
+    },
+  });
+};
+
+const chooseSubject = async () => {
+  fireEvent.change(screen.getByPlaceholderText(/Search addresses in/i), {
+    target: { value: '30 Subject Street' },
+  });
+  fireEvent.mouseDown(await screen.findByRole('option', {
+    name: '30 Subject Street, Aurora, ON',
+  }));
+  await waitFor(() => expect(
+    screen.getAllByRole('checkbox', { name: /Select as candidate/ })[0]
+  ).toBeEnabled(), { timeout: 3000 });
+};
+
+test('returning from the report list restores scroll context, visible count, and candidates', async () => {
+  subjectLookup();
+  const many = Array.from({ length: 70 }, (_, index) => ({
+    ...report,
+    id: `report-${index + 1}`,
+    address: `${index + 1} Test Row`,
+    property_type: 'detached',
+  }));
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: many,
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  searchAppraisals.mockResolvedValue({ data: many.slice(0, 5), count: 5, hasMore: false, term: '' });
+  const scrollSpy = jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '1 Test Row' });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
+
+  await chooseSubject();
+  fireEvent.click(screen.getAllByRole('checkbox', { name: /Select as candidate/ })[0]);
+  expect(screen.getByRole('checkbox', { name: 'Selected for comparison' })).toBeChecked();
+  const filterRegion = screen.getByRole('region', { name: 'Report filters' });
+  fireEvent.change(within(filterRegion).getByLabelText('Property type'), { target: { value: 'detached' } });
+  fireEvent.click(screen.getByRole('button', { name: /Show 10 more/ }));
+  expect(screen.getAllByRole('heading', { name: /Test Row/ })).toHaveLength(70);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Report list' }));
+  await screen.findByRole('heading', { name: 'Your reports' });
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+
+  await screen.findByRole('heading', { name: '1 Test Row' });
+  expect(screen.getAllByRole('heading', { name: /Test Row/ })).toHaveLength(70);
+  expect(screen.queryByRole('button', { name: /Show \d+ more/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('checkbox', { name: 'Selected for comparison' })).toBeChecked();
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
+  expect(within(screen.getByRole('region', { name: 'Report filters' })).getByLabelText('Property type'))
+    .toHaveValue('detached');
+  expect(screen.getByRole('button', { name: 'Report list' })).toHaveFocus();
+  scrollSpy.mockRestore();
+}, 30000);
+
+test('a data change invalidates the saved report-list context', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: [report],
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  searchAppraisals.mockResolvedValue({
+    data: [{ ...report, pdf_url: 'private/report.pdf' }],
+    count: 1,
+    hasMore: false,
+    term: '',
+  });
+  const scrollSpy = jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
+
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '10 Example Road' });
+
+  // First open performs the initial search.
+  fireEvent.click(screen.getByRole('button', { name: 'Report list' }));
+  await screen.findByRole('heading', { name: 'Your reports' });
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
+  await screen.findByRole('listitem');
+
+  // Back to the map and straight into the list again: restored, no search.
+  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  await screen.findByRole('button', { name: 'Report list' });
+  fireEvent.click(screen.getByRole('button', { name: 'Report list' }));
+  await screen.findByRole('heading', { name: 'Your reports' });
+  await screen.findByRole('listitem');
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
+  expect(searchAppraisals).toHaveBeenCalledTimes(1);
+
+  // After an update, the next list open must search again.
+  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  fireEvent.click(await screen.findByRole('button', { name: /10 Example Road, Aurora/i }));
+  fireEvent.click(await screen.findByRole('button', { name: 'Save test update' }));
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+  fireEvent.click(screen.getByRole('button', { name: 'Report list' }));
+  await screen.findByRole('heading', { name: 'Your reports' });
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(2), { timeout: 2000 });
+  scrollSpy.mockRestore();
+}, 30000);
+
+
+test('expansion survives a same-area refresh but resets on filters and new-bounds fetches', async () => {
+  const many = Array.from({ length: 70 }, (_, i) => ({
+    ...report,
+    id: `exp-${i + 1}`,
+    address: `${i + 1} Expanded Row`,
+    property_type: 'detached',
+  }));
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: many,
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '1 Expanded Row' });
+
+  fireEvent.click(screen.getByRole('button', { name: /Show 10 more/ }));
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(70);
+
+  // Refresh returns the same set plus one new record — expansion retained.
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: [...many, { ...report, id: 'exp-71', address: '71 Expanded Row', property_type: 'detached' }],
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+  await screen.findByText(/Showing 70 of 71 matching reports/);
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(70);
+
+  // A deliberate filter change collapses back to the first batch.
+  const filterRegion = screen.getByRole('region', { name: 'Report filters' });
+  fireEvent.change(within(filterRegion).getByLabelText('Property type'), { target: { value: 'detached' } });
+  await waitFor(() =>
+    expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(60));
+  expect(screen.getByRole('button', { name: /Show 11 more/ })).toBeInTheDocument();
+
+  // Expand again; a user exploration fetch (new bounds idle) resets it too.
+  fireEvent.click(screen.getByRole('button', { name: /Show 11 more/ }));
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(71);
+
+  fetchAppraisalsInBounds.mockClear();
+  fetchAppraisalsInBounds.mockResolvedValue({
+    data: [...many, { ...report, id: 'exp-71', address: '71 Expanded Row', property_type: 'detached' }],
+    truncated: false,
+    metadataSupported: true,
+    factsSupported: true,
+  });
+  mockBounds = { north: 50, south: 49, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1), { timeout: 3000 });
+  await waitFor(() =>
+    expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(60));
+}, 30000);

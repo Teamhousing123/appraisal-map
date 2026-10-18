@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import AddressPicker from './components/AddressPicker';
 import AppraisalFormFields from './components/AppraisalFormFields';
 import {
+  LOT_FRONTAGE_STATUS_NOT_APPLICABLE,
   normalizeOptionalDecimal,
   normalizeOptionalInteger,
   validatePropertyDetails,
@@ -45,6 +46,7 @@ const EMPTY_PROPERTY_DETAILS = {
   yearBuilt: '',
   garageCapacity: '',
   lotFrontageFt: '',
+  lotFrontageNotApplicable: false,
 };
 
 const MANUAL_PLACEMENT_ERROR_CODES = new Set([
@@ -115,6 +117,7 @@ function AddAppraisal({
     || propertyDetails.yearBuilt
     || propertyDetails.garageCapacity
     || propertyDetails.lotFrontageFt
+    || propertyDetails.lotFrontageNotApplicable
     || photo
     || pdf
     || folderFiles.length
@@ -334,6 +337,9 @@ function AddAppraisal({
     const factsPayload = {
       garage_capacity: normalizedDetails.garageCapacity,
       lot_frontage_ft: normalizedDetails.lotFrontageFt,
+      lot_frontage_status: propertyDetails.lotFrontageNotApplicable
+        ? LOT_FRONTAGE_STATUS_NOT_APPLICABLE
+        : null,
     };
     const hasEnteredMetadata = Object.values(metadataPayload).some((value) => value !== null);
     const hasEnteredFacts = Object.values(factsPayload).some((value) => value !== null);
@@ -342,6 +348,7 @@ function AddAppraisal({
       ...validatePropertyDetails({
         ...normalizedDetails,
         lotFrontageFt: propertyDetails.lotFrontageFt,
+        lotFrontageNotApplicable: propertyDetails.lotFrontageNotApplicable,
       }),
     };
 

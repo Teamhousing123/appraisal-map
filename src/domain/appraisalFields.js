@@ -1,6 +1,8 @@
 import { isDateOnly, normalizeOptionalDateOnly } from './dates';
 
 export const NOT_RECORDED_LABEL = 'Not recorded';
+export const NOT_APPLICABLE_LABEL = 'Not applicable';
+export const LOT_FRONTAGE_STATUS_NOT_APPLICABLE = 'not_applicable';
 export const MIN_YEAR_BUILT = 1600;
 export const MAX_DATABASE_YEAR_BUILT = 2100;
 export const MAX_REPORTED_LIVING_AREA_SQ_FT = 100000;
@@ -77,7 +79,7 @@ export function normalizeOptionalDecimal(value) {
 const LOT_FRONTAGE_PATTERN = /^(\d+(\.\d{0,2})?|\.\d{1,2})$/;
 
 export function validatePropertyDetails(
-  { propertyType, reportedLivingAreaSqFt, yearBuilt, garageCapacity, lotFrontageFt } = {},
+  { propertyType, reportedLivingAreaSqFt, yearBuilt, garageCapacity, lotFrontageFt, lotFrontageNotApplicable } = {},
   { currentYear = new Date().getFullYear() } = {}
 ) {
   const errors = {};
@@ -119,11 +121,12 @@ export function validatePropertyDetails(
     errors.garageCapacity = 'Choose a valid garage capacity.';
   }
 
-  if (
-    lotFrontageFt !== null
+  const frontageEntered = lotFrontageFt !== null
     && lotFrontageFt !== undefined
-    && String(lotFrontageFt).trim() !== ''
-  ) {
+    && String(lotFrontageFt).trim() !== '';
+  if (lotFrontageNotApplicable && frontageEntered) {
+    errors.lotFrontageFt = 'Clear the frontage measurement or untick Frontage not applicable. A report cannot record both.';
+  } else if (frontageEntered) {
     let frontage;
     if (typeof lotFrontageFt === 'string') {
       const stripped = lotFrontageFt.replace(/,/g, '').trim();
@@ -160,6 +163,12 @@ export function normalizeAppraisalFields(fields = {}) {
     year_built: normalizeOptionalInteger(fields.year_built),
     garage_capacity: normalizeOptionalString(fields.garage_capacity),
     lot_frontage_ft: normalizeOptionalDecimal(fields.lot_frontage_ft),
+    lot_frontage_status: (() => {
+      const status = normalizeOptionalString(fields.lot_frontage_status);
+      return status !== null && status.toLowerCase() === LOT_FRONTAGE_STATUS_NOT_APPLICABLE
+        ? LOT_FRONTAGE_STATUS_NOT_APPLICABLE
+        : null;
+    })(),
   };
 }
 
@@ -191,6 +200,17 @@ export function validateAppraisalFields(
   if (propertyErrors.garageCapacity) errors.garage_capacity = propertyErrors.garageCapacity;
   if (propertyErrors.lotFrontageFt) errors.lot_frontage_ft = propertyErrors.lotFrontageFt;
 
+  const rawStatus = normalizeOptionalString(fields.lot_frontage_status);
+  if (rawStatus !== null && normalized.lot_frontage_status === null) {
+    errors.lot_frontage_status = 'Frontage status must be Not applicable or blank.';
+  }
+  if (
+    normalized.lot_frontage_status === LOT_FRONTAGE_STATUS_NOT_APPLICABLE
+    && normalized.lot_frontage_ft !== null
+  ) {
+    errors.lot_frontage_ft = 'Clear the frontage measurement or untick Frontage not applicable. A report cannot record both.';
+  }
+
   return errors;
 }
 
@@ -218,4 +238,15 @@ export function formatLotFrontage(value, fallback = NOT_RECORDED_LABEL) {
   const normalized = normalizeOptionalDecimal(value);
   if (!Number.isFinite(normalized) || normalized <= 0) return fallback;
   return `${normalized.toLocaleString('en-CA', { maximumFractionDigits: LOT_FRONTAGE_FRACTION_DIGITS })} ft`;
+}
+
+export function formatLotFrontageFact(report = {}, fallback = NOT_RECORDED_LABEL) {
+  const frontage = normalizeOptionalDecimal(report.lot_frontage_ft);
+  if (
+    report.lot_frontage_status === LOT_FRONTAGE_STATUS_NOT_APPLICABLE
+    && (!Number.isFinite(frontage) || frontage <= 0)
+  ) {
+    return NOT_APPLICABLE_LABEL;
+  }
+  return formatLotFrontage(report.lot_frontage_ft, fallback);
 }
