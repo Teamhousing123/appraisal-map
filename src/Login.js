@@ -143,12 +143,10 @@ function Login({ supportEmail = '', message = '' }) {
 
           <section className="login-card__support" aria-labelledby="login-help-title">
             <h2 id="login-help-title">Need help signing in?</h2>
-            <p>Staff accounts are provided by your organization.</p>
             {supportEmail
-              ? <a href={`mailto:${supportEmail}`}>Contact your administrator</a>
+              ? <p><a href={`mailto:${supportEmail}`}>Contact your administrator for access or password assistance.</a></p>
               : <p>Contact your administrator for access or password assistance.</p>}
           </section>
-          <p className="login-security">Authorized staff access only</p>
         </div>
       </section>
     </main>

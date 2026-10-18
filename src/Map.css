@@ -605,13 +605,6 @@
   width: min(760px, calc(100% - 32px));
 }
 
-.workspace-panel__close {
-  position: absolute;
-  top: 14px;
-  right: 14px;
-  z-index: 4;
-}
-
 .nearby-workspace,
 .comparison-view,
 .detail-panel {

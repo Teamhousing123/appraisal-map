@@ -34,7 +34,7 @@ test('signs in with a trimmed email and keeps password visibility user controlle
     email: 'staff@example.com',
     password: 'test-password',
   }));
-  expect(screen.getByRole('link', { name: 'Contact your administrator' }))
+  expect(screen.getByRole('link', { name: 'Contact your administrator for access or password assistance.' }))
     .toHaveAttribute('href', 'mailto:help@example.com');
 });
 

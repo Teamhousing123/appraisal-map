@@ -748,6 +748,7 @@ function NearbyWorkspace({
   onRemoveCandidate,
   onRetry,
   onRefresh,
+  onClose,
   lastUpdatedAt = null,
   factsSupported = null,
   initialVisibleCount = null,
@@ -817,7 +818,7 @@ function NearbyWorkspace({
       )}
       <div hidden={view === 'compare'}>
     <section className="nearby-workspace" aria-labelledby="nearby-title">
-      <div className="workspace-heading">
+      <div className="workspace-heading nearby-workspace__heading">
         <h2 id="nearby-title">{subject ? 'Reports near this property' : 'Reports in this map area'}</h2>
         <div className="workspace-heading__meta">
           <span className="result-count" aria-label={`${reports.length} matching reports`}>
@@ -832,6 +833,16 @@ function NearbyWorkspace({
           >
             Refresh
           </button>
+          {onClose && (
+            <button
+              type="button"
+              className="button button--quiet"
+              aria-label="Close workspace panel"
+              onClick={onClose}
+            >
+              Close
+            </button>
+          )}
         </div>
       </div>
       {subject && <p className="workspace-intro">Nearby reports are starting points, not selected comparables.</p>}

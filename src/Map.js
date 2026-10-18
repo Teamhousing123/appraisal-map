@@ -1605,20 +1605,6 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
               };
             }}
           >
-            <button
-              type="button"
-              className="workspace-panel__close button button--quiet"
-              hidden={panelMode !== 'nearby'}
-              onClick={() => {
-                runWorkspaceAction(() => {
-                  if (panelMode === 'nearby') setPanelOpen(false);
-                  else setPanelMode('nearby');
-                });
-              }}
-              aria-label={panelMode === 'nearby' ? 'Close workspace panel' : 'Back to reports'}
-            >
-              {panelMode === 'nearby' ? 'Close' : 'Back'}
-            </button>
             {panelMode === 'add' ? (
               <Suspense fallback={<div className="panel-loader" role="status">Loading form…</div>}>
                 <AddAppraisal
@@ -1678,6 +1664,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 onApplyFilters={handleApplyFilters}
                 onResetFilters={handleResetFilters}
                 onRefresh={refreshCurrentBounds}
+                onClose={() => runWorkspaceAction(() => setPanelOpen(false))}
                 candidateIds={candidateIds}
                 candidates={decoratedCandidates}
                 onToggleCandidate={handleToggleCandidate}
