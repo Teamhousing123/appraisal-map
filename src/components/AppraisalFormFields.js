@@ -202,7 +202,7 @@ function AppraisalFormFields({
                 inputMode="decimal"
                 placeholder="e.g. 40.5"
                 value={propertyDetails.lotFrontageFt ?? ''}
-                disabled={disabled}
+                disabled={disabled || Boolean(propertyDetails.lotFrontageNotApplicable)}
                 aria-invalid={Boolean(errors.lotFrontageFt)}
                 aria-describedby={[
                   'appraisal-lot-frontage-help',
@@ -222,6 +222,26 @@ function AppraisalFormFields({
               id="appraisal-lot-frontage-error"
               message={errors.lotFrontageFt}
             />
+            <label className="appraisal-checkbox" htmlFor="appraisal-lot-frontage-not-applicable">
+              <input
+                id="appraisal-lot-frontage-not-applicable"
+                type="checkbox"
+                checked={Boolean(propertyDetails.lotFrontageNotApplicable)}
+                disabled={disabled}
+                aria-describedby="appraisal-lot-frontage-not-applicable-help"
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  onPropertyDetailChange('lotFrontageNotApplicable', checked);
+                  if (checked) onPropertyDetailChange('lotFrontageFt', '');
+                }}
+              />
+              <span>Frontage not applicable</span>
+            </label>
+            <p id="appraisal-lot-frontage-not-applicable-help" className="appraisal-field-hint">
+              Tick only when the report states there is no street frontage to measure,
+              such as a condominium unit. Leave both blank when the report does not
+              record frontage.
+            </p>
           </div>
         </div>
       </fieldset>

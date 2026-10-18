@@ -19,6 +19,7 @@ import {
   getMetadataSchemaCapability,
   insertAppraisal,
   isFactsSchemaRequiredError,
+  isMissingFactsSchemaError,
   isMissingFoundationSchemaError,
   isMissingMetadataSchemaError,
   resetAppraisalSchemaCapabilities,
@@ -254,6 +255,23 @@ describe('appraisal service schema compatibility', () => {
     expect(selectedColumns).toEqual([CURRENT_APPRAISAL_SELECT, NO_FACTS_SELECT]);
     expect(getFactsSchemaCapability()).toBe('unsupported');
     expect(getMetadataSchemaCapability()).toBe('supported');
+  });
+
+  it('selects the frontage status with the facts columns and drops it on the legacy fallback', () => {
+    expect(FACTS_APPRAISAL_COLUMNS).toContain('lot_frontage_status');
+    expect(CURRENT_APPRAISAL_SELECT).toContain('lot_frontage_status');
+    expect(NO_FACTS_SELECT).not.toContain('lot_frontage_status');
+  });
+
+  it('recognizes a missing frontage-status column as a facts schema gap', () => {
+    expect(isMissingFactsSchemaError({
+      code: 'PGRST204',
+      message: "Could not find the 'lot_frontage_status' column in the schema cache",
+    })).toBe(true);
+    expect(isMissingFactsSchemaError({
+      code: '42703',
+      message: 'column lot_frontage_status does not exist',
+    })).toBe(true);
   });
 
   it('falls through both additive schemas without masking authorization failures', async () => {
@@ -751,6 +769,50 @@ describe('safe appraisal mutations', () => {
       error: null,
       factsSupported: false,
     });
+  });
+
+  it('fails clearly instead of dropping a frontage Not applicable status the database cannot store', async () => {
+    const missingFacts = {
+      code: 'PGRST204',
+      message: "Could not find the 'lot_frontage_status' column in the schema cache",
+    };
+    const { client, table } = createMutationClient([{ data: null, error: missingFacts }]);
+
+    const result = await insertAppraisal(client, {
+      address: '10 Example Road',
+      lot_frontage_ft: null,
+      lot_frontage_status: 'not_applicable',
+    });
+
+    expect(isFactsSchemaRequiredError(result.error)).toBe(true);
+    expect(result.error).toMatchObject({
+      code: 'APPRAISAL_FACTS_SCHEMA_REQUIRED',
+      commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+    });
+    expect(result).toMatchObject({ data: null, factsSupported: false });
+    expect(table.insert).toHaveBeenCalledTimes(1);
+  });
+
+  it('retries an insert without the frontage status when every fact is unrecorded', async () => {
+    const missingFacts = {
+      code: 'PGRST204',
+      message: "Could not find the 'lot_frontage_status' column in the schema cache",
+    };
+    const { client, table } = createMutationClient([
+      { data: null, error: missingFacts },
+      { data: { id: 'legacy-id' }, error: null },
+    ]);
+
+    const result = await insertAppraisal(client, {
+      address: '10 Example Road',
+      garage_capacity: null,
+      lot_frontage_ft: null,
+      lot_frontage_status: null,
+    });
+
+    expect(table.insert).toHaveBeenCalledTimes(2);
+    expect(table.insert).toHaveBeenLastCalledWith([{ address: '10 Example Road' }]);
+    expect(result).toMatchObject({ data: { id: 'legacy-id' }, error: null, factsSupported: false });
   });
 
   it('fails an update with recorded facts and retries an update whose facts are unrecorded', async () => {

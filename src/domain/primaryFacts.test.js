@@ -73,6 +73,20 @@ describe('primary facts', () => {
     );
   });
 
+  it('reports Not applicable frontage as a recorded fact', () => {
+    const report = {
+      lot_frontage_ft: null,
+      lot_frontage_status: 'not_applicable',
+    };
+    const frontage = getPrimaryFacts(report).find((fact) => fact.key === 'frontage');
+    expect(frontage).toMatchObject({
+      label: 'Frontage',
+      value: 'Not applicable',
+      recorded: true,
+    });
+    expect(formatPrimaryFactsSummary(report)).toContain('Frontage: Not applicable');
+  });
+
   it('builds a copyable address that keeps the recorded unit', () => {
     expect(formatCopyableAddress({
       address: '2 Synthetic Facts Court, Unit 7',

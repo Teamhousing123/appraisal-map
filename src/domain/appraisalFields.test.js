@@ -5,6 +5,7 @@ import {
   PROPERTY_TYPES,
   formatGarageCapacity,
   formatLotFrontage,
+  formatLotFrontageFact,
   formatPropertyType,
   formatReportedLivingArea,
   normalizeAppraisalFields,
@@ -75,6 +76,7 @@ describe('appraisal field definitions', () => {
       year_built: 2004,
       garage_capacity: null,
       lot_frontage_ft: null,
+      lot_frontage_status: null,
     });
 
     expect(validateAppraisalFields({ effective_date: '2026-02-30' }))
@@ -134,6 +136,64 @@ describe('appraisal field definitions', () => {
   it('formats recorded area while keeping missing values explicit', () => {
     expect(formatReportedLivingArea(1850)).toBe('1,850 sq ft');
     expect(formatReportedLivingArea(null)).toBe('Not recorded');
+  });
+
+  it('normalizes and validates lot frontage status as Not applicable or blank', () => {
+    expect(normalizeAppraisalFields({ lot_frontage_status: 'not_applicable' }))
+      .toEqual(expect.objectContaining({ lot_frontage_status: 'not_applicable' }));
+    expect(normalizeAppraisalFields({ lot_frontage_status: ' Not_Applicable ' }))
+      .toEqual(expect.objectContaining({ lot_frontage_status: 'not_applicable' }));
+    for (const value of ['', '  ', null, undefined, 'bogus']) {
+      expect(normalizeAppraisalFields({ lot_frontage_status: value }))
+        .toEqual(expect.objectContaining({ lot_frontage_status: null }));
+    }
+
+    expect(validateAppraisalFields({ lot_frontage_status: 'bogus' }))
+      .toHaveProperty('lot_frontage_status', 'Frontage status must be Not applicable or blank.');
+    expect(validateAppraisalFields({
+      lot_frontage_status: 'not_applicable',
+      lot_frontage_ft: '40.5',
+    })).toHaveProperty(
+      'lot_frontage_ft',
+      'Clear the frontage measurement or untick Frontage not applicable. A report cannot record both.'
+    );
+    expect(validateAppraisalFields({ lot_frontage_status: 'not_applicable' })).toEqual({});
+    expect(validateAppraisalFields({
+      lot_frontage_status: 'not_applicable',
+      lot_frontage_ft: null,
+    })).toEqual({});
+  });
+
+  it('keeps a measurement and Not applicable mutually exclusive in property details', () => {
+    expect(validatePropertyDetails({
+      lotFrontageNotApplicable: true,
+      lotFrontageFt: '40.5',
+    })).toHaveProperty(
+      'lotFrontageFt',
+      'Clear the frontage measurement or untick Frontage not applicable. A report cannot record both.'
+    );
+    expect(validatePropertyDetails({
+      lotFrontageNotApplicable: true,
+      lotFrontageFt: '',
+    })).toEqual({});
+    expect(validatePropertyDetails({ lotFrontageNotApplicable: true })).toEqual({});
+    expect(validatePropertyDetails({
+      lotFrontageNotApplicable: false,
+      lotFrontageFt: '40.5',
+    })).toEqual({});
+  });
+
+  it('formats the frontage fact across measured, not applicable, and not recorded states', () => {
+    expect(formatLotFrontageFact({ lot_frontage_status: 'not_applicable', lot_frontage_ft: null }))
+      .toBe('Not applicable');
+    expect(formatLotFrontageFact({ lot_frontage_ft: 40.5, lot_frontage_status: null }))
+      .toBe('40.5 ft');
+    expect(formatLotFrontageFact({ lot_frontage_ft: null, lot_frontage_status: null }))
+      .toBe('Not recorded');
+    expect(formatLotFrontageFact({})).toBe('Not recorded');
+    // A measured value always wins if a row somehow holds both.
+    expect(formatLotFrontageFact({ lot_frontage_ft: 40.5, lot_frontage_status: 'not_applicable' }))
+      .toBe('40.5 ft');
   });
 
   it('formats lot frontage in feet without inventing missing values', () => {

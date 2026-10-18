@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import {
+  LOT_FRONTAGE_STATUS_NOT_APPLICABLE,
   normalizeAppraisalFields,
   validatePropertyDetails,
 } from '../domain/appraisalFields';
@@ -104,6 +105,7 @@ function initialFormState(appraisal) {
     lotFrontageFt: appraisal.lot_frontage_ft === null || appraisal.lot_frontage_ft === undefined
       ? ''
       : String(appraisal.lot_frontage_ft),
+    lotFrontageNotApplicable: appraisal.lot_frontage_status === LOT_FRONTAGE_STATUS_NOT_APPLICABLE,
   };
 }
 
@@ -120,6 +122,7 @@ function factsHaveValue(form) {
   return Boolean(
     form.garageCapacity
     || String(form.lotFrontageFt ?? '').trim()
+    || form.lotFrontageNotApplicable
   );
 }
 
@@ -580,6 +583,9 @@ function AppraisalDetailPanel({
         year_built: formSnapshot.yearBuilt,
         garage_capacity: formSnapshot.garageCapacity,
         lot_frontage_ft: formSnapshot.lotFrontageFt,
+        lot_frontage_status: formSnapshot.lotFrontageNotApplicable
+          ? LOT_FRONTAGE_STATUS_NOT_APPLICABLE
+          : null,
       });
       let updates = {
         address: addressChanged && verifiedAddressMatch
@@ -597,7 +603,7 @@ function AppraisalDetailPanel({
         updates = legacyUpdates;
       }
       if (factsSupported === false) {
-        const { garage_capacity, lot_frontage_ft, ...withoutFacts } = updates;
+        const { garage_capacity, lot_frontage_ft, lot_frontage_status, ...withoutFacts } = updates;
         updates = withoutFacts;
       }
 

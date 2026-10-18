@@ -132,6 +132,52 @@ test('reports garage and frontage edits through onPropertyDetailChange', () => {
   expect(view.onPropertyDetailChange).toHaveBeenNthCalledWith(2, 'lotFrontageFt', '40.5');
 });
 
+test('renders the Frontage not applicable checkbox wired to the frontage input', () => {
+  const view = renderFields();
+
+  const checkbox = screen.getByLabelText('Frontage not applicable');
+  expect(checkbox).toHaveAttribute('id', 'appraisal-lot-frontage-not-applicable');
+  expect(checkbox).toHaveAttribute('type', 'checkbox');
+  expect(checkbox.getAttribute('aria-describedby'))
+    .toContain('appraisal-lot-frontage-not-applicable-help');
+  expect(screen.getByText(/Tick only when the report states there is no street frontage/i))
+    .toBeInTheDocument();
+
+  fireEvent.click(checkbox);
+  expect(view.onPropertyDetailChange).toHaveBeenNthCalledWith(
+    1, 'lotFrontageNotApplicable', true
+  );
+  expect(view.onPropertyDetailChange).toHaveBeenNthCalledWith(2, 'lotFrontageFt', '');
+});
+
+test('disables the frontage input while Not applicable is ticked', () => {
+  renderFields({
+    propertyDetails: {
+      propertyType: '',
+      reportedLivingAreaSqFt: '',
+      yearBuilt: '',
+      garageCapacity: '',
+      lotFrontageFt: '',
+      lotFrontageNotApplicable: true,
+    },
+  });
+
+  expect(screen.getByLabelText('Frontage not applicable')).toBeChecked();
+  expect(screen.getByLabelText('Lot frontage (feet)')).toBeDisabled();
+});
+
+test('renders the measurement-and-not-applicable conflict error', () => {
+  renderFields({
+    errors: {
+      lotFrontageFt: 'Clear the frontage measurement or untick Frontage not applicable. A report cannot record both.',
+    },
+  });
+
+  expect(screen.getByText(/cannot record both/i)).toBeInTheDocument();
+  expect(screen.getByLabelText('Lot frontage (feet)'))
+    .toHaveAttribute('aria-invalid', 'true');
+});
+
 test('associates garage and frontage errors with their inputs', () => {
   renderFields({
     errors: {

@@ -210,7 +210,7 @@ test('retains report cards when refresh fails and shows freshness context', () =
   });
 
   expect(screen.getByText('Reports could not be refreshed')).toBeInTheDocument();
-  expect(screen.getByText(/They may not match the current map area/i)).toBeInTheDocument();
+  expect(screen.getByText(/The latest reports could not be loaded/i)).toBeInTheDocument();
   expect(screen.getByText(/Last updated/i)).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: report.address })).toBeInTheDocument();
 
@@ -324,6 +324,17 @@ test('progressively renders large report results and resets for a materially cha
     unfilteredCount: reorderedReports.length,
   })} />);
 
+  // Content churn alone (a same-query refresh reshaping the set) keeps the
+  // expansion; only a deliberate reset key change collapses it.
+  expect(screen.getAllByRole('article')).toHaveLength(120);
+  expect(screen.getByText('Showing 120 of 130 matching reports')).toBeInTheDocument();
+
+  rerender(<NearbyWorkspace {...workspaceProps({
+    reports: reorderedReports,
+    unfilteredCount: reorderedReports.length,
+    resultResetKey: 1,
+  })} />);
+
   expect(screen.getAllByRole('article')).toHaveLength(60);
   expect(screen.getByText('Showing 60 of 130 matching reports')).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Show 60 more' })).toBeInTheDocument();
@@ -373,7 +384,9 @@ test('applies include-missing flags and the garage filter through onApplyFilters
   fireEvent.click(screen.getByLabelText('Include reports without a recorded living area'));
   expect(onApplyFilters).toHaveBeenCalledWith({ includeMissingLivingArea: true });
 
-  fireEvent.click(screen.getByLabelText('Include reports without a recorded frontage'));
+  fireEvent.click(screen.getByLabelText(
+    'Include reports with no frontage measurement (Not recorded or Not applicable)'
+  ));
   expect(onApplyFilters).toHaveBeenCalledWith({ includeMissingFrontage: true });
 
   const garageSelect = screen.getByLabelText('Garage capacity');
@@ -486,4 +499,68 @@ test('omits garage and frontage comparison rows when no candidate has data', () 
   const comparison = within(screen.getByRole('region', { name: 'Compare selected candidates' }));
   expect(comparison.queryByText('Garage capacity')).not.toBeInTheDocument();
   expect(comparison.queryByText('Lot frontage')).not.toBeInTheDocument();
+});
+
+test('shows the frontage Not applicable state on cards', () => {
+  renderWorkspace({
+    reports: [{ ...report, lot_frontage_ft: null, lot_frontage_status: 'not_applicable' }],
+  });
+
+  const card = screen.getByRole('article');
+  expect(within(card).getByText('Frontage')).toBeInTheDocument();
+  expect(within(card).getByText('Not applicable')).toBeInTheDocument();
+  expect(within(card).getAllByText('Not recorded').length).toBeGreaterThan(0);
+});
+
+test('shows the frontage Not applicable state in comparison without a difference', () => {
+  const candidate = {
+    ...report,
+    lot_frontage_ft: null,
+    lot_frontage_status: 'not_applicable',
+  };
+  renderWorkspace({ subject, view: 'compare', candidates: [candidate] });
+
+  const comparison = within(screen.getByRole('region', { name: 'Compare selected candidates' }));
+  const table = comparison.getByRole('table');
+  const frontageRow = within(table).getAllByRole('row')
+    .find((row) => within(row).queryByText('Lot frontage'));
+  expect(within(frontageRow).getAllByText('Not recorded')).toHaveLength(1);
+  expect(within(frontageRow).getByText('Not applicable')).toBeInTheDocument();
+  expect(within(frontageRow).queryByText(/[-+]/)).not.toBeInTheDocument();
+});
+
+const manyReports = (n, prefix = 'Expanded Row') => Array.from({ length: n }, (_, index) => ({
+  ...report,
+  id: `${prefix.toLowerCase().replace(/ /g, '-')}-${index + 1}`,
+  address: `${index + 1} ${prefix}`,
+}));
+
+test('keeps the expanded list when refresh content changes without a deliberate reset', () => {
+  const { rerender } = renderWorkspace({ reports: manyReports(70), unfilteredCount: 70 });
+  fireEvent.click(screen.getByRole('button', { name: /Show 10 more/ }));
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(70);
+
+  // Same-query refresh churn: one row removed, one new row added.
+  const churned = [
+    ...manyReports(70).slice(1),
+    { ...report, id: 'expanded-row-71', address: '71 Expanded Row' },
+  ];
+  rerender(<NearbyWorkspace {...workspaceProps({ reports: churned, unfilteredCount: 70 })} />);
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(70);
+  expect(screen.queryByRole('button', { name: /Show \d+ more/ })).not.toBeInTheDocument();
+});
+
+test('a deliberate result reset collapses the expanded list to the first batch', () => {
+  const props = workspaceProps({ reports: manyReports(70), unfilteredCount: 70 });
+  const { rerender } = render(<NearbyWorkspace {...props} />);
+  fireEvent.click(screen.getByRole('button', { name: /Show 10 more/ }));
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(70);
+
+  rerender(<NearbyWorkspace {...workspaceProps({
+    reports: manyReports(70),
+    unfilteredCount: 70,
+    resultResetKey: 1,
+  })} />);
+  expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(60);
+  expect(screen.getByRole('button', { name: /Show 10 more/ })).toBeInTheDocument();
 });

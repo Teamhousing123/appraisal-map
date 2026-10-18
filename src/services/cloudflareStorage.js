@@ -136,14 +136,26 @@ export async function cleanupR2Object(supabase, bucket, key) {
 }
 
 export function createProtectedDataFetch(supabaseUrl, originalFetch) {
-  return (input, init) => {
+  return async (input, init) => {
     const request = new Request(input, init);
     const original = new URL(request.url);
     if (original.origin === new URL(supabaseUrl).origin && original.pathname === '/rest/v1/appraisals') {
       const base = storageApiBase() || window.location.origin;
       const proxy = new URL('/api/data/appraisals', base);
       proxy.searchParams.set('query', original.search);
-      return originalFetch(new Request(proxy.toString(), request));
+      const headers = {};
+      request.headers.forEach((value, name) => {
+        if (name !== 'content-length') headers[name] = value;
+      });
+      const body = request.method === 'GET' || request.method === 'HEAD'
+        ? null
+        : await request.arrayBuffer();
+      return originalFetch(new Request(proxy.toString(), {
+        method: request.method,
+        headers,
+        body,
+        signal: request.signal,
+      }));
     }
     return originalFetch(request);
   };

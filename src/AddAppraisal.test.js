@@ -739,7 +739,62 @@ test('sends null garage and frontage when the fields are blank', async () => {
   expect(insertAppraisal.mock.calls[0][1]).toMatchObject({
     garage_capacity: null,
     lot_frontage_ft: null,
+    lot_frontage_status: null,
   });
+});
+
+test('sends the frontage status and a null measurement when Not applicable is ticked', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '10 Example Road, Aurora, ON',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  fillRequiredAddress();
+  const checkbox = screen.getByLabelText('Frontage not applicable');
+  fireEvent.click(checkbox);
+
+  expect(checkbox).toBeChecked();
+  expect(screen.getByLabelText('Lot frontage (feet)')).toBeDisabled();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+
+  await waitFor(() => expect(insertAppraisal).toHaveBeenCalledTimes(1));
+  expect(insertAppraisal.mock.calls[0][1]).toMatchObject({
+    lot_frontage_ft: null,
+    lot_frontage_status: 'not_applicable',
+  });
+});
+
+test('blocks a ticked Not applicable when the facts schema is unavailable', async () => {
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported factsSupported={false} />);
+  fillRequiredAddress();
+  fireEvent.click(screen.getByLabelText('Frontage not applicable'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    /Garage and frontage facts are temporarily unavailable/i
+  );
+  expect(insertAppraisal).not.toHaveBeenCalled();
+});
+
+test('resets the frontage Not applicable box after saving and adding another', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '10 Example Road, Aurora',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  insertAppraisal.mockResolvedValue({ error: null, data: { id: 'created-repeat' } });
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  fillRequiredAddress();
+  fireEvent.click(screen.getByLabelText('Frontage not applicable'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save and add another' }));
+
+  await waitFor(() => expect(screen.getByLabelText('Street address')).toHaveValue(''));
+  expect(screen.getByLabelText('Frontage not applicable')).not.toBeChecked();
+  expect(screen.getByLabelText('Lot frontage (feet)')).toBeEnabled();
 });
 
 test('blocks entered facts before geocoding or uploading when the facts schema is unavailable', async () => {

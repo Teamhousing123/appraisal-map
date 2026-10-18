@@ -15,6 +15,7 @@ export const METADATA_APPRAISAL_COLUMNS = Object.freeze([
 export const FACTS_APPRAISAL_COLUMNS = Object.freeze([
   'garage_capacity',
   'lot_frontage_ft',
+  'lot_frontage_status',
 ]);
 
 export const FOUNDATION_APPRAISAL_COLUMNS = Object.freeze([

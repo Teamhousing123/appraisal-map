@@ -242,8 +242,8 @@ function formatFilterNumber(value) {
   return Number(value).toLocaleString('en-CA', { maximumFractionDigits: 2 });
 }
 
-function describeRange(label, min, max, unit, includeMissing) {
-  const suffix = includeMissing ? ' (including unrecorded)' : '';
+function describeRange(label, min, max, unit, includeMissing, missingSuffix = ' (including unrecorded)') {
+  const suffix = includeMissing ? missingSuffix : '';
   if (min && max) {
     return `${label}: ${formatFilterNumber(min)}–${formatFilterNumber(max)} ${unit}${suffix}`;
   }
@@ -308,7 +308,8 @@ export function describeActiveFilters(filters = {}) {
         frontageMin,
         frontageMax,
         'ft',
-        Boolean(filters.includeMissingFrontage)
+        Boolean(filters.includeMissingFrontage),
+        ' (including not recorded or not applicable)'
       ),
       clear: { frontageMin: '', frontageMax: '', includeMissingFrontage: false },
     });

@@ -280,6 +280,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const [loadingReports, setLoadingReports] = useState(false);
   const [reportsError, setReportsError] = useState('');
   const [lastSuccessfulAt, setLastSuccessfulAt] = useState(null);
+  const [resultResetKey, setResultResetKey] = useState(0);
   const [truncated, setTruncated] = useState(false);
   const [metadataSupported, setMetadataSupported] = useState(null);
   const [factsSupported, setFactsSupported] = useState(null);
@@ -322,6 +323,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const lastBoundsRef = useRef(null);
   const lastSuccessfulBoundsKeyRef = useRef(null);
   const lastSuccessfulQueryBoundsRef = useRef(null);
+  const hasCompleteResultRef = useRef(false);
+  const localEditSinceFetchRef = useRef(false);
   const signedUrlCacheRef = useRef(new Map());
   const placeDetailsRequestRef = useRef(0);
   const workspacePanelRef = useRef(null);
@@ -335,6 +338,10 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const serverFiltersRef = useRef(null);
   const programmaticCameraUntilRef = useRef(0);
   const discardReturnFocusRef = useRef(null);
+  const savedCameraRef = useRef(null);
+  const listContextRef = useRef(null);
+  const reportListButtonRef = useRef(null);
+  const returnedFromListRef = useRef(false);
 
   const { isLoaded, loadError } = useJsApiLoader({
     googleMapsApiKey: process.env.REACT_APP_GOOGLE_MAPS_API_KEY,
@@ -453,6 +460,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     const key = boundsKey(queryBounds);
     if (!force && lastSuccessfulBoundsKeyRef.current === key) return;
 
+    localEditSinceFetchRef.current = false;
+
     if (reportRequestRef.current) reportRequestRef.current.abort();
     const controller = new AbortController();
     reportRequestRef.current = controller;
@@ -467,13 +476,19 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
           if (controller.signal.aborted) return;
           setLoadProgress({ loaded: data.length, total: count });
           // Re-rendering thousands of markers for every intermediate page made
-          // completion ~7 s slower; render only the first page while the counter
-          // keeps reporting progress.
-          if (data.length <= DEFAULT_PAGE_SIZE) setAppraisals(applySpiralOffset(data));
+          // completion ~7 s slower; the first page already gives the first
+          // useful results while the counter keeps reporting progress.
+          // Progressive rendering applies only until the first complete result
+          // exists; later fetches keep the last complete results on screen and
+          // replace them atomically on success.
+          if (!hasCompleteResultRef.current && data.length <= DEFAULT_PAGE_SIZE) {
+            setAppraisals(applySpiralOffset(data));
+          }
         },
       });
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted || reportRequestRef.current !== controller) return;
       const nextAppraisals = applySpiralOffset(result.data);
+      hasCompleteResultRef.current = true;
       setAppraisals(nextAppraisals);
       setTruncated(result.truncated);
       setMetadataSupported(result.metadataSupported);
@@ -494,6 +509,9 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       ));
       lastSuccessfulBoundsKeyRef.current = key;
       lastSuccessfulQueryBoundsRef.current = queryBounds;
+      // Only user-driven exploration (a new-bounds idle fetch) collapses the
+      // expanded list; forced refreshes and server-filter refetches keep it.
+      if (!force) setResultResetKey((current) => current + 1);
       setLastSuccessfulAt(new Date());
       recordTelemetryEvent('map_reports_load', {
         outcome: 'success',
@@ -501,15 +519,24 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         resultBucket: result.data.length >= 100 ? '100_plus' : result.data.length >= 20 ? '20_99' : '0_19',
       });
     } catch (error) {
-      if (!isAbortError(error)) {
-        console.error('Could not load appraisals in map bounds', error);
+      if (isAbortError(error) || reportRequestRef.current !== controller) return;
+      console.error('Could not load appraisals in map bounds', error);
+      if (hasCompleteResultRef.current) {
+        // Keep the last complete result on screen; it may be stale but it is
+        // still the best information we have.
+        setReportsError('The refresh failed. Showing the last successful results, which may be out of date.');
+      } else {
         setReportsError('Check your connection and retry this map area.');
-        recordTelemetryEvent('map_reports_load', {
-          outcome: 'failed',
-          errorCode: error?.code || 'unknown',
-          online: navigator.onLine,
-        });
+        // A partial initial page is not a last successful load — unless a
+        // local edit landed mid-fetch, drop it rather than presenting it as
+        // complete results.
+        if (!localEditSinceFetchRef.current) setAppraisals([]);
       }
+      recordTelemetryEvent('map_reports_load', {
+        outcome: 'failed',
+        errorCode: error?.code || 'unknown',
+        online: navigator.onLine,
+      });
     } finally {
       if (reportRequestRef.current === controller) {
         reportRequestRef.current = null;
@@ -547,6 +574,21 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   useEffect(() => {
     serverFiltersRef.current = serverFilters;
   }, [serverFilters]);
+
+  // Returning from the report list remounts this subtree; restore the panel
+  // scroll position captured when leaving and return focus to the list button.
+  useEffect(() => {
+    if (reportListMode || !returnedFromListRef.current) return;
+    returnedFromListRef.current = false;
+    if (panelMode !== 'nearby') return;
+    const panel = workspacePanelRef.current;
+    if (panel) panel.scrollTop = nearbyPositionRef.current.top;
+    reportListButtonRef.current?.focus();
+  }, [reportListMode, panelMode]);
+
+  const handleVisibleCountChange = useCallback((count) => {
+    nearbyPositionRef.current.visibleCount = count;
+  }, []);
 
   // When an unfiltered fetch hits the display cap and an active filter is
   // expressible server-side, issue exactly one filtered refetch. Clearing the
@@ -854,6 +896,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       };
       runWorkspaceAction(() => {
       setSubject(nextSubject);
+        setResultResetKey((current) => current + 1);
         setCandidates([]);
         setSearchTerm(nextSubject.address);
         setFilters((current) => ({ ...current, radiusKm: '', sortBy: 'distance' }));
@@ -888,6 +931,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   const handleSearchSubmit = useCallback(async () => {
     if (!searchTerm.trim() || searchBusy || !window.google?.maps?.places) return;
+    setResultResetKey((current) => current + 1);
     const requestId = ++autocompleteRequestRef.current;
     setSearchBusy(true);
     setSearchError('');
@@ -923,6 +967,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       autocompleteSessionTokenRef.current = null;
       placeDetailsRequestRef.current += 1;
       setSubject(null);
+      setResultResetKey((current) => current + 1);
       setSearchTerm('');
       setSuggestions([]);
       setSearchError('');
@@ -937,6 +982,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   }, []);
 
   const handleFilterChange = useCallback((field, value) => {
+    setResultResetKey((current) => current + 1);
     setFilters((current) => ({ ...current, [field]: value }));
     if (field === 'radiusKm' && value && subject) {
       fitMapToSubjectRadius(subject, value);
@@ -944,6 +990,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   }, [fitMapToSubjectRadius, subject]);
 
   const handleApplyFilters = useCallback((partial = {}) => {
+    setResultResetKey((current) => current + 1);
     setFilters((current) => ({ ...current, ...partial }));
     if (partial.radiusKm && subject) {
       fitMapToSubjectRadius(subject, partial.radiusKm);
@@ -951,6 +998,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   }, [fitMapToSubjectRadius, subject]);
 
   const handleResetFilters = useCallback(() => {
+    setResultResetKey((current) => current + 1);
     setFilters({ ...DEFAULT_FILTERS, sortBy: subject ? 'distance' : 'newest' });
   }, [subject]);
 
@@ -999,6 +1047,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const handleAdded = useCallback((result = {}) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
     setManualPlacement({ active: false, location: null, confirmed: false });
+    listContextRef.current = null;
+    localEditSinceFetchRef.current = true;
     const created = result.report || (Array.isArray(result.data) ? result.data[0] : result.data);
     if (created?.id) {
       setAppraisals((current) => applySpiralOffset([
@@ -1022,6 +1072,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   const handleUpdated = useCallback((result = 'Report updated', updatedAppraisal = null) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
+    listContextRef.current = null;
+    localEditSinceFetchRef.current = true;
     const updated = updatedAppraisal || (typeof result === 'object'
       ? result.report || result.data || (result.id ? result : null)
       : null);
@@ -1062,6 +1114,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
       const restored = { ...archivedAppraisal, ...data, deleted_at: null, deleted_by: null };
       reportRequestRef.current?.abort();
+      listContextRef.current = null;
+      localEditSinceFetchRef.current = true;
       setAppraisals((current) => applySpiralOffset([
         restored,
         ...current.filter((report) => String(report.id) !== String(restored.id)),
@@ -1106,6 +1160,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   const handleDeleted = useCallback((message = 'Report removed', archivedRecord = null) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
+    listContextRef.current = null;
+    localEditSinceFetchRef.current = true;
     const archivedAppraisal = archivedRecord || selectedAppraisal;
     if (archivedAppraisal) {
       setCandidates((current) => current.filter((candidate) => candidate.id !== archivedAppraisal.id));
@@ -1302,7 +1358,13 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   if (loadError || googleAuthFailed || reportListMode) {
     return (
       <ReportRecoveryWorkspace onSignOut={handleSignOut}
-        onShowMap={reportListMode && !loadError && !googleAuthFailed ? () => { window.location.hash = ''; setReportListMode(false); } : undefined}
+        onShowMap={reportListMode && !loadError && !googleAuthFailed ? (snapshot) => {
+          listContextRef.current = snapshot || null;
+          window.location.hash = '';
+          returnedFromListRef.current = true;
+          setReportListMode(false);
+        } : undefined}
+        initialState={reportListMode ? listContextRef.current : null}
         reason={reportListMode ? 'The report list is ready.' : googleAuthFailed ? 'Google Maps is unavailable for this website.' : 'The map could not load.'} />
     );
   }
@@ -1342,7 +1404,17 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         />
         </div>
         <nav className="map-header__actions" aria-label="Workspace actions">
-          <button type="button" className="button button--quiet" onClick={() => runWorkspaceAction(() => { window.location.hash = 'reports'; setReportListMode(true); })}>Report list</button>
+          <button ref={reportListButtonRef} type="button" className="button button--quiet" onClick={() => runWorkspaceAction(() => {
+            nearbyPositionRef.current.top = workspacePanelRef.current?.scrollTop ?? nearbyPositionRef.current.top;
+            if (mapRef.current) {
+              savedCameraRef.current = {
+                center: mapRef.current.getCenter().toJSON(),
+                zoom: mapRef.current.getZoom(),
+              };
+            }
+            window.location.hash = 'reports';
+            setReportListMode(true);
+          })}>Report list</button>
           <button type="button" className="button button--secondary am-map-toggle" onClick={() => {
             runWorkspaceAction(() => {
               setPanelOpen((open) => !open);
@@ -1415,6 +1487,15 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
             mapContainerStyle={MAP_CONTAINER_STYLE}
             onLoad={(map) => {
               mapRef.current = map;
+              if (savedCameraRef.current) {
+                const saved = savedCameraRef.current;
+                savedCameraRef.current = null;
+                map.setCenter(saved.center);
+                map.setZoom(saved.zoom);
+                // The restored camera fires idle; record bounds but skip the
+                // refetch because the in-memory results already cover them.
+                programmaticCameraUntilRef.current = Date.now() + 1500;
+              }
               // Some environments never fire `idle` (seen intermittently in
               // headless Chromium); attempt one bounds fetch anyway rather than
               // sitting silently at "Showing 0 of 0".
@@ -1603,6 +1684,9 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 onOpenReport={handleOpenReport}
                 openingReportId={openingReportId}
                 onHoverReport={setHoveredReportId}
+                initialVisibleCount={nearbyPositionRef.current.visibleCount}
+                onVisibleCountChange={handleVisibleCountChange}
+                resultResetKey={resultResetKey}
                 view={panelMode === 'compare' ? 'compare' : 'nearby'}
                 onCompare={() => {
                   if (!subject) showToast('Set a subject property before comparing reports.');
