@@ -53,9 +53,11 @@
 /* Only the existing report overlay changes; map DOM and controls remain intact. */
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.workspace-panel {position:relative;grid-column:1;grid-row:1;top:0;bottom:0;left:0;width:100%;border-radius:0;border-block:0;background:var(--am-paper);backdrop-filter:none;box-shadow:none;scroll-padding-block:72px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.workspace-panel--compare {width:100%;right:auto;}
-.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-panel__close {top:4px;right:8px;font-size:14px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui :where(.nearby-workspace,.comparison-view,.detail-panel--editing,.add-appraisal-panel) {padding:16px 20px;}
-.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-heading {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding-right:64px;align-items:start;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-heading {display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding-right:0;align-items:start;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .nearby-workspace__heading {grid-template-columns:minmax(0,1fr);}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .nearby-workspace__heading .workspace-heading__meta {justify-content:flex-end;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .nearby-workspace__heading .result-count {margin-right:auto;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-heading--with-back {grid-template-columns:minmax(0,1fr);gap:6px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-heading--with-back>.button {justify-self:start;padding-left:0;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-heading h2 {font-size:26px;overflow-wrap:anywhere;}
@@ -95,7 +97,7 @@
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .comparison-desktop :where(thead th:first-child,tbody th) {width:16%;font-size:14px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .comparison-desktop thead th :where(strong,span,small) {display:block;font-size:14px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .comparison-desktop thead th button {font-size:14px;min-height:44px;}
-.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel__heading {padding:12px 84px 8px 20px;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel__heading {padding:12px 20px 8px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel__body {padding:8px 20px 20px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel__body>h3 {font-size:25px;overflow-wrap:anywhere;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel__city {font-size:15px;margin:4px 0 12px;}
@@ -205,7 +207,6 @@
  .am-layout--reports.am-layout--compare {grid-template-columns:minmax(0,1fr);}
 }
 
-.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-panel__close {z-index:10;}
 
 /* Manual-placement instructions are surrounding UI, not camera controls. */
 .am-layout--placing > .manual-placement-guide {left:474px;right:14px;max-width:min(440px,calc(100% - 500px));}
@@ -316,7 +317,6 @@
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .login-card__support h2 {font-family:'DM Sans',Arial,sans-serif;font-size:17px;margin:0 0 6px;color:var(--am-ink);}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .login-card__support p {margin:0 0 8px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .login-card__support a {display:inline-flex;align-items:center;min-height:44px;overflow-wrap:anywhere;}
-.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .login-security {margin:20px 0 0;font-size:14px;color:var(--am-muted);}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.app-toast {position:relative;inset:auto;max-width:none;width:auto;margin:0;transform:none;border-radius:0;padding:12px 20px;}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.am-archive-recovery {display:flex;align-items:center;flex-wrap:wrap;gap:12px;padding:12px 20px;background:var(--am-soft);border-top:1px solid var(--am-input);}
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.am-archive-recovery>span {flex:1 1 200px;}
@@ -363,7 +363,6 @@
 }
 
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .report-card__actions {margin:8px 0;}
-.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .workspace-panel__close[hidden] {display:none;}
 
 /* Keep long candidate identities legible without the removal action squeezing them. */
 .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .comparison-desktop thead .button--report {display:flex;width:100%;margin-top:8px;justify-content:center;}
