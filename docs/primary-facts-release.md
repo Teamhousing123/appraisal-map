@@ -89,8 +89,9 @@ committed tree.
    atomically; `.dev.vars` must not be present in the deploy.
 6. Read-only smoke checks (no record changes): sign in; cards show the six labelled facts; open a
    report's PDF and confirm the response is `inline` with a filename; `Download PDF` is an
-   attachment; a folder downloads; report-list search for a known older address returns it;
-   `Refresh` updates the time.
+   attachment; a folder downloads when a folder record is available; report-list search for a
+   known older address returns it; `Refresh` makes a successful request and retains the loaded
+   reports. Its minute-resolution time label can remain unchanged within the same minute.
 
 Compatibility window: the frontend reads work before the migration (the service detects the
 missing columns and falls back; facts read `Not recorded` and the fact filters hide). A write with
@@ -103,8 +104,8 @@ Rollback: redeploy the previous Worker/assets through the normal workflow. Leave
 in place; they are nullable and ignored by the old frontend, and removing them would discard recorded
 facts. Old tickets and new tickets are both honoured by the Worker's disposition rule.
 
-Configuration checks before deploying: `wrangler.jsonc` unchanged (account, bucket, Durable
-Object, cron); Worker secrets unchanged (no new secret is required); no `REACT_APP_*` value contains
+Configuration checks before deploying: production account, bucket, Durable Object, and cron
+unchanged; Worker secrets unchanged (no new production secret is required); no `REACT_APP_*` value contains
 a privileged key; `npm run verify:build` passes on the deployed build.
 
 ## Staging validation
@@ -121,14 +122,37 @@ R2 PDF (init/parts/complete, verified `ready` row, `inline` + filename, 206 rang
 recovery workspace at 320/390/820/1440 Chromium and Edge with no clipping; refresh retains the
 loaded extent; axe 0 unexpected violations; real 200 % zoom (DPR ≈ 2, `innerWidth` 720) in Chromium
 and Edge. Evidence: `appraisal-map-rc-evidence/staging/` (README has provisioning/teardown steps).
-Production was not modified: `appraisal-map` Worker remains on version `d45350f9` and no production
-data or grants were touched.
 
-Gate: the staging origin is not yet on the Google Maps key's allowed referrers, so map surfaces
-fall back to the report-list recovery workspace on staging (`RefererNotAllowedMapError`). The
-isolated gcloud credential was revoked earlier, so adding the referrer needs either the owner in the
-Google Cloud console (project `ge-appraisal`) or a fresh `gcloud auth login`. Map-dependent checks
-(map workspace add/edit, camera restore, workspace cards) run once the referrer lands.
+### Release follow-up, 2026-10-18
+
+The production migrations were applied and the PostgREST schema cache reloaded. The UI follow-up
+in PR #8 merged as `a874106` after CI passed. Its production bundle is
+`main.5f7a0cb8.js`, deployed as Worker version `77012a9a-8693-40c8-a91d-bb53acb56b3e`.
+The production private R2 bucket, authorization, quota guards, and backup behavior are unchanged.
+
+The staging Maps referrer is now allowed. The temporary port-3100 referrers were removed.
+The Maps error was `OverQuotaMapError`: the existing daily map-load limit was 100 and usage
+reached 101. The bounded limit is now 200/day; the billing plan was not changed. Real Maps now
+loads without the error overlay on both staging and production.
+
+The UI follow-up removes the two redundant sign-in notices and places the report count,
+Refresh, and Close controls together in normal layout flow. Verification passed: 48 focused
+frontend tests, lint, production build/shell checks, and CI. Fifteen additional deployed staging
+checks cover the simplified sign-in page, real Maps, control alignment and close/reopen at
+320/390/820/1440 pixels, detail/add navigation, and successful refresh with report retention.
+Those checks made no appraisal writes. Interrupted test requests retained conservative data
+reservations; a bounded staging-only test allowance was used, then its original enforced
+20 MB/day guard was restored. Production report-data and storage limits were not changed.
+
+A separate synthetic staging map workflow also passed: real Places address selection; UI save
+with Not applicable frontage and a folder uploaded to private R2; ZIP download with both original
+file contents verified; a UI edit to measured frontage with the exact R2 file reference retained;
+and return from the saved details to the report panel. The fixture exists only in staging.
+
+Read-only production smoke checks confirm the deployed bundle, real Maps without an error
+overlay, loaded report cards, refresh retention, and close/reopen navigation. Production records
+were not changed for testing. No production folder record was available in the scanned pages;
+folder ZIP verification uses synthetic fixtures instead of creating a production record.
 
 ## Limitations
 
