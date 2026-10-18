@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import AddressPicker from './components/AddressPicker';
 import AppraisalFormFields from './components/AppraisalFormFields';
 import {
+  LOT_FRONTAGE_STATUS_NOT_APPLICABLE,
   normalizeOptionalDecimal,
   normalizeOptionalInteger,
   validatePropertyDetails,
@@ -337,7 +338,7 @@ function AddAppraisal({
       garage_capacity: normalizedDetails.garageCapacity,
       lot_frontage_ft: normalizedDetails.lotFrontageFt,
       lot_frontage_status: propertyDetails.lotFrontageNotApplicable
-        ? 'not_applicable'
+        ? LOT_FRONTAGE_STATUS_NOT_APPLICABLE
         : null,
     };
     const hasEnteredMetadata = Object.values(metadataPayload).some((value) => value !== null);

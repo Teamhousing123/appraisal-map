@@ -19,7 +19,7 @@ export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason, 
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [hasCompletedSearch, setHasCompletedSearch] = useState(() => Boolean(initialState));
+  const [hasCompletedSearch, setHasCompletedSearch] = useState(() => Boolean(initialState?.completedAt));
   const [error, setError] = useState('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState(() => (
     initialState?.lastUpdatedAt ? new Date(initialState.lastUpdatedAt) : null

@@ -429,6 +429,9 @@ test('a remounted list still runs its first search when nothing completed before
       lastUpdatedAt: null, completedAt: null, factsSupported: null, scrollY: 0,
     },
   });
+  // A snapshot that never completed a search must not flash the empty state
+  // during the resumed debounce.
+  expect(screen.queryByText('No active reports are available.')).not.toBeInTheDocument();
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
   expect(searchAppraisals).toHaveBeenCalledWith(
     supabase,

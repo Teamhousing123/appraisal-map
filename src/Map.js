@@ -1406,9 +1406,10 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         <nav className="map-header__actions" aria-label="Workspace actions">
           <button ref={reportListButtonRef} type="button" className="button button--quiet" onClick={() => runWorkspaceAction(() => {
             nearbyPositionRef.current.top = workspacePanelRef.current?.scrollTop ?? nearbyPositionRef.current.top;
-            if (mapRef.current) {
+            const center = mapRef.current?.getCenter?.();
+            if (center) {
               savedCameraRef.current = {
-                center: mapRef.current.getCenter().toJSON(),
+                center: center.toJSON(),
                 zoom: mapRef.current.getZoom(),
               };
             }
