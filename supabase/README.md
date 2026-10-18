@@ -13,10 +13,34 @@ Apply `migrations` in filename order:
    optimistic versions, reversible archiving, and a private metadata-only change log.
 3. `20260810000100_harden_appraisal_rls.sql` replaces policies on `public.appraisals` with the
    explicit employee role matrix below and revokes browser DELETE.
+4. `20261011000100_private_r2_storage.sql` and `20261015000100_preserve_r2_storage_guards.sql`
+   add the private R2 storage ledger, gateway permits, and legacy Storage write guards.
+5. `20261018000100_add_appraisal_primary_facts.sql` adds the optional `garage_capacity` (text
+   code) and `lot_frontage_ft` (`numeric(7,2)`, feet) columns with validated check constraints.
+   Existing rows keep `NULL`, which the application shows as "Not recorded"; no value is backfilled.
 
 The schema migrations do not delete or rewrite appraisal rows or private files. The policy
 migration changes only policies and grants on `public.appraisals`; it deliberately does not replace
 policies on `storage.objects`, which may serve other products.
+
+`public.appraisals` itself predates this migration history and was created directly in the
+production project, so there is no baseline migration. An isolated verification database must
+first create the legacy table (see `tests/local_baseline_appraisals.sql`, which is for local use
+only and must never run in production).
+
+## Isolated verification scripts
+
+`tests/` holds scripts for a disposable local database only:
+
+- `local_baseline_appraisals.sql` recreates the legacy table shape so the migrations can apply.
+- `seed_synthetic_reports.sql` inserts a deterministic synthetic dataset (3,050 active rows,
+  650 of which match "beyond" beyond the first search page, and 30 archived rows).
+- `primary_facts.integration.sql` checks the primary-fact columns: schema shape, every garage
+  code, frontage bounds and rejections, legacy readback, edit preservation, version and change-log
+  behaviour, filter semantics, and viewer/anonymous access. Every block rolls back.
+
+Run them with the local `psql` (for example through the Supabase CLI's database container) after
+`supabase db reset` has applied the migrations.
 
 ## Required role and policy matrix
 

@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import AddAppraisal from './AddAppraisal';
 import {
   GEOCODING_ERROR_CODES,
@@ -688,4 +688,168 @@ test('warns about a same-property match with blank optional dates without overwr
   expect(geocodeFullOntarioAddress).toHaveBeenCalledTimes(1);
   expect(findPotentialAppraisalDuplicates).toHaveBeenCalledTimes(1);
   expect(insertAppraisal).toHaveBeenCalledTimes(1);
+});
+
+test('shows the garage and frontage fields in the property facts fieldset', () => {
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+
+  const garage = screen.getByLabelText('Garage capacity');
+  const optionLabels = within(garage).getAllByRole('option').map((option) => option.textContent);
+  expect(optionLabels[0]).toBe('Not recorded');
+  expect(optionLabels).toContain('None');
+  expect(optionLabels).toContain('Not applicable');
+
+  const frontage = screen.getByLabelText('Lot frontage (feet)');
+  expect(frontage).toHaveAttribute('inputmode', 'decimal');
+  expect(frontage.getAttribute('aria-describedby')).toContain('appraisal-lot-frontage-help');
+});
+
+test('includes garage capacity and frontage in the insert payload', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '10 Example Road, Aurora, ON',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  fillRequiredAddress();
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '40.5' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+
+  await waitFor(() => expect(insertAppraisal).toHaveBeenCalledTimes(1));
+  expect(insertAppraisal.mock.calls[0][1]).toMatchObject({
+    garage_capacity: 'double',
+    lot_frontage_ft: 40.5,
+  });
+});
+
+test('sends null garage and frontage when the fields are blank', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '10 Example Road, Aurora, ON',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  fillRequiredAddress();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+
+  await waitFor(() => expect(insertAppraisal).toHaveBeenCalledTimes(1));
+  expect(insertAppraisal.mock.calls[0][1]).toMatchObject({
+    garage_capacity: null,
+    lot_frontage_ft: null,
+  });
+});
+
+test('blocks entered facts before geocoding or uploading when the facts schema is unavailable', async () => {
+  const telemetrySink = jest.fn();
+  configureTelemetrySink(telemetrySink);
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported factsSupported={false} />);
+  fillRequiredAddress();
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent(/Garage and frontage facts are temporarily unavailable/i);
+  expect(alert).toHaveTextContent(/files have not been uploaded/i);
+  expect(geocodeFullOntarioAddress).not.toHaveBeenCalled();
+  expect(insertAppraisal).not.toHaveBeenCalled();
+  expect(supabase.storage.from).not.toHaveBeenCalled();
+  await waitFor(() => expect(telemetrySink).toHaveBeenCalled());
+  expect(telemetrySink).toHaveBeenCalledWith(expect.objectContaining({
+    attributes: expect.objectContaining({ errorCode: 'facts_unavailable' }),
+  }));
+});
+
+test('shows the facts-schema-required insert error and removes uploaded files', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '10 Example Road, Aurora, ON',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  insertAppraisal.mockResolvedValue({
+    error: Object.assign(
+      new Error('Garage and frontage facts are not available until the database update is applied. Ask an administrator, then try again. Nothing else was saved.'),
+      {
+        code: 'APPRAISAL_FACTS_SCHEMA_REQUIRED',
+        isUserFacing: true,
+        commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+      }
+    ),
+    data: null,
+  });
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  fillRequiredAddress();
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText(/House photo/i), {
+    target: { files: [new File(['photo'], 'photo.jpg', { type: 'image/jpeg' })] },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Garage and frontage facts are not available/i);
+  expect(uploadObject).toHaveBeenCalledTimes(1);
+  const uploadedKey = uploadObject.mock.calls[0][0];
+  await waitFor(() => expect(removeObject).toHaveBeenCalledWith([uploadedKey]));
+});
+
+test('prefills only the address and city from the searched subject', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '42 Subject Lane, Markham, ON',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  render(
+    <AddAppraisal
+      onAdded={jest.fn()}
+      metadataSupported
+      subjectAddress={{
+        address: '42 Subject Lane',
+        city: 'Markham',
+        formattedAddress: '42 Subject Lane, Markham, ON',
+      }}
+    />
+  );
+
+  expect(screen.getByText(/Searched subject: 42 Subject Lane, Markham, ON/)).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Use this address' }));
+
+  expect(screen.getByLabelText('Street address')).toHaveValue('42 Subject Lane');
+  expect(screen.getByLabelText('City')).toHaveValue('Markham');
+  expect(screen.getByText(/Address copied from the subject search/i)).toBeInTheDocument();
+  expect(screen.getByLabelText('Garage capacity')).toHaveValue('');
+  expect(screen.getByLabelText('Lot frontage (feet)')).toHaveValue('');
+  expect(screen.getByLabelText(/Report date/i, { selector: 'input' })).toHaveValue('');
+  expect(screen.getByLabelText(/Effective date/i)).toHaveValue('');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save appraisal' }));
+  await waitFor(() => expect(geocodeFullOntarioAddress).toHaveBeenCalledWith('42 Subject Lane', 'Markham'));
+  await waitFor(() => expect(insertAppraisal).toHaveBeenCalledTimes(1));
+});
+
+test('hides the subject prefill when no subject address was searched', () => {
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  expect(screen.queryByRole('button', { name: 'Use this address' })).not.toBeInTheDocument();
+  expect(screen.queryByText(/Searched subject:/)).not.toBeInTheDocument();
+});
+
+test('resets the fact fields after saving and adding another', async () => {
+  geocodeFullOntarioAddress.mockResolvedValue({
+    formattedAddress: '10 Example Road, Aurora',
+    latitude: 43.9,
+    longitude: -79.4,
+  });
+  insertAppraisal.mockResolvedValue({ error: null, data: { id: 'created-repeat' } });
+  render(<AddAppraisal onAdded={jest.fn()} metadataSupported />);
+  fillRequiredAddress();
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'single' } });
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '40' } });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Save and add another' }));
+
+  await waitFor(() => expect(screen.getByLabelText('Street address')).toHaveValue(''));
+  expect(screen.getByLabelText('Garage capacity')).toHaveValue('');
+  expect(screen.getByLabelText('Lot frontage (feet)')).toHaveValue('');
 });

@@ -122,8 +122,11 @@ export async function uploadR2Object(supabase, bucket, key, file, options = {}) 
   }
 }
 
-export async function createProtectedFileLink(supabase, bucket, key, downloadName = null) {
-  const data = await storageRequest(supabase, '/api/files/link', { method: 'POST', body: { bucket, key, downloadName } });
+export async function createProtectedFileLink(supabase, bucket, key, options = {}) {
+  const { downloadName = null, disposition = 'inline' } = typeof options === 'string'
+    ? { downloadName: options, disposition: 'attachment' }
+    : options || {};
+  const data = await storageRequest(supabase, '/api/files/link', { method: 'POST', body: { bucket, key, downloadName, disposition } });
   return { data, error: null };
 }
 

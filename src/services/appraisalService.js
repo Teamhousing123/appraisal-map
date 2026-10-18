@@ -1,4 +1,7 @@
 import { runBoundedOperation } from './operation';
+import { isDateOnly } from '../domain/dates';
+import { PROPERTY_TYPE_OPTIONS } from '../domain/appraisalFields';
+import { GARAGE_FILTER_NOT_RECORDED, validateFactFilters } from '../domain/filters';
 
 export const LEGACY_APPRAISAL_COLUMNS = Object.freeze([
   'id', 'address', 'city', 'latitude', 'longitude', 'appraisal_date',
@@ -7,6 +10,11 @@ export const LEGACY_APPRAISAL_COLUMNS = Object.freeze([
 
 export const METADATA_APPRAISAL_COLUMNS = Object.freeze([
   'effective_date', 'property_type', 'reported_living_area_sq_ft', 'year_built',
+]);
+
+export const FACTS_APPRAISAL_COLUMNS = Object.freeze([
+  'garage_capacity',
+  'lot_frontage_ft',
 ]);
 
 export const FOUNDATION_APPRAISAL_COLUMNS = Object.freeze([
@@ -32,23 +40,27 @@ export const FOUNDATION_APPRAISAL_COLUMNS = Object.freeze([
   'deleted_by',
 ]);
 
+function selectColumns({ metadata = true, facts = true, foundation = true } = {}) {
+  return [
+    ...LEGACY_APPRAISAL_COLUMNS,
+    ...(metadata ? METADATA_APPRAISAL_COLUMNS : []),
+    ...(facts ? FACTS_APPRAISAL_COLUMNS : []),
+    ...(foundation ? FOUNDATION_APPRAISAL_COLUMNS : []),
+  ].join(',');
+}
+
 export const EXTENDED_APPRAISAL_COLUMNS = Object.freeze([
   ...LEGACY_APPRAISAL_COLUMNS,
   ...METADATA_APPRAISAL_COLUMNS,
 ]);
 export const CURRENT_APPRAISAL_COLUMNS = Object.freeze([
   ...EXTENDED_APPRAISAL_COLUMNS,
+  ...FACTS_APPRAISAL_COLUMNS,
   ...FOUNDATION_APPRAISAL_COLUMNS,
 ]);
-const LEGACY_FOUNDATION_APPRAISAL_COLUMNS = Object.freeze([
-  ...LEGACY_APPRAISAL_COLUMNS,
-  ...FOUNDATION_APPRAISAL_COLUMNS,
-]);
-
 export const LEGACY_APPRAISAL_SELECT = LEGACY_APPRAISAL_COLUMNS.join(',');
 export const EXTENDED_APPRAISAL_SELECT = EXTENDED_APPRAISAL_COLUMNS.join(',');
 export const CURRENT_APPRAISAL_SELECT = CURRENT_APPRAISAL_COLUMNS.join(',');
-const LEGACY_FOUNDATION_APPRAISAL_SELECT = LEGACY_FOUNDATION_APPRAISAL_COLUMNS.join(',');
 export const DEFAULT_PAGE_SIZE = 500;
 export const MAX_RECORDS_PER_BOUNDS_FETCH = 5000;
 export const APPRAISAL_MUTATION_NOT_APPLIED_CODE = 'APPRAISAL_MUTATION_NOT_APPLIED';
@@ -68,10 +80,15 @@ const CAPABILITY_SUPPORTED = 'supported';
 const CAPABILITY_UNSUPPORTED = 'unsupported';
 
 let metadataSchemaCapability = CAPABILITY_UNKNOWN;
+let factsSchemaCapability = CAPABILITY_UNKNOWN;
 let foundationSchemaCapability = CAPABILITY_UNKNOWN;
 
 export function getMetadataSchemaCapability() {
   return metadataSchemaCapability;
+}
+
+export function getFactsSchemaCapability() {
+  return factsSchemaCapability;
 }
 
 export function getFoundationSchemaCapability() {
@@ -82,12 +99,17 @@ export function resetMetadataSchemaCapability() {
   metadataSchemaCapability = CAPABILITY_UNKNOWN;
 }
 
+export function resetFactsSchemaCapability() {
+  factsSchemaCapability = CAPABILITY_UNKNOWN;
+}
+
 export function resetFoundationSchemaCapability() {
   foundationSchemaCapability = CAPABILITY_UNKNOWN;
 }
 
 export function resetAppraisalSchemaCapabilities() {
   resetMetadataSchemaCapability();
+  resetFactsSchemaCapability();
   resetFoundationSchemaCapability();
 }
 
@@ -114,6 +136,10 @@ function missingColumnErrorMentions(error, columns) {
 
 export function isMissingMetadataSchemaError(error) {
   return missingColumnErrorMentions(error, METADATA_APPRAISAL_COLUMNS);
+}
+
+export function isMissingFactsSchemaError(error) {
+  return missingColumnErrorMentions(error, FACTS_APPRAISAL_COLUMNS);
 }
 
 export function isMissingFoundationSchemaError(error) {
@@ -171,7 +197,7 @@ function buildPageQuery(
   bounds,
   from,
   to,
-  { includeCount, includeDeletedFilter, signal }
+  { includeCount, includeDeletedFilter, filters, signal }
 ) {
   let query = supabase
     .from('appraisals')
@@ -180,6 +206,7 @@ function buildPageQuery(
     .order('id', { ascending: true });
   if (includeDeletedFilter) query = query.is('deleted_at', null);
   query = applyBounds(query, bounds);
+  if (filters) query = applyReportFilters(query, filters);
   if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
   return query.range(from, to);
 }
@@ -188,7 +215,7 @@ async function fetchWithColumns(
   supabase,
   bounds,
   columns,
-  { pageSize, maxRecords, signal, includeDeletedFilter = false }
+  { pageSize, maxRecords, signal, filters = null, onProgress = null, includeDeletedFilter = false }
 ) {
   const records = [];
   let totalCount = null;
@@ -201,7 +228,7 @@ async function fetchWithColumns(
       bounds,
       from,
       to,
-      { includeCount: from === 0, includeDeletedFilter, signal }
+      { includeCount: from === 0, includeDeletedFilter, filters, signal }
     );
     if (error) throw error;
     const page = data || [];
@@ -209,6 +236,12 @@ async function fetchWithColumns(
     records.push(...page);
     const requestedPageSize = to - from + 1;
     lastPageWasFull = page.length === requestedPageSize;
+    const isFinalPage = !lastPageWasFull
+      || (totalCount !== null && records.length >= totalCount)
+      || from + pageSize >= maxRecords;
+    if (!isFinalPage) {
+      onProgress?.({ data: [...records], count: totalCount, complete: false });
+    }
     if (!lastPageWasFull || (totalCount !== null && records.length >= totalCount)) break;
   }
   return {
@@ -221,47 +254,48 @@ async function fetchWithColumns(
 }
 
 async function fetchWithAvailableSchema(supabase, bounds, options) {
-  if (foundationSchemaCapability !== CAPABILITY_UNSUPPORTED) {
-    const columns = metadataSchemaCapability === CAPABILITY_UNSUPPORTED
-      ? LEGACY_FOUNDATION_APPRAISAL_SELECT
-      : CURRENT_APPRAISAL_SELECT;
+  while (true) {
+    const includeFoundation = foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const includeMetadata = metadataSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const includeFacts = factsSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const columns = selectColumns({
+      metadata: includeMetadata,
+      facts: includeFacts,
+      foundation: includeFoundation,
+    });
     try {
       const result = await fetchWithColumns(supabase, bounds, columns, {
         ...options,
-        includeDeletedFilter: true,
+        includeDeletedFilter: includeFoundation,
       });
-      foundationSchemaCapability = CAPABILITY_SUPPORTED;
-      if (columns === CURRENT_APPRAISAL_SELECT) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+      if (includeFoundation) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+      if (includeMetadata) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+      if (includeFacts) factsSchemaCapability = CAPABILITY_SUPPORTED;
       return result;
     } catch (error) {
-      if (isMissingFoundationSchemaError(error)) {
-        foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
-      } else if (isMissingMetadataSchemaError(error)) {
+      if (includeFacts && isMissingFactsSchemaError(error)) {
+        factsSchemaCapability = CAPABILITY_UNSUPPORTED;
+      } else if (includeMetadata && isMissingMetadataSchemaError(error)) {
         metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-        return fetchWithAvailableSchema(supabase, bounds, options);
+      } else if (includeFoundation && isMissingFoundationSchemaError(error)) {
+        foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
       } else {
         throw error;
       }
     }
   }
-
-  if (metadataSchemaCapability !== CAPABILITY_UNSUPPORTED) {
-    try {
-      const result = await fetchWithColumns(supabase, bounds, EXTENDED_APPRAISAL_SELECT, options);
-      metadataSchemaCapability = CAPABILITY_SUPPORTED;
-      return result;
-    } catch (error) {
-      if (!isMissingMetadataSchemaError(error)) throw error;
-      metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    }
-  }
-  return fetchWithColumns(supabase, bounds, LEGACY_APPRAISAL_SELECT, options);
 }
 
 export async function fetchAppraisalsInBounds(
   supabase,
   bounds,
-  { pageSize = DEFAULT_PAGE_SIZE, maxRecords = MAX_RECORDS_PER_BOUNDS_FETCH, signal } = {}
+  {
+    pageSize = DEFAULT_PAGE_SIZE,
+    maxRecords = MAX_RECORDS_PER_BOUNDS_FETCH,
+    signal,
+    filters = null,
+    onProgress = null,
+  } = {}
 ) {
   const normalizedBounds = normalizeBounds(bounds);
   const normalizedPageSize = normalizePositiveInteger(pageSize, DEFAULT_PAGE_SIZE, DEFAULT_PAGE_SIZE);
@@ -275,6 +309,8 @@ export async function fetchAppraisalsInBounds(
       pageSize: Math.min(normalizedPageSize, normalizedMaxRecords),
       maxRecords: normalizedMaxRecords,
       signal: operationSignal,
+      filters,
+      onProgress,
     }),
     {
       label: 'Appraisal map refresh',
@@ -285,6 +321,7 @@ export async function fetchAppraisalsInBounds(
   return {
     ...result,
     metadataSupported: capabilityFlag(metadataSchemaCapability),
+    factsSupported: capabilityFlag(factsSchemaCapability),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
   };
 }
@@ -433,6 +470,10 @@ function payloadContainsMetadata(payload) {
   return payloadContains(payload, METADATA_APPRAISAL_COLUMNS);
 }
 
+function payloadContainsFacts(payload) {
+  return payloadContains(payload, FACTS_APPRAISAL_COLUMNS);
+}
+
 function payloadContainsFoundation(payload) {
   return payloadContains(payload, FOUNDATION_APPRAISAL_COLUMNS);
 }
@@ -443,9 +484,23 @@ function withoutFoundationFields(payload) {
   ));
 }
 
+function withoutFactsFields(payload) {
+  return Object.fromEntries(Object.entries(payload || {}).filter(
+    ([column]) => !FACTS_APPRAISAL_COLUMNS.includes(column)
+  ));
+}
+
+function allFactsFieldsEmpty(payload) {
+  return FACTS_APPRAISAL_COLUMNS.every(
+    (column) => payload?.[column] === null || payload?.[column] === undefined
+  );
+}
+
 function rememberMutationCapability(payload, error) {
   if (isMissingMetadataSchemaError(error)) metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
   else if (!error && payloadContainsMetadata(payload)) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+  if (isMissingFactsSchemaError(error)) factsSchemaCapability = CAPABILITY_UNSUPPORTED;
+  else if (!error && payloadContainsFacts(payload)) factsSchemaCapability = CAPABILITY_SUPPORTED;
   if (isMissingFoundationSchemaError(error)) foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
   else if (!error && payloadContainsFoundation(payload)) foundationSchemaCapability = CAPABILITY_SUPPORTED;
 }
@@ -471,6 +526,24 @@ export function isAppraisalVersionConflictError(error) {
   return error?.code === APPRAISAL_VERSION_CONFLICT_CODE;
 }
 
+export const APPRAISAL_FACTS_SCHEMA_REQUIRED_CODE = 'APPRAISAL_FACTS_SCHEMA_REQUIRED';
+
+export function isFactsSchemaRequiredError(error) {
+  return error?.code === APPRAISAL_FACTS_SCHEMA_REQUIRED_CODE;
+}
+
+function createFactsSchemaRequiredError() {
+  const error = new Error(
+    'Garage and frontage facts are not available until the database update is applied. Ask an administrator, then try again. Nothing else was saved.'
+  );
+  error.name = 'AppraisalMutationError';
+  error.code = APPRAISAL_FACTS_SCHEMA_REQUIRED_CODE;
+  error.isUserFacing = true;
+  error.isInfrastructureFailure = true;
+  error.commitStatus = APPRAISAL_COMMIT_STATUS.ABSENT;
+  return error;
+}
+
 function verifyMutationResult(data, error, action, id, expectedVersion) {
   if (error) return error;
   if (!data || (id !== undefined && String(data.id) !== String(id))) {
@@ -486,14 +559,13 @@ function verifyMutationResult(data, error, action, id, expectedVersion) {
 }
 
 function selectForMutation(payload, useFoundation) {
-  if (useFoundation) {
-    return metadataSchemaCapability === CAPABILITY_UNSUPPORTED && !payloadContainsMetadata(payload)
-      ? LEGACY_FOUNDATION_APPRAISAL_SELECT
-      : CURRENT_APPRAISAL_SELECT;
-  }
-  return metadataSchemaCapability === CAPABILITY_UNSUPPORTED && !payloadContainsMetadata(payload)
-    ? LEGACY_APPRAISAL_SELECT
-    : EXTENDED_APPRAISAL_SELECT;
+  return selectColumns({
+    metadata: metadataSchemaCapability !== CAPABILITY_UNSUPPORTED
+      || payloadContainsMetadata(payload),
+    facts: factsSchemaCapability !== CAPABILITY_UNSUPPORTED
+      || payloadContainsFacts(payload),
+    foundation: useFoundation,
+  });
 }
 
 function normalizeOpaqueToken(value) {
@@ -544,37 +616,46 @@ async function lookupCurrentAppraisalInternal(supabase, column, value, { signal 
   }
 
   let useFoundation = foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
-  let columns = useFoundation
-    ? metadataSchemaCapability === CAPABILITY_UNSUPPORTED
-      ? LEGACY_FOUNDATION_APPRAISAL_SELECT
-      : CURRENT_APPRAISAL_SELECT
-    : metadataSchemaCapability === CAPABILITY_UNSUPPORTED
-      ? LEGACY_APPRAISAL_SELECT
-      : EXTENDED_APPRAISAL_SELECT;
-  let response = await executeCurrentLookup(supabase, columns, column, value, signal);
+  while (true) {
+    const includeMetadata = metadataSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const includeFacts = factsSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const columns = selectColumns({
+      metadata: includeMetadata,
+      facts: includeFacts,
+      foundation: useFoundation,
+    });
+    const response = await executeCurrentLookup(supabase, columns, column, value, signal);
 
-  if (useFoundation && isMissingMetadataSchemaError(response.error)) {
-    metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
-    columns = LEGACY_FOUNDATION_APPRAISAL_SELECT;
-    response = await executeCurrentLookup(supabase, columns, column, value, signal);
-  }
-  if (useFoundation && isMissingFoundationSchemaError(response.error)) {
-    foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
-    if (wantsFoundation) {
-      return { data: null, error: response.error, foundationSupported: false };
+    if (response.error) {
+      if (includeFacts && isMissingFactsSchemaError(response.error)) {
+        factsSchemaCapability = CAPABILITY_UNSUPPORTED;
+        continue;
+      }
+      if (includeMetadata && isMissingMetadataSchemaError(response.error)) {
+        metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+        continue;
+      }
+      if (useFoundation && isMissingFoundationSchemaError(response.error)) {
+        foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+        if (wantsFoundation) {
+          return { data: null, error: response.error, foundationSupported: false };
+        }
+        useFoundation = false;
+        continue;
+      }
     }
-    useFoundation = false;
-    columns = metadataSchemaCapability === CAPABILITY_UNSUPPORTED
-      ? LEGACY_APPRAISAL_SELECT
-      : EXTENDED_APPRAISAL_SELECT;
-    response = await executeCurrentLookup(supabase, columns, column, value, signal);
-  }
 
-  if (!response.error && useFoundation) foundationSchemaCapability = CAPABILITY_SUPPORTED;
-  return {
-    ...response,
-    foundationSupported: capabilityFlag(foundationSchemaCapability),
-  };
+    if (!response.error) {
+      if (useFoundation) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+      if (includeMetadata) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+      if (includeFacts) factsSchemaCapability = CAPABILITY_SUPPORTED;
+    }
+    return {
+      ...response,
+      factsSupported: capabilityFlag(factsSchemaCapability),
+      foundationSupported: capabilityFlag(foundationSchemaCapability),
+    };
+  }
 }
 
 async function lookupCurrentAppraisal(supabase, column, value) {
@@ -621,6 +702,11 @@ function storedValueMatches(storedValue, intendedValue) {
   }
   if (storedValue === null || storedValue === undefined || intendedValue === null || intendedValue === undefined) {
     return (storedValue ?? null) === (intendedValue ?? null);
+  }
+  const storedNumber = Number(storedValue);
+  const intendedNumber = Number(intendedValue);
+  if (Number.isFinite(storedNumber) && Number.isFinite(intendedNumber)) {
+    return storedNumber === intendedNumber;
   }
   return String(storedValue) === String(intendedValue);
 }
@@ -675,6 +761,25 @@ export async function insertAppraisal(supabase, payload) {
       () => executeInsert(supabase, appliedPayload, false)
     );
   }
+  if (isMissingFactsSchemaError(response.error)) {
+    factsSchemaCapability = CAPABILITY_UNSUPPORTED;
+    if (!allFactsFieldsEmpty(appliedPayload)) {
+      const error = createFactsSchemaRequiredError();
+      return {
+        data: null,
+        error,
+        commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+        metadataSupported: capabilityFlag(metadataSchemaCapability),
+        factsSupported: false,
+        foundationSupported: capabilityFlag(foundationSchemaCapability),
+        idempotencySupported: false,
+      };
+    }
+    appliedPayload = withoutFactsFields(appliedPayload);
+    response = await captureMutationResult(
+      () => executeInsert(supabase, appliedPayload, useFoundation)
+    );
+  }
   if (!payloadContainsMetadata(payload) && isMissingMetadataSchemaError(response.error)) {
     metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
     response = await captureMutationResult(
@@ -702,6 +807,7 @@ export async function insertAppraisal(supabase, payload) {
     error,
     commitStatus: error?.commitStatus || response.commitStatus || APPRAISAL_COMMIT_STATUS.ABSENT,
     metadataSupported: capabilityFlag(metadataSchemaCapability),
+    factsSupported: capabilityFlag(factsSchemaCapability),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
     idempotencySupported: useFoundation && !error,
   };
@@ -745,6 +851,25 @@ export async function updateAppraisal(supabase, id, updates, { expectedVersion }
     appliedUpdates = withoutFoundationFields(updates);
     response = await captureMutationResult(
       () => executeUpdate(supabase, id, appliedUpdates, { useFoundation: false })
+    );
+  }
+  if (isMissingFactsSchemaError(response.error)) {
+    factsSchemaCapability = CAPABILITY_UNSUPPORTED;
+    if (!allFactsFieldsEmpty(appliedUpdates)) {
+      const error = createFactsSchemaRequiredError();
+      return {
+        data: null,
+        error,
+        commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+        metadataSupported: capabilityFlag(metadataSchemaCapability),
+        factsSupported: false,
+        foundationSupported: capabilityFlag(foundationSchemaCapability),
+        concurrencySupported: false,
+      };
+    }
+    appliedUpdates = withoutFactsFields(appliedUpdates);
+    response = await captureMutationResult(
+      () => executeUpdate(supabase, id, appliedUpdates, { expectedVersion, useFoundation })
     );
   }
   if (!payloadContainsMetadata(updates) && isMissingMetadataSchemaError(response.error)) {
@@ -795,6 +920,7 @@ export async function updateAppraisal(supabase, id, updates, { expectedVersion }
     commitStatus: error?.commitStatus
       || (error ? APPRAISAL_COMMIT_STATUS.ABSENT : APPRAISAL_COMMIT_STATUS.COMMITTED),
     metadataSupported: capabilityFlag(metadataSchemaCapability),
+    factsSupported: capabilityFlag(factsSchemaCapability),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
     concurrencySupported: useFoundation && !error,
   };
@@ -948,6 +1074,226 @@ export async function restoreAppraisal(supabase, id, { expectedVersion } = {}) {
     error,
     commitStatus: error?.commitStatus
       || (error ? APPRAISAL_COMMIT_STATUS.ABSENT : APPRAISAL_COMMIT_STATUS.COMMITTED),
+    foundationSupported: capabilityFlag(foundationSchemaCapability),
+  };
+}
+
+function normalizedFilterBound(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+export function applyReportFilters(query, filters = {}) {
+  let filtered = query;
+
+  if (filters.propertyType) {
+    filtered = filtered.eq('property_type', filters.propertyType);
+  }
+
+  const dateFrom = isDateOnly(filters.dateFrom) ? filters.dateFrom : null;
+  const dateTo = isDateOnly(filters.dateTo) ? filters.dateTo : null;
+  if (dateFrom || dateTo) {
+    const effectiveBounds = [
+      dateFrom && `effective_date.gte.${dateFrom}`,
+      dateTo && `effective_date.lte.${dateTo}`,
+    ].filter(Boolean).join(',');
+    const fallbackBounds = [
+      'effective_date.is.null',
+      dateFrom && `appraisal_date.gte.${dateFrom}`,
+      dateTo && `appraisal_date.lte.${dateTo}`,
+    ].filter(Boolean).join(',');
+    filtered = filtered.or(`and(${effectiveBounds}),and(${fallbackBounds})`);
+  }
+
+  const validation = validateFactFilters(filters);
+
+  const livingAreaMin = normalizedFilterBound(filters.livingAreaMin);
+  const livingAreaMax = normalizedFilterBound(filters.livingAreaMax);
+  if (!validation.livingArea && (livingAreaMin || livingAreaMax)) {
+    if (filters.includeMissingLivingArea) {
+      const range = [
+        livingAreaMin && `reported_living_area_sq_ft.gte.${livingAreaMin}`,
+        livingAreaMax && `reported_living_area_sq_ft.lte.${livingAreaMax}`,
+      ].filter(Boolean).join(',');
+      filtered = filtered.or(`reported_living_area_sq_ft.is.null,and(${range})`);
+    } else {
+      if (livingAreaMin) filtered = filtered.gte('reported_living_area_sq_ft', livingAreaMin);
+      if (livingAreaMax) filtered = filtered.lte('reported_living_area_sq_ft', livingAreaMax);
+    }
+  }
+
+  const frontageMin = normalizedFilterBound(filters.frontageMin);
+  const frontageMax = normalizedFilterBound(filters.frontageMax);
+  if (!validation.frontage && (frontageMin || frontageMax)) {
+    if (filters.includeMissingFrontage) {
+      const range = [
+        frontageMin && `lot_frontage_ft.gte.${frontageMin}`,
+        frontageMax && `lot_frontage_ft.lte.${frontageMax}`,
+      ].filter(Boolean).join(',');
+      filtered = filtered.or(`lot_frontage_ft.is.null,and(${range})`);
+    } else {
+      if (frontageMin) filtered = filtered.gte('lot_frontage_ft', frontageMin);
+      if (frontageMax) filtered = filtered.lte('lot_frontage_ft', frontageMax);
+    }
+  }
+
+  const garageCapacity = normalizedFilterBound(filters.garageCapacity);
+  if (garageCapacity === GARAGE_FILTER_NOT_RECORDED) {
+    filtered = filtered.is('garage_capacity', null);
+  } else if (garageCapacity) {
+    filtered = filtered.eq('garage_capacity', garageCapacity);
+  }
+
+  return filtered;
+}
+
+export const DEFAULT_SEARCH_PAGE_SIZE = 100;
+const MAX_SEARCH_PAGE_SIZE = 500;
+const MAX_SEARCH_TERM_LENGTH = 120;
+const MAX_SEARCH_TOKENS = 5;
+
+export function normalizeSearchTerm(term) {
+  return String(term ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, MAX_SEARCH_TERM_LENGTH)
+    .replace(/\*/g, '');
+}
+
+export function searchTokens(term) {
+  return normalizeSearchTerm(term)
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, MAX_SEARCH_TOKENS);
+}
+
+export function escapeIlikePattern(token) {
+  return String(token).replace(/[\\%_]/g, '\\$&');
+}
+
+export function matchingPropertyTypeCodes(token) {
+  const normalized = String(token || '').toLowerCase();
+  if (!normalized) return [];
+  return PROPERTY_TYPE_OPTIONS
+    .filter((option) => (
+      option.label.toLowerCase().includes(normalized)
+      || option.value.replace(/_/g, ' ').includes(normalized)
+    ))
+    .map(({ value }) => value);
+}
+
+export function buildSearchOrFilter(token, { includePropertyType = true } = {}) {
+  const pattern = escapeIlikePattern(token)
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"');
+  const parts = [
+    `address.ilike."*${pattern}*"`,
+    `city.ilike."*${pattern}*"`,
+  ];
+  if (includePropertyType) {
+    const codes = matchingPropertyTypeCodes(token);
+    if (codes.length) parts.push(`property_type.in.(${codes.join(',')})`);
+  }
+  return parts.join(',');
+}
+
+function executeSearchPage(
+  supabase,
+  { columns, tokens, offset, pageSize, includeDeletedFilter, includePropertyType = true, signal }
+) {
+  let query = supabase
+    .from('appraisals')
+    .select(columns, offset === 0 ? { count: 'exact' } : undefined)
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: true });
+  if (includeDeletedFilter) query = query.is('deleted_at', null);
+  for (const token of tokens) {
+    query = query.or(buildSearchOrFilter(token, { includePropertyType }));
+  }
+  if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
+  return query.range(offset, offset + pageSize - 1);
+}
+
+async function searchWithAvailableSchema(
+  supabase,
+  { tokens, offset, pageSize, signal }
+) {
+  while (true) {
+    const includeFoundation = foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const includeMetadata = metadataSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const includeFacts = factsSchemaCapability !== CAPABILITY_UNSUPPORTED;
+    const columns = selectColumns({
+      metadata: includeMetadata,
+      facts: includeFacts,
+      foundation: includeFoundation,
+    });
+    const response = await executeSearchPage(supabase, {
+      columns,
+      tokens,
+      offset,
+      pageSize,
+      includeDeletedFilter: includeFoundation,
+      includePropertyType: includeMetadata,
+      signal,
+    });
+    if (response.error) {
+      if (includeFacts && isMissingFactsSchemaError(response.error)) {
+        factsSchemaCapability = CAPABILITY_UNSUPPORTED;
+        continue;
+      }
+      if (includeMetadata && isMissingMetadataSchemaError(response.error)) {
+        metadataSchemaCapability = CAPABILITY_UNSUPPORTED;
+        continue;
+      }
+      if (includeFoundation && isMissingFoundationSchemaError(response.error)) {
+        foundationSchemaCapability = CAPABILITY_UNSUPPORTED;
+        continue;
+      }
+      throw response.error;
+    }
+    if (includeFoundation) foundationSchemaCapability = CAPABILITY_SUPPORTED;
+    if (includeMetadata) metadataSchemaCapability = CAPABILITY_SUPPORTED;
+    if (includeFacts) factsSchemaCapability = CAPABILITY_SUPPORTED;
+
+    const data = response.data || [];
+    const count = Number.isFinite(response.count) ? response.count : null;
+    return {
+      data,
+      count,
+      hasMore: count !== null ? offset + data.length < count : data.length === pageSize,
+    };
+  }
+}
+
+export async function searchAppraisals(
+  supabase,
+  { term = '', offset = 0, pageSize = DEFAULT_SEARCH_PAGE_SIZE, signal } = {}
+) {
+  const normalizedTerm = normalizeSearchTerm(term);
+  const normalizedOffset = normalizePositiveInteger(offset + 1, 1, Number.MAX_SAFE_INTEGER) - 1;
+  const normalizedPageSize = normalizePositiveInteger(
+    pageSize,
+    DEFAULT_SEARCH_PAGE_SIZE,
+    MAX_SEARCH_PAGE_SIZE
+  );
+  const result = await runBoundedOperation(
+    ({ signal: operationSignal }) => searchWithAvailableSchema(supabase, {
+      tokens: searchTokens(normalizedTerm),
+      offset: normalizedOffset,
+      pageSize: normalizedPageSize,
+      signal: operationSignal,
+    }),
+    {
+      label: 'Report search',
+      timeoutMs: APPRAISAL_BOUNDS_FETCH_TIMEOUT_MS,
+      signal,
+    }
+  );
+  return {
+    ...result,
+    term: normalizedTerm,
+    metadataSupported: capabilityFlag(metadataSchemaCapability),
+    factsSupported: capabilityFlag(factsSchemaCapability),
     foundationSupported: capabilityFlag(foundationSchemaCapability),
   };
 }

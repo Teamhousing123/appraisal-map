@@ -18,9 +18,10 @@ Map data ©2026 Google.
 
 ## Capabilities
 
-- Explore reports in the current map area with marker clustering and distance, property type, and date filters.
-- Search for an address, confirm its location, and review nearby records.
-- Compare up to three records using available facts such as distance, dates, property type, living area, and year built.
+- Explore reports in the current map area with marker clustering and distance, property type, date, living-area, frontage, and garage filters.
+- See each report's primary facts (effective or report date, living area, garage capacity, lot frontage, property type, year built) directly on cards, in details, and in the report list; absent facts read "Not recorded".
+- Search for an address, confirm its location, and review nearby records; search every saved report by address, city, or property type from the report list.
+- Compare up to three records using available facts such as distance, dates, property type, living area, year built, garage capacity, and lot frontage.
 - Add and update records, and archive them with a reversible workflow when authorized.
 - Attach photos, PDFs, or related document sets; larger uploads can resume after interruption.
 

@@ -67,6 +67,27 @@ test('keeps legacy object keys in JSON, including fragment characters', async ()
   await createProtectedFileLink(supabase, 'pdfs', 'old # report.pdf');
   expect(JSON.parse(fetch.mock.calls[0][1].body).key).toBe('old # report.pdf');
 });
+test('sends the requested disposition with the protected link', async () => {
+  fetch.mockResolvedValue(response({ signedUrl: 'https://example.test/protected' }));
+  await createProtectedFileLink(supabase, 'pdfs', key, { downloadName: 'x.pdf', disposition: 'inline' });
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+    bucket: 'pdfs', key, downloadName: 'x.pdf', disposition: 'inline',
+  });
+});
+test('treats a legacy string argument as an attachment download name', async () => {
+  fetch.mockResolvedValue(response({ signedUrl: 'https://example.test/protected' }));
+  await createProtectedFileLink(supabase, 'appraisal-folders', key, 'folder.zip');
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+    downloadName: 'folder.zip', disposition: 'attachment',
+  });
+});
+test('defaults the link to an inline disposition without a name', async () => {
+  fetch.mockResolvedValue(response({ signedUrl: 'https://example.test/protected' }));
+  await createProtectedFileLink(supabase, 'pdfs', key);
+  expect(JSON.parse(fetch.mock.calls[0][1].body)).toMatchObject({
+    downloadName: null, disposition: 'inline',
+  });
+});
 test('routes appraisal reads through the gateway while preserving filters and authorization', async () => {
   const send=jest.fn(async () => response([]));
   const guarded=createProtectedDataFetch('https://example.supabase.co',send);

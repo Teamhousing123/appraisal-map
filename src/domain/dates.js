@@ -37,6 +37,21 @@ export function normalizeOptionalDateOnly(value) {
   return normalized === '' ? null : normalized;
 }
 
+const dateOnlyFormatters = new Map();
+
+function getDateOnlyFormatter(locale) {
+  let formatter = dateOnlyFormatters.get(locale);
+  if (!formatter) {
+    formatter = new Intl.DateTimeFormat(locale, {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    });
+    dateOnlyFormatters.set(locale, formatter);
+  }
+  return formatter;
+}
+
 export function formatDateOnly(
   value,
   { locale = 'en-CA', fallback = 'Not recorded' } = {}
@@ -44,11 +59,7 @@ export function formatDateOnly(
   const parsed = parseDateOnly(value);
   if (!parsed) return fallback;
 
-  return new Intl.DateTimeFormat(locale, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  }).format(parsed);
+  return getDateOnlyFormatter(locale).format(parsed);
 }
 
 export function getReferenceDate(appraisal = {}) {

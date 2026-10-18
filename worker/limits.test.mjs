@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { chargeBudget, completedParts, DAILY_LIMITS, FILE_LIMITS, PART_BYTES, partBytes, safeDownloadName, validateUpload } from './limits.mjs';
+import { chargeBudget, completedParts, contentDispositionHeader, DAILY_LIMITS, FILE_LIMITS, PART_BYTES, partBytes, safeDisposition, safeDownloadName, validateUpload } from './limits.mjs';
 
 const upload = { bucket: 'pdfs', key: '12345678-1234-4123-8123-123456789abc.pdf', bytes: 12, sha256: 'a'.repeat(64), reservationId: '12345678-1234-4123-8123-123456789abd' };
 
@@ -50,6 +50,44 @@ test('download names cannot inject HTTP headers or escape paths', () => {
   const name = safeDownloadName('report\r\nInjected: yes"/../../private.pdf', 'pdfs', 'opaque');
   assert.ok(!/[\r\n"\\/]/.test(name));
   assert.equal(safeDownloadName(null, 'pdfs', 'opaque'), 'appraisal-report.pdf');
+});
+
+test('safe disposition pins folders to downloads and rejects unknown values', () => {
+  assert.equal(safeDisposition('inline', 'appraisal-folders'), 'attachment');
+  assert.equal(safeDisposition('attachment', 'appraisal-folders'), 'attachment');
+  assert.equal(safeDisposition('attachment', 'pdfs'), 'attachment');
+  assert.equal(safeDisposition('inline', 'pdfs'), 'inline');
+  assert.equal(safeDisposition('attachment; other=x', 'pdfs'), 'inline');
+});
+
+test('content disposition keeps legacy tickets and honours signed dispositions', () => {
+  assert.match(
+    contentDispositionHeader({ bucket: 'pdfs', key: 'opaque.pdf' }),
+    /^inline; filename="appraisal-report\.pdf"; filename\*=UTF-8''appraisal-report\.pdf$/
+  );
+  assert.match(
+    contentDispositionHeader({ bucket: 'pdfs', key: 'opaque.pdf', downloadName: 'x.pdf' }),
+    /^attachment; filename="x\.pdf"/
+  );
+  assert.match(
+    contentDispositionHeader({ bucket: 'pdfs', key: 'opaque.pdf', downloadName: 'x.pdf', disposition: 'inline' }),
+    /^inline; filename="x\.pdf"; filename\*=UTF-8''x\.pdf$/
+  );
+  assert.match(
+    contentDispositionHeader({ bucket: 'pdfs', key: 'opaque.pdf', disposition: 'attachment' }),
+    /^attachment; filename="appraisal-report\.pdf"/
+  );
+  assert.match(
+    contentDispositionHeader({ bucket: 'appraisal-folders', key: 'opaque.zip', disposition: 'inline' }),
+    /^attachment; filename="appraisal-documents\.zip"/
+  );
+  assert.match(
+    contentDispositionHeader({ bucket: 'photos', key: 'photos/p.jpg', disposition: 'inline' }),
+    /^inline; filename="p\.jpg"/
+  );
+  const unsafe = contentDispositionHeader({ bucket: 'pdfs', key: 'opaque.pdf', downloadName: 'a"b\r\nc.pdf', disposition: 'inline' });
+  assert.ok(!/[\r\n]/.test(unsafe));
+  assert.match(unsafe, /filename="a-b--c\.pdf"/);
 });
 
 test('all operation counters stop at their cap and reject corrupted state', () => {
