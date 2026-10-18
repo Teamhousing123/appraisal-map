@@ -107,16 +107,28 @@ Configuration checks before deploying: `wrangler.jsonc` unchanged (account, buck
 Object, cron); Worker secrets unchanged (no new secret is required); no `REACT_APP_*` value contains
 a privileged key; `npm run verify:build` passes on the deployed build.
 
-## Representative staging validation (outstanding release gate)
+## Staging validation
 
-No staging Worker, staging Supabase project, or staging test accounts were available in this work.
-To close the gate: create a staging Supabase project with all migrations applied in order
-(`supabase/tests/local_baseline_appraisals.sql` first only if the table does not exist), seed
-synthetic data (`supabase/tests/seed_synthetic_reports.sql`), deploy a separately named Worker with
-its own R2 bucket and the five Worker secrets, set `appraisal_storage_settings` (`enforced`,
-`backend_secret_sha256`, `last_backup_at`), add the staging origin to the Maps key referrers, and
-repeat the 19 smoke flows above with a viewer and an editor test account. Then perform the
-read-only production smoke checks listed in the deployment order.
+A staging environment now exists and verified the deployed candidate end to end:
+`https://appraisal-map-staging.appraisal-map.workers.dev`, Supabase project ref
+`zmjqtmmpjfzrerxyzbfh` (fresh production schema dump + `20261018000200` applied verbatim, synthetic
+3,053-row seed, RLS verify f/f/f/f/f, enforced storage settings with new secrets), a dedicated
+`appraisal-map-staging` R2 bucket and Durable Object, and staging-only test accounts. Results
+(31 checks, all synthetic data): editor/viewer auth; server search `beyond` = 650 via
+`Content-Range` through the Worker proxy; viewer write denial 403; N/A add → measure 40.5 + real
+R2 PDF (init/parts/complete, verified `ready` row, `inline` + filename, 206 range, tampered-ticket
+403) → clear to Not recorded with the file retained; stale-version patch matches 0 rows; report-list
+recovery workspace at 320/390/820/1440 Chromium and Edge with no clipping; refresh retains the
+loaded extent; axe 0 unexpected violations; real 200 % zoom (DPR ≈ 2, `innerWidth` 720) in Chromium
+and Edge. Evidence: `appraisal-map-rc-evidence/staging/` (README has provisioning/teardown steps).
+Production was not modified: `appraisal-map` Worker remains on version `d45350f9` and no production
+data or grants were touched.
+
+Gate: the staging origin is not yet on the Google Maps key's allowed referrers, so map surfaces
+fall back to the report-list recovery workspace on staging (`RefererNotAllowedMapError`). The
+isolated gcloud credential was revoked earlier, so adding the referrer needs either the owner in the
+Google Cloud console (project `ge-appraisal`) or a fresh `gcloud auth login`. Map-dependent checks
+(map workspace add/edit, camera restore, workspace cards) run once the referrer lands.
 
 ## Limitations
 
