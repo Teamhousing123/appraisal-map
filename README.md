@@ -82,3 +82,13 @@ for verification, the independent Worker schedule, and provider restriction reco
 ## License and data rights
 
 Copyright © 2026 Teamhousing123. All rights reserved. This repository is proprietary; public visibility does not grant permission to use, copy, modify, or distribute its code without separate written permission. Google Maps Platform, Supabase, and any source appraisal documents or data are subject to their respective owners’ terms and rights.
+
+## PR
+
+| Service | Account |
+|---|---|
+| Google Cloud (Maps) | super88 |
+| Cloudflare | forever8 |
+| Supabase | forever8 |
+| Vercel | forever8 |
+| GitHub | Teamhousing123 |
