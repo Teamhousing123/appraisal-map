@@ -1,12 +1,80 @@
-import { getReferenceDate, isDateOnly } from './dates';
+import { formatDateOnly, getReferenceDate, isDateOnly } from './dates';
 import { getCanonicalCoordinates, haversineDistanceKm } from './geo';
+import { formatGarageCapacity, formatPropertyType } from './appraisalFields';
 
 export const REPORT_SORT_OPTIONS = Object.freeze([
   Object.freeze({ value: 'distance', label: 'Nearest' }),
   Object.freeze({ value: 'newest', label: 'Newest' }),
 ]);
 
+export const GARAGE_FILTER_NOT_RECORDED = 'not_recorded';
+
+export const DEFAULT_FACT_FILTERS = Object.freeze({
+  livingAreaMin: '',
+  livingAreaMax: '',
+  includeMissingLivingArea: false,
+  frontageMin: '',
+  frontageMax: '',
+  includeMissingFrontage: false,
+  garageCapacity: '',
+});
+
+const LIVING_AREA_BOUND_PATTERN = /^\d+$/;
+const FRONTAGE_BOUND_PATTERN = /^(\d+(\.\d{0,2})?|\.\d{1,2})$/;
+
+function normalizeBound(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+export function validateFactFilters(filters = {}) {
+  const errors = {};
+  const livingAreaMin = normalizeBound(filters.livingAreaMin);
+  const livingAreaMax = normalizeBound(filters.livingAreaMax);
+  const frontageMin = normalizeBound(filters.frontageMin);
+  const frontageMax = normalizeBound(filters.frontageMax);
+
+  if (
+    (livingAreaMin && !LIVING_AREA_BOUND_PATTERN.test(livingAreaMin))
+    || (livingAreaMax && !LIVING_AREA_BOUND_PATTERN.test(livingAreaMax))
+  ) {
+    errors.livingArea = 'Enter whole square feet for the living-area range.';
+  } else if (
+    livingAreaMin && livingAreaMax && Number(livingAreaMin) > Number(livingAreaMax)
+  ) {
+    errors.livingArea = 'The minimum must be less than or equal to the maximum. This range has not been applied.';
+  }
+
+  if (
+    (frontageMin && !FRONTAGE_BOUND_PATTERN.test(frontageMin))
+    || (frontageMax && !FRONTAGE_BOUND_PATTERN.test(frontageMax))
+  ) {
+    errors.frontage = 'Enter feet with up to two decimal places for the frontage range.';
+  } else if (
+    frontageMin && frontageMax && Number(frontageMin) > Number(frontageMax)
+  ) {
+    errors.frontage = 'The minimum must be less than or equal to the maximum. This range has not been applied.';
+  }
+
+  return errors;
+}
+
+function finiteReportNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+}
+
+function matchesNumericRange(value, min, max, includeMissing) {
+  const numeric = finiteReportNumber(value);
+  if (numeric === null) return includeMissing;
+  if (min !== '' && numeric < Number(min)) return false;
+  if (max !== '' && numeric > Number(max)) return false;
+  return true;
+}
+
 export function getReportDistanceKm(report, subject) {
+  if (Number.isFinite(report?._distanceKm)) return report._distanceKm;
   return haversineDistanceKm(subject, report);
 }
 
@@ -37,6 +105,50 @@ export function matchesReportFilters(report, filters = {}, subject = null) {
     return false;
   }
   if (isDateOnly(filters.dateTo) && (!referenceDate || referenceDate > filters.dateTo)) {
+    return false;
+  }
+
+  const factErrors = validateFactFilters(filters);
+  const livingAreaMin = normalizeBound(filters.livingAreaMin);
+  const livingAreaMax = normalizeBound(filters.livingAreaMax);
+  if (
+    !factErrors.livingArea
+    && (livingAreaMin || livingAreaMax)
+    && !matchesNumericRange(
+      report.reported_living_area_sq_ft,
+      livingAreaMin,
+      livingAreaMax,
+      Boolean(filters.includeMissingLivingArea)
+    )
+  ) {
+    return false;
+  }
+
+  const frontageMin = normalizeBound(filters.frontageMin);
+  const frontageMax = normalizeBound(filters.frontageMax);
+  if (
+    !factErrors.frontage
+    && (frontageMin || frontageMax)
+    && !matchesNumericRange(
+      report.lot_frontage_ft,
+      frontageMin,
+      frontageMax,
+      Boolean(filters.includeMissingFrontage)
+    )
+  ) {
+    return false;
+  }
+
+  const garageCapacity = normalizeBound(filters.garageCapacity);
+  if (garageCapacity === GARAGE_FILTER_NOT_RECORDED) {
+    if (
+      report.garage_capacity !== null
+      && report.garage_capacity !== undefined
+      && report.garage_capacity !== ''
+    ) {
+      return false;
+    }
+  } else if (garageCapacity && report.garage_capacity !== garageCapacity) {
     return false;
   }
 
@@ -97,9 +209,121 @@ export function countReportsMissingFilterData(reports = []) {
       coordinates: counts.coordinates + (getCanonicalCoordinates(report) ? 0 : 1),
       referenceDate: counts.referenceDate + (getReferenceDate(report) ? 0 : 1),
       propertyType: counts.propertyType + (report.property_type ? 0 : 1),
+      livingArea: counts.livingArea
+        + (finiteReportNumber(report.reported_living_area_sq_ft) === null ? 1 : 0),
+      frontage: counts.frontage
+        + (finiteReportNumber(report.lot_frontage_ft) === null ? 1 : 0),
+      garageCapacity: counts.garageCapacity + (report.garage_capacity ? 0 : 1),
     }),
-    { coordinates: 0, referenceDate: 0, propertyType: 0 }
+    {
+      coordinates: 0,
+      referenceDate: 0,
+      propertyType: 0,
+      livingArea: 0,
+      frontage: 0,
+      garageCapacity: 0,
+    }
   );
+}
+
+export function countActiveFilters(filters = {}) {
+  return [
+    filters.radiusKm,
+    filters.propertyType,
+    filters.dateFrom,
+    filters.dateTo,
+    normalizeBound(filters.livingAreaMin) || normalizeBound(filters.livingAreaMax),
+    normalizeBound(filters.frontageMin) || normalizeBound(filters.frontageMax),
+    normalizeBound(filters.garageCapacity),
+  ].filter(Boolean).length;
+}
+
+function formatFilterNumber(value) {
+  return Number(value).toLocaleString('en-CA', { maximumFractionDigits: 2 });
+}
+
+function describeRange(label, min, max, unit, includeMissing) {
+  const suffix = includeMissing ? ' (including unrecorded)' : '';
+  if (min && max) {
+    return `${label}: ${formatFilterNumber(min)}–${formatFilterNumber(max)} ${unit}${suffix}`;
+  }
+  if (min) return `${label}: at least ${formatFilterNumber(min)} ${unit}${suffix}`;
+  return `${label}: up to ${formatFilterNumber(max)} ${unit}${suffix}`;
+}
+
+export function describeActiveFilters(filters = {}) {
+  const descriptions = [];
+  if (filters.radiusKm) {
+    descriptions.push({
+      id: 'radiusKm',
+      label: `Radius: Within ${filters.radiusKm} km`,
+      clear: { radiusKm: '' },
+    });
+  }
+  if (filters.propertyType) {
+    descriptions.push({
+      id: 'propertyType',
+      label: `Property type: ${formatPropertyType(filters.propertyType)}`,
+      clear: { propertyType: '' },
+    });
+  }
+  if (isDateOnly(filters.dateFrom)) {
+    descriptions.push({
+      id: 'dateFrom',
+      label: `From: ${formatDateOnly(filters.dateFrom)}`,
+      clear: { dateFrom: '' },
+    });
+  }
+  if (isDateOnly(filters.dateTo)) {
+    descriptions.push({
+      id: 'dateTo',
+      label: `To: ${formatDateOnly(filters.dateTo)}`,
+      clear: { dateTo: '' },
+    });
+  }
+
+  const livingAreaMin = normalizeBound(filters.livingAreaMin);
+  const livingAreaMax = normalizeBound(filters.livingAreaMax);
+  if (livingAreaMin || livingAreaMax) {
+    descriptions.push({
+      id: 'livingArea',
+      label: describeRange(
+        'Living area',
+        livingAreaMin,
+        livingAreaMax,
+        'sq ft',
+        Boolean(filters.includeMissingLivingArea)
+      ),
+      clear: { livingAreaMin: '', livingAreaMax: '', includeMissingLivingArea: false },
+    });
+  }
+
+  const frontageMin = normalizeBound(filters.frontageMin);
+  const frontageMax = normalizeBound(filters.frontageMax);
+  if (frontageMin || frontageMax) {
+    descriptions.push({
+      id: 'frontage',
+      label: describeRange(
+        'Frontage',
+        frontageMin,
+        frontageMax,
+        'ft',
+        Boolean(filters.includeMissingFrontage)
+      ),
+      clear: { frontageMin: '', frontageMax: '', includeMissingFrontage: false },
+    });
+  }
+
+  const garageCapacity = normalizeBound(filters.garageCapacity);
+  if (garageCapacity) {
+    descriptions.push({
+      id: 'garageCapacity',
+      label: `Garage: ${garageCapacity === GARAGE_FILTER_NOT_RECORDED ? 'Not recorded' : formatGarageCapacity(garageCapacity)}`,
+      clear: { garageCapacity: '' },
+    });
+  }
+
+  return descriptions;
 }
 
 export function countReportsMissingComparisonDetails(reports = []) {

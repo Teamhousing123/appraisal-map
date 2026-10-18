@@ -6,30 +6,44 @@ import {
   APPRAISAL_DUPLICATE_CHECK_TIMEOUT_MS,
   APPRAISAL_MUTATION_TIMEOUT_MS,
   CURRENT_APPRAISAL_SELECT,
-  EXTENDED_APPRAISAL_SELECT,
+  EXTENDED_APPRAISAL_COLUMNS,
+  FACTS_APPRAISAL_COLUMNS,
+  FOUNDATION_APPRAISAL_COLUMNS,
+  applyReportFilters,
   createAppraisalIdempotencyKey,
   deleteAppraisal,
   fetchAppraisalsInBounds,
   findPotentialAppraisalDuplicates,
+  getFactsSchemaCapability,
   getFoundationSchemaCapability,
   getMetadataSchemaCapability,
   insertAppraisal,
+  isFactsSchemaRequiredError,
   isMissingFoundationSchemaError,
   isMissingMetadataSchemaError,
   resetAppraisalSchemaCapabilities,
   restoreAppraisal,
+  searchAppraisals,
   updateAppraisal,
 } from './appraisalService';
 import { OPERATION_ERROR_CODES } from './operation';
 
 const bounds = { north: 44, south: 43, east: -78, west: -80 };
+const NO_FOUNDATION_SELECT = [
+  ...EXTENDED_APPRAISAL_COLUMNS,
+  ...FACTS_APPRAISAL_COLUMNS,
+].join(',');
+const NO_FACTS_SELECT = [
+  ...EXTENDED_APPRAISAL_COLUMNS,
+  ...FOUNDATION_APPRAISAL_COLUMNS,
+].join(',');
 
 function createReadClient(responder) {
   const calls = [];
   const client = {
     calls,
     from: jest.fn(() => {
-      const state = {};
+      const state = { filterCalls: [] };
       const builder = {
         select: jest.fn((columns, options) => {
           state.columns = columns;
@@ -39,11 +53,25 @@ function createReadClient(responder) {
         order: jest.fn(() => builder),
         is: jest.fn((column, value) => {
           state.nullFilter = [column, value];
+          state.filterCalls.push(['is', column, value]);
           return builder;
         }),
-        gte: jest.fn(() => builder),
-        lte: jest.fn(() => builder),
-        or: jest.fn(() => builder),
+        gte: jest.fn((column, value) => {
+          state.filterCalls.push(['gte', column, value]);
+          return builder;
+        }),
+        lte: jest.fn((column, value) => {
+          state.filterCalls.push(['lte', column, value]);
+          return builder;
+        }),
+        eq: jest.fn((column, value) => {
+          state.filterCalls.push(['eq', column, value]);
+          return builder;
+        }),
+        or: jest.fn((value) => {
+          state.filterCalls.push(['or', value]);
+          return builder;
+        }),
         range: jest.fn((from, to) => {
           calls.push({ ...state, from, to });
           return responder({ ...state, from, to });
@@ -192,10 +220,40 @@ describe('appraisal service schema compatibility', () => {
     expect(second).toMatchObject({ foundationSupported: false, metadataSupported: true });
     expect(selectedColumns).toEqual([
       CURRENT_APPRAISAL_SELECT,
-      EXTENDED_APPRAISAL_SELECT,
-      EXTENDED_APPRAISAL_SELECT,
+      NO_FOUNDATION_SELECT,
+      NO_FOUNDATION_SELECT,
     ]);
     expect(getFoundationSchemaCapability()).toBe('unsupported');
+  });
+
+  it('drops only the facts columns when the primary-facts migration is missing', async () => {
+    const selectedColumns = [];
+    const client = createReadClient(({ columns }) => {
+      selectedColumns.push(columns);
+      if (columns === CURRENT_APPRAISAL_SELECT) {
+        return Promise.resolve({
+          data: null,
+          count: null,
+          error: {
+            code: 'PGRST204',
+            message: "Could not find the 'garage_capacity' column in the schema cache",
+          },
+        });
+      }
+      return Promise.resolve({ data: [{ id: 'legacy-facts' }], count: 1, error: null });
+    });
+
+    const result = await fetchAppraisalsInBounds(client, bounds);
+
+    expect(result).toMatchObject({
+      data: [{ id: 'legacy-facts' }],
+      metadataSupported: true,
+      factsSupported: false,
+      foundationSupported: true,
+    });
+    expect(selectedColumns).toEqual([CURRENT_APPRAISAL_SELECT, NO_FACTS_SELECT]);
+    expect(getFactsSchemaCapability()).toBe('unsupported');
+    expect(getMetadataSchemaCapability()).toBe('supported');
   });
 
   it('falls through both additive schemas without masking authorization failures', async () => {
@@ -639,5 +697,305 @@ describe('safe appraisal mutations', () => {
     const { client } = createMutationClient([{ data: null, error: null }]);
     const result = await updateAppraisal(client, 'record-id', { city: 'Aurora' });
     expect(result.error).toMatchObject({ code: APPRAISAL_MUTATION_NOT_APPLIED_CODE });
+  });
+
+  it('fails clearly instead of dropping a recorded fact the database cannot store', async () => {
+    const missingFacts = {
+      code: 'PGRST204',
+      message: "Could not find the 'garage_capacity' column in the schema cache",
+    };
+    const { client, table } = createMutationClient([{ data: null, error: missingFacts }]);
+
+    const result = await insertAppraisal(client, {
+      address: '10 Example Road',
+      garage_capacity: 'double',
+    });
+
+    expect(isFactsSchemaRequiredError(result.error)).toBe(true);
+    expect(result.error).toMatchObject({
+      name: 'AppraisalMutationError',
+      code: 'APPRAISAL_FACTS_SCHEMA_REQUIRED',
+      isUserFacing: true,
+      isInfrastructureFailure: true,
+      commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+    });
+    expect(result).toMatchObject({
+      data: null,
+      commitStatus: APPRAISAL_COMMIT_STATUS.ABSENT,
+      factsSupported: false,
+    });
+    expect(table.insert).toHaveBeenCalledTimes(1);
+    expect(table.upsert).not.toHaveBeenCalled();
+  });
+
+  it('retries an insert without the facts columns when every fact is unrecorded', async () => {
+    const missingFacts = {
+      code: 'PGRST204',
+      message: "Could not find the 'lot_frontage_ft' column in the schema cache",
+    };
+    const { client, table } = createMutationClient([
+      { data: null, error: missingFacts },
+      { data: { id: 'legacy-id' }, error: null },
+    ]);
+
+    const result = await insertAppraisal(client, {
+      address: '10 Example Road',
+      garage_capacity: null,
+      lot_frontage_ft: null,
+    });
+
+    expect(table.insert).toHaveBeenCalledTimes(2);
+    expect(table.insert).toHaveBeenLastCalledWith([{ address: '10 Example Road' }]);
+    expect(result).toMatchObject({
+      data: { id: 'legacy-id' },
+      error: null,
+      factsSupported: false,
+    });
+  });
+
+  it('fails an update with recorded facts and retries an update whose facts are unrecorded', async () => {
+    const missingFacts = {
+      code: 'PGRST204',
+      message: "Could not find the 'garage_capacity' column in the schema cache",
+    };
+    const refused = createMutationClient([{ data: null, error: missingFacts }]);
+
+    const refusedResult = await updateAppraisal(refused.client, 'record-id', {
+      garage_capacity: 'double',
+    });
+
+    expect(isFactsSchemaRequiredError(refusedResult.error)).toBe(true);
+    expect(refusedResult.commitStatus).toBe(APPRAISAL_COMMIT_STATUS.ABSENT);
+    expect(refused.table.update).toHaveBeenCalledTimes(1);
+
+    resetAppraisalSchemaCapabilities();
+    const retried = createMutationClient([
+      { data: null, error: missingFacts },
+      { data: { id: 'record-id', version: 2 }, error: null },
+    ]);
+
+    const retriedResult = await updateAppraisal(retried.client, 'record-id', {
+      city: 'Aurora',
+      garage_capacity: null,
+      lot_frontage_ft: null,
+    });
+
+    expect(retried.table.update).toHaveBeenCalledTimes(2);
+    expect(retried.table.update).toHaveBeenLastCalledWith({ city: 'Aurora' });
+    expect(retriedResult).toMatchObject({
+      data: { id: 'record-id', version: 2 },
+      error: null,
+      factsSupported: false,
+    });
+  });
+});
+
+describe('server-side report filters', () => {
+  function createFilterQuery() {
+    const calls = [];
+    const query = {};
+    for (const method of ['eq', 'is', 'gte', 'lte', 'or']) {
+      query[method] = jest.fn((...args) => {
+        calls.push([method, ...args]);
+        return query;
+      });
+    }
+    return { query, calls };
+  }
+
+  it('applies property type, reference-date, and garage filters', () => {
+    const { query, calls } = createFilterQuery();
+    applyReportFilters(query, {
+      propertyType: 'detached',
+      dateFrom: '2026-01-01',
+      dateTo: '2026-03-31',
+      garageCapacity: 'double',
+    });
+    expect(calls).toEqual([
+      ['eq', 'property_type', 'detached'],
+      ['or', 'and(effective_date.gte.2026-01-01,effective_date.lte.2026-03-31),and(effective_date.is.null,appraisal_date.gte.2026-01-01,appraisal_date.lte.2026-03-31)'],
+      ['eq', 'garage_capacity', 'double'],
+    ]);
+  });
+
+  it('keeps the report-date fallback when only one bound is given', () => {
+    const { query, calls } = createFilterQuery();
+    applyReportFilters(query, { dateFrom: '2026-01-01' });
+    expect(calls).toEqual([
+      ['or', 'and(effective_date.gte.2026-01-01),and(effective_date.is.null,appraisal_date.gte.2026-01-01)'],
+    ]);
+  });
+
+  it('applies numeric ranges and folds in unrecorded rows when asked', () => {
+    const { query, calls } = createFilterQuery();
+    applyReportFilters(query, {
+      livingAreaMin: '1500',
+      livingAreaMax: '2500',
+      frontageMin: '40',
+      includeMissingFrontage: true,
+      garageCapacity: 'not_recorded',
+    });
+    expect(calls).toEqual([
+      ['gte', 'reported_living_area_sq_ft', '1500'],
+      ['lte', 'reported_living_area_sq_ft', '2500'],
+      ['or', 'lot_frontage_ft.is.null,and(lot_frontage_ft.gte.40)'],
+      ['is', 'garage_capacity', null],
+    ]);
+  });
+
+  it('skips a range that failed validation instead of guessing', () => {
+    const { query, calls } = createFilterQuery();
+    applyReportFilters(query, {
+      livingAreaMin: '2500',
+      livingAreaMax: '1500',
+      frontageMin: 'abc',
+    });
+    expect(calls).toEqual([]);
+  });
+});
+
+describe('filtered and paged report fetches', () => {
+  beforeEach(() => resetAppraisalSchemaCapabilities());
+
+  it('sends report filters to the database before paging', async () => {
+    const rows = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    const client = createReadClient(({ from, to }) => Promise.resolve({
+      data: rows.slice(from, to + 1),
+      count: rows.length,
+      error: null,
+    }));
+    const onProgress = jest.fn();
+
+    const result = await fetchAppraisalsInBounds(client, bounds, {
+      pageSize: 2,
+      filters: { propertyType: 'detached', garageCapacity: 'not_recorded' },
+      onProgress,
+    });
+
+    expect(result.data).toHaveLength(3);
+    expect(client.calls[0].filterCalls).toEqual(expect.arrayContaining([
+      ['eq', 'property_type', 'detached'],
+      ['is', 'garage_capacity', null],
+    ]));
+    expect(onProgress).toHaveBeenCalledTimes(1);
+    expect(onProgress).toHaveBeenCalledWith({
+      data: [rows[0], rows[1]],
+      count: 3,
+      complete: false,
+    });
+    expect(result).toMatchObject({ factsSupported: true, count: 3 });
+  });
+});
+
+describe('report search', () => {
+  beforeEach(() => resetAppraisalSchemaCapabilities());
+
+  function searchClient(responder) {
+    return createReadClient(responder);
+  }
+
+  it('emits one quoted or-filter per token with ilike and property-type fallbacks', async () => {
+    const cases = [
+      ["O'Brien", [['or', 'address.ilike."*O\'Brien*",city.ilike."*O\'Brien*"']]],
+      ['50%', [['or', 'address.ilike."*50\\\\%*",city.ilike."*50\\\\%*"']]],
+      ['a_b', [['or', 'address.ilike."*a\\\\_b*",city.ilike."*a\\\\_b*"']]],
+      ['say "hi"', [
+        ['or', 'address.ilike."*say*",city.ilike."*say*"'],
+        ['or', 'address.ilike."*\\"hi\\"*",city.ilike."*\\"hi\\"*"'],
+      ]],
+      ['(paren)', [['or', 'address.ilike."*(paren)*",city.ilike."*(paren)*"']]],
+      ['semi', [['or', 'address.ilike."*semi*",city.ilike."*semi*",property_type.in.(semi_detached)']]],
+      ['***', []],
+      ['  aurora  ', [['or', 'address.ilike."*aurora*",city.ilike."*aurora*"']]],
+    ];
+    for (const [term, expected] of cases) {
+      const termClient = searchClient(() => Promise.resolve({
+        data: [], count: 0, error: null,
+      }));
+      await searchAppraisals(termClient, { term });
+      const orCalls = termClient.calls[0].filterCalls
+        .filter(([method]) => method === 'or');
+      expect(orCalls).toEqual(expected);
+    }
+  });
+
+  it('drops the property-type fallback on a database without property_type', async () => {
+    let attempt = 0;
+    const client = searchClient(() => {
+      attempt += 1;
+      return Promise.resolve(attempt === 1
+        ? {
+          data: null,
+          count: null,
+          error: {
+            code: 'PGRST204',
+            message: "Could not find the 'property_type' column of 'appraisals' in the schema cache",
+          },
+        }
+        : { data: [{ id: 'row-1' }], count: 1, error: null });
+    });
+
+    const result = await searchAppraisals(client, { term: 'semi' });
+
+    expect(client.calls).toHaveLength(2);
+    expect(client.calls[0].filterCalls.filter(([method]) => method === 'or')).toEqual([
+      ['or', 'address.ilike."*semi*",city.ilike."*semi*",property_type.in.(semi_detached)'],
+    ]);
+    expect(client.calls[1].filterCalls.filter(([method]) => method === 'or')).toEqual([
+      ['or', 'address.ilike."*semi*",city.ilike."*semi*"'],
+    ]);
+    expect(result.data).toEqual([{ id: 'row-1' }]);
+    expect(result.metadataSupported).toBe(false);
+  });
+
+  it('pages through offsets, requests a count once, and reports hasMore', async () => {
+    const client = searchClient(({ options, from, to }) => Promise.resolve({
+      data: [{ id: `row-${from}` }],
+      count: options?.count === 'exact' ? 2 : null,
+      error: null,
+    }));
+
+    const first = await searchAppraisals(client, { term: 'aurora' });
+    const second = await searchAppraisals(client, { term: 'aurora', offset: 100 });
+
+    expect(client.calls[0]).toMatchObject({
+      from: 0,
+      to: 99,
+      options: { count: 'exact' },
+    });
+    expect(client.calls[1]).toMatchObject({ from: 100, to: 199, options: undefined });
+    expect(first).toMatchObject({
+      count: 2,
+      hasMore: true,
+      term: 'aurora',
+      factsSupported: true,
+      foundationSupported: true,
+    });
+    expect(second).toMatchObject({ count: null, hasMore: false });
+
+    const noCount = searchClient(() => Promise.resolve({
+      data: Array.from({ length: 100 }, (_, index) => ({ id: index })),
+      count: null,
+      error: null,
+    }));
+    const heuristic = await searchAppraisals(noCount, { term: 'aurora', pageSize: 100 });
+    expect(heuristic.hasMore).toBe(true);
+  });
+
+  it('honours the caller abort signal on the database query', async () => {
+    const controller = new AbortController();
+    let databaseSignal;
+    const client = searchClient(({ signal }) => {
+      databaseSignal = signal;
+      return pendingUntilAborted(signal);
+    });
+
+    const pending = searchAppraisals(client, { term: 'aurora', signal: controller.signal });
+    await Promise.resolve();
+    controller.abort('navigated away');
+
+    await expect(pending).rejects.toMatchObject({ code: OPERATION_ERROR_CODES.ABORTED });
+    expect(databaseSignal).toBeDefined();
+    expect(databaseSignal.aborted).toBe(true);
   });
 });

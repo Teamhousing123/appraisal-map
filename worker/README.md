@@ -25,6 +25,17 @@ random secret. These private keys must never use a `REACT_APP_` variable.
 Set the SHA-256 of `STORAGE_RPC_SECRET` in the private storage settings table.
 Use the account, private R2 binding, and SQLite Durable Object in wrangler.jsonc.
 
+## Protected file links
+
+`POST /api/files/link` accepts `bucket`, `key`, an optional `downloadName`, and an
+optional `disposition` (`inline` or `attachment`). The signed ticket carries the
+disposition, so `Open PDF` views inline with a useful filename while `Download
+PDF` and document folders are served as attachments. Folders are always
+attachments. Tickets signed before the `disposition` field existed keep the
+previous rule (inline unless a download name was supplied). Links expire after
+`LINK_SECONDS`; the browser caches a link separately per disposition and
+discards it before expiry.
+
 ## Admission limits
 
 Ordinary R2 file storage stops at 8,000,000,000 bytes. The administrative status

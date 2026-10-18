@@ -1,5 +1,5 @@
 import '@testing-library/jest-dom';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { PROPERTY_TYPE_OPTIONS } from '../domain/appraisalFields';
 import AppraisalFormFields from './AppraisalFormFields';
 
@@ -11,6 +11,8 @@ function renderFields(overrides = {}) {
       propertyType: '',
       reportedLivingAreaSqFt: '',
       yearBuilt: '',
+      garageCapacity: '',
+      lotFrontageFt: '',
     },
     onReportDateChange: jest.fn(),
     onEffectiveDateChange: jest.fn(),
@@ -89,4 +91,62 @@ test('keeps stored property facts visible without opening a disclosure', () => {
   expect(screen.getByRole('group')).toBeVisible();
   expect(screen.getByLabelText('Property type')).toBeVisible();
   expect(screen.getByLabelText('Property type')).toHaveValue(PROPERTY_TYPE_OPTIONS[0].value);
+});
+
+test('renders the garage and frontage controls with labels, hints, and ids', () => {
+  renderFields();
+
+  const fieldset = screen.getByRole('group', { name: /Property facts/i });
+  const garage = within(fieldset).getByLabelText('Garage capacity');
+  expect(garage).toHaveAttribute('id', 'appraisal-garage-capacity');
+  expect(within(garage).getAllByRole('option').map((option) => option.textContent)).toEqual([
+    'Not recorded',
+    'None',
+    'Single',
+    'Double',
+    'Triple',
+    '4+',
+    'Other',
+    'Not applicable',
+  ]);
+  expect(garage.getAttribute('aria-describedby')).toContain('appraisal-garage-capacity-help');
+  expect(within(fieldset).getByText(/Garage spaces as reported/i)).toBeInTheDocument();
+
+  const frontage = within(fieldset).getByLabelText('Lot frontage (feet)');
+  expect(frontage).toHaveAttribute('id', 'appraisal-lot-frontage');
+  expect(frontage).toHaveAttribute('type', 'text');
+  expect(frontage).toHaveAttribute('inputmode', 'decimal');
+  expect(frontage.getAttribute('aria-describedby')).toContain('appraisal-lot-frontage-help');
+  expect(within(fieldset).getByText(/Do not convert metres or estimate/i)).toBeInTheDocument();
+
+  expect(fieldset).toHaveTextContent(/Reported year built.*Garage capacity.*Lot frontage/);
+});
+
+test('reports garage and frontage edits through onPropertyDetailChange', () => {
+  const view = renderFields();
+
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '40.5' } });
+
+  expect(view.onPropertyDetailChange).toHaveBeenNthCalledWith(1, 'garageCapacity', 'double');
+  expect(view.onPropertyDetailChange).toHaveBeenNthCalledWith(2, 'lotFrontageFt', '40.5');
+});
+
+test('associates garage and frontage errors with their inputs', () => {
+  renderFields({
+    errors: {
+      garageCapacity: 'Choose a valid garage capacity.',
+      lotFrontageFt: 'Enter the lot frontage in feet as a number with up to two decimal places, for example 40.5. Do not include units.',
+    },
+  });
+
+  const garage = screen.getByLabelText('Garage capacity');
+  expect(garage).toHaveAttribute('aria-invalid', 'true');
+  expect(garage.getAttribute('aria-describedby')).toContain('appraisal-garage-capacity-error');
+  expect(screen.getByText('Choose a valid garage capacity.')).toBeInTheDocument();
+
+  const frontage = screen.getByLabelText('Lot frontage (feet)');
+  expect(frontage).toHaveAttribute('aria-invalid', 'true');
+  expect(frontage.getAttribute('aria-describedby')).toContain('appraisal-lot-frontage-error');
+  expect(screen.getByText(/Enter the lot frontage in feet as a number/i)).toBeInTheDocument();
 });

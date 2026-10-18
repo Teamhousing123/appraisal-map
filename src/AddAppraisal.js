@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import AddressPicker from './components/AddressPicker';
 import AppraisalFormFields from './components/AppraisalFormFields';
 import {
+  normalizeOptionalDecimal,
   normalizeOptionalInteger,
   validatePropertyDetails,
 } from './domain/appraisalFields';
@@ -42,6 +43,8 @@ const EMPTY_PROPERTY_DETAILS = {
   propertyType: '',
   reportedLivingAreaSqFt: '',
   yearBuilt: '',
+  garageCapacity: '',
+  lotFrontageFt: '',
 };
 
 const MANUAL_PLACEMENT_ERROR_CODES = new Set([
@@ -60,6 +63,8 @@ function AddAppraisal({
   onAdded,
   onCancel,
   metadataSupported = null,
+  factsSupported = null,
+  subjectAddress = null,
   onWorkspaceStateChange,
   manualPlacement = { active: false, location: null, confirmed: false },
   onRequestManualPlacement,
@@ -108,6 +113,8 @@ function AddAppraisal({
     || propertyDetails.propertyType
     || propertyDetails.reportedLivingAreaSqFt
     || propertyDetails.yearBuilt
+    || propertyDetails.garageCapacity
+    || propertyDetails.lotFrontageFt
     || photo
     || pdf
     || folderFiles.length
@@ -315,6 +322,8 @@ function AddAppraisal({
         propertyDetails.reportedLivingAreaSqFt
       ),
       yearBuilt: normalizeOptionalInteger(propertyDetails.yearBuilt),
+      garageCapacity: propertyDetails.garageCapacity || null,
+      lotFrontageFt: normalizeOptionalDecimal(propertyDetails.lotFrontageFt),
     };
     const metadataPayload = {
       effective_date: effectiveDate || null,
@@ -322,10 +331,18 @@ function AddAppraisal({
       reported_living_area_sq_ft: normalizedDetails.reportedLivingAreaSqFt,
       year_built: normalizedDetails.yearBuilt,
     };
+    const factsPayload = {
+      garage_capacity: normalizedDetails.garageCapacity,
+      lot_frontage_ft: normalizedDetails.lotFrontageFt,
+    };
     const hasEnteredMetadata = Object.values(metadataPayload).some((value) => value !== null);
+    const hasEnteredFacts = Object.values(factsPayload).some((value) => value !== null);
 
     const nextFieldErrors = {
-      ...validatePropertyDetails(normalizedDetails),
+      ...validatePropertyDetails({
+        ...normalizedDetails,
+        lotFrontageFt: propertyDetails.lotFrontageFt,
+      }),
     };
 
     if (!address.trim()) nextFieldErrors.address = 'Enter the street address.';
@@ -361,6 +378,17 @@ function AddAppraisal({
         endpoint: 'supabase_database',
       });
       setError('Property comparison details are temporarily unavailable. Ask an administrator to enable them. Your files have not been uploaded.');
+      return;
+    }
+
+    if (factsSupported === false && hasEnteredFacts) {
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'failed',
+        errorCode: 'facts_unavailable',
+        operation: 'create',
+        endpoint: 'supabase_database',
+      });
+      setError('Garage and frontage facts are temporarily unavailable. Ask an administrator to finish the database update. Your files have not been uploaded.');
       return;
     }
 
@@ -586,11 +614,18 @@ function AddAppraisal({
       createAttemptedRef.current = true;
       databaseMutationAttempted = true;
       if (metadataSupported === false) {
-        ({ error: insertError, data: insertedData } = await insertAppraisal(supabase, enhancedPayload));
+        ({ error: insertError, data: insertedData } = await insertAppraisal(
+          supabase,
+          factsSupported === false ? enhancedPayload : { ...enhancedPayload, ...factsPayload }
+        ));
       } else {
         ({ error: insertError, data: insertedData } = await insertAppraisal(
           supabase,
-          { ...enhancedPayload, ...metadataPayload }
+          {
+            ...enhancedPayload,
+            ...metadataPayload,
+            ...(factsSupported === false ? {} : factsPayload),
+          }
         ));
 
         if (insertError && isMissingMetadataSchemaError(insertError)) {
@@ -775,6 +810,34 @@ function AddAppraisal({
         </div>
         <section className="am-form-section" aria-labelledby="add-address-heading">
         <h3 id="add-address-heading">Property address</h3>
+        {subjectAddress?.address && (
+          <div
+            className="appraisal-subject-prefill"
+            role="group"
+            aria-label="Searched subject address"
+          >
+            <span>
+              Searched subject: {subjectAddress.formattedAddress
+                || `${subjectAddress.address}, ${subjectAddress.city}`}
+            </span>
+            {!isBusy && (
+              <button
+                type="button"
+                className="button button--secondary"
+                onClick={() => {
+                  handleAddressChange(subjectAddress.address);
+                  handleCityChange(subjectAddress.city || '');
+                  setStatus('Address copied from the subject search. It will be verified when you save.');
+                  window.requestAnimationFrame(() => {
+                    document.getElementById('appraisal-address-street')?.focus();
+                  });
+                }}
+              >
+                Use this address
+              </button>
+            )}
+          </div>
+        )}
         <AddressPicker
           idPrefix="appraisal-address"
           address={address}

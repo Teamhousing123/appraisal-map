@@ -1,13 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '../supabaseClient';
 import {
-  formatPropertyType,
-  formatReportedLivingArea,
-  formatYearBuilt,
   normalizeAppraisalFields,
   validatePropertyDetails,
 } from '../domain/appraisalFields';
-import { formatDateOnly, validateOptionalDateOrder } from '../domain/dates';
+import { validateOptionalDateOrder } from '../domain/dates';
 import {
   addressFingerprint,
   formatCanonicalStreetAddress,
@@ -32,11 +29,14 @@ import {
   APPRAISAL_COMMIT_STATUS,
   isAppraisalMutationNotAppliedError,
   isAppraisalVersionConflictError,
+  isFactsSchemaRequiredError,
   isMissingMetadataSchemaError,
   updateAppraisal,
 } from '../services/appraisalService';
 import AppraisalFormFields from './AppraisalFormFields';
 import AddressPicker from './AddressPicker';
+import PrimaryFacts from './PrimaryFacts';
+import CopyActions from './CopyActions';
 import { uploadStorageObject } from '../services/resumableUpload';
 import { isAbortError } from '../services/operation';
 import { recordTelemetryEvent } from '../services/telemetry';
@@ -100,6 +100,10 @@ function initialFormState(appraisal) {
     propertyType: appraisal.property_type || '',
     reportedLivingAreaSqFt: appraisal.reported_living_area_sq_ft || '',
     yearBuilt: appraisal.year_built || '',
+    garageCapacity: appraisal.garage_capacity || '',
+    lotFrontageFt: appraisal.lot_frontage_ft === null || appraisal.lot_frontage_ft === undefined
+      ? ''
+      : String(appraisal.lot_frontage_ft),
   };
 }
 
@@ -109,6 +113,13 @@ function metadataHasValue(form) {
     || form.propertyType
     || form.reportedLivingAreaSqFt
     || form.yearBuilt
+  );
+}
+
+function factsHaveValue(form) {
+  return Boolean(
+    form.garageCapacity
+    || String(form.lotFrontageFt ?? '').trim()
   );
 }
 
@@ -128,6 +139,7 @@ function AppraisalDetailPanel({
   onOpenReport,
   openingReportId = null,
   metadataSupported,
+  factsSupported = null,
   canMutate = true,
   onWorkspaceStateChange,
   runWorkspaceAction = (action) => action?.(),
@@ -428,6 +440,16 @@ function AppraisalDetailPanel({
       setError('Property comparison details are temporarily unavailable. Ask an administrator to enable them.');
       return;
     }
+    if (factsSupported === false && factsHaveValue(formSnapshot)) {
+      recordTelemetryEvent('appraisal_mutation', {
+        outcome: 'failed',
+        errorCode: 'facts_unavailable',
+        operation: 'update',
+        endpoint: 'supabase_database',
+      });
+      setError('Garage and frontage facts are temporarily unavailable. Ask an administrator to finish the database update.');
+      return;
+    }
 
     setError('');
     setStatus('');
@@ -556,6 +578,8 @@ function AppraisalDetailPanel({
         property_type: formSnapshot.propertyType,
         reported_living_area_sq_ft: formSnapshot.reportedLivingAreaSqFt,
         year_built: formSnapshot.yearBuilt,
+        garage_capacity: formSnapshot.garageCapacity,
+        lot_frontage_ft: formSnapshot.lotFrontageFt,
       });
       let updates = {
         address: addressChanged && verifiedAddressMatch
@@ -571,6 +595,10 @@ function AppraisalDetailPanel({
       if (metadataSupported === false) {
         const { effective_date, property_type, reported_living_area_sq_ft, year_built, ...legacyUpdates } = updates;
         updates = legacyUpdates;
+      }
+      if (factsSupported === false) {
+        const { garage_capacity, lot_frontage_ft, ...withoutFacts } = updates;
+        updates = withoutFacts;
       }
 
       if (addressChanged) {
@@ -697,7 +725,8 @@ function AppraisalDetailPanel({
       setUploadProgress(null);
       const confirmedNotCommitted = saveError?.commitStatus === APPRAISAL_COMMIT_STATUS.ABSENT
         || isAppraisalVersionConflictError(saveError)
-        || isMissingMetadataSchemaError(saveError);
+        || isMissingMetadataSchemaError(saveError)
+        || isFactsSchemaRequiredError(saveError);
       const safeToRollback = !rowCommitted && (!databaseMutationAttempted || confirmedNotCommitted);
       const rollbackFailures = safeToRollback
         ? await cleanupUploadedObjects(supabase, uploadedPaths)
@@ -1001,8 +1030,6 @@ function AppraisalDetailPanel({
     );
   }
 
-  const dateLabel = appraisal.effective_date ? 'Effective date' : 'Report date';
-  const dateValue = appraisal.effective_date || appraisal.appraisal_date;
   const hasPdf = Boolean(appraisal.pdf_url);
   const folderPaths = Array.isArray(appraisal.folder_files)
     ? appraisal.folder_files.filter(Boolean)
@@ -1028,20 +1055,32 @@ function AppraisalDetailPanel({
         {appraisal.address_verification_status === 'manual' && (
           <p className="address-review-status">Manually placed · needs review</p>
         )}
+        <PrimaryFacts report={appraisal} variant="detail" includeReportDate />
+        <CopyActions report={appraisal} idPrefix="detail" />
         {hasPdf ? (
-          <button
-            type="button"
-            className="button button--report button--full"
-            onClick={() => onOpenReport(appraisal)}
-            disabled={openingDocument}
-          >
-            <DocumentIcon /> {openingDocument ? 'Preparing…' : 'Open PDF'}
-          </button>
+          <div className="detail-document-actions">
+            <button
+              type="button"
+              className="button button--report button--full"
+              onClick={() => onOpenReport(appraisal)}
+              disabled={openingDocument}
+            >
+              <DocumentIcon /> {openingDocument ? 'Preparing…' : 'Open PDF'}
+            </button>
+            <button
+              type="button"
+              className="button button--secondary"
+              onClick={() => onOpenReport(appraisal, { action: 'download' })}
+              disabled={openingDocument}
+            >
+              <DocumentIcon /> Download PDF
+            </button>
+          </div>
         ) : folderPaths.length === 1 ? (
           <button
             type="button"
             className="button button--report button--full"
-            onClick={() => onOpenReport(appraisal, folderPaths[0])}
+            onClick={() => onOpenReport(appraisal, { folderPath: folderPaths[0] })}
             disabled={openingDocument}
           >
             <DocumentIcon /> {openingDocument ? 'Preparing…' : 'Download document folder'}
@@ -1060,7 +1099,7 @@ function AppraisalDetailPanel({
                 key={`${appraisal.id}-folder-${index}`}
                 type="button"
                 className="button button--secondary"
-                onClick={() => onOpenReport(appraisal, folderPath)}
+                onClick={() => onOpenReport(appraisal, { folderPath })}
                 disabled={openingDocument}
               >
                 <DocumentIcon /> {openingDocument ? 'Preparing…' : `Download folder ${index + 1}`}
@@ -1085,16 +1124,6 @@ function AppraisalDetailPanel({
             )}
           </div>
         )}
-
-        <dl className="detail-facts">
-          <div><dt>{dateLabel}</dt><dd>{formatDateOnly(dateValue)}</dd></div>
-          {appraisal.effective_date && appraisal.appraisal_date && (
-            <div><dt>Report date</dt><dd>{formatDateOnly(appraisal.appraisal_date)}</dd></div>
-          )}
-          <div><dt>Property type</dt><dd>{formatPropertyType(appraisal.property_type)}</dd></div>
-          <div><dt>Reported living area</dt><dd>{formatReportedLivingArea(appraisal.reported_living_area_sq_ft)}</dd></div>
-          <div><dt>Reported year built</dt><dd>{formatYearBuilt(appraisal.year_built)}</dd></div>
-        </dl>
 
         <div className={`detail-photo detail-photo--${photoState.status}`}>
           {photoState.url ? <img src={photoState.url} alt={`Property at ${appraisal.address}`} /> : (

@@ -15,6 +15,7 @@ import { getAppraisalAccess } from './domain/access';
 import {
   GEOCODING_ERROR_CODES,
   SUPPORTED_MAP_BOUNDS,
+  formatCanonicalStreetAddress,
   getAddressPredictions,
   isWithinSupportedMapBounds,
   resolveAddressSuggestion,
@@ -22,13 +23,16 @@ import {
 } from './domain/geocoding';
 import { SERVICE_AREA } from './domain/serviceArea';
 import {
+  DEFAULT_FACT_FILTERS,
+  countActiveFilters,
   countReportsMissingFilterData,
   filterAndSortReports,
   getReportDistanceKm,
 } from './domain/filters';
-import { fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
+import { DEFAULT_PAGE_SIZE, fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
 import { recordTelemetryEvent } from './services/telemetry';
 import { createProtectedFileLink, isR2StorageEnabled } from './services/cloudflareStorage';
+import { describeDocument, showPendingDocument } from './services/documentLinks';
 import SubjectSearch from './components/SubjectSearch';
 import NearbyWorkspace from './components/NearbyWorkspace';
 import AppraisalDetailPanel from './components/AppraisalDetailPanel';
@@ -55,7 +59,32 @@ const DEFAULT_FILTERS = {
   dateFrom: '',
   dateTo: '',
   sortBy: 'newest',
+  ...DEFAULT_FACT_FILTERS,
 };
+
+export function getServerFilters(filters = {}) {
+  const serverFilters = {
+    propertyType: filters.propertyType || '',
+    dateFrom: filters.dateFrom || '',
+    dateTo: filters.dateTo || '',
+    livingAreaMin: filters.livingAreaMin || '',
+    livingAreaMax: filters.livingAreaMax || '',
+    includeMissingLivingArea: Boolean(filters.includeMissingLivingArea),
+    frontageMin: filters.frontageMin || '',
+    frontageMax: filters.frontageMax || '',
+    includeMissingFrontage: Boolean(filters.includeMissingFrontage),
+    garageCapacity: filters.garageCapacity || '',
+  };
+  const active = serverFilters.propertyType
+    || serverFilters.dateFrom
+    || serverFilters.dateTo
+    || serverFilters.livingAreaMin
+    || serverFilters.livingAreaMax
+    || serverFilters.frontageMin
+    || serverFilters.frontageMax
+    || serverFilters.garageCapacity;
+  return active ? serverFilters : null;
+}
 const EMPTY_WORKSPACE_STATE = { dirty: false, busy: false };
 const GOOGLE_AUTH_FAILURE_EVENT = 'appraisal-map:google-auth-failure';
 
@@ -239,26 +268,6 @@ function withTimeout(promise, timeoutMs, message) {
   ]).finally(() => window.clearTimeout(timer));
 }
 
-function safeDocumentName(report, extension) {
-  const base = `${report.address || 'appraisal'}-${report.city || 'report'}`
-    .replace(/[^a-z0-9]+/gi, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 80) || 'appraisal-report';
-  return `${base}.${extension}`;
-}
-
-function showPendingDocument(windowReference, label) {
-  if (!windowReference?.document) return;
-  const document = windowReference.document;
-  document.title = `Preparing ${label}`;
-  document.body.replaceChildren();
-  document.body.style.cssText = 'margin:0;min-height:100vh;display:grid;place-items:center;background:#f0f3ee;color:#172529;font:16px/1.5 system-ui,sans-serif';
-  const status = document.createElement('p');
-  status.setAttribute('role', 'status');
-  status.textContent = `Preparing your protected ${label.toLowerCase()}…`;
-  document.body.appendChild(status);
-}
-
 function getAddressFailurePresentation(error, fallbackMessage) {
   const message = error?.isUserFacing || error?.code === GEOCODING_ERROR_CODES.ZERO_RESULTS
     ? error?.message
@@ -273,6 +282,11 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const [lastSuccessfulAt, setLastSuccessfulAt] = useState(null);
   const [truncated, setTruncated] = useState(false);
   const [metadataSupported, setMetadataSupported] = useState(null);
+  const [factsSupported, setFactsSupported] = useState(null);
+  const [loadProgress, setLoadProgress] = useState(null);
+  const [areaTruncated, setAreaTruncated] = useState(false);
+  const [serverFiltered, setServerFiltered] = useState(false);
+  const [unfilteredQueryKey, setUnfilteredQueryKey] = useState(null);
   const [selectedAppraisal, setSelectedAppraisal] = useState(null);
   const [hoveredReportId, setHoveredReportId] = useState(null);
   const [panelMode, setPanelMode] = useState('nearby');
@@ -300,6 +314,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   const mapRef = useRef(null);
   const mapIdleTimerRef = useRef(null);
+  const mapLoadFallbackTimerRef = useRef(null);
   const autocompleteTimerRef = useRef(null);
   const autocompleteRequestRef = useRef(0);
   const autocompleteSessionTokenRef = useRef(null);
@@ -315,6 +330,10 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const previousPanelModeRef = useRef('nearby');
   const nearbyPositionRef = useRef({ top: 0, reportId: null, label: '', visibleCount: 60, factsOpen: false });
   const screenObserverRef = useRef(null);
+  const serverFilteredRef = useRef(false);
+  const areaTruncatedRef = useRef(false);
+  const serverFiltersRef = useRef(null);
+  const programmaticCameraUntilRef = useRef(0);
   const discardReturnFocusRef = useRef(null);
 
   const { isLoaded, loadError } = useJsApiLoader({
@@ -427,7 +446,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     ],
   }), []);
 
-  const fetchReports = useCallback(async (bounds, { force = false } = {}) => {
+  const fetchReports = useCallback(async (bounds, { force = false, serverFilters = null } = {}) => {
     if (!bounds) return;
     if (!force && boundsContain(lastSuccessfulQueryBoundsRef.current, bounds)) return;
     const queryBounds = padBounds(bounds);
@@ -441,12 +460,32 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     setReportsError('');
 
     try {
-      const result = await fetchAppraisalsInBounds(supabase, queryBounds, { signal: controller.signal });
+      const result = await fetchAppraisalsInBounds(supabase, queryBounds, {
+        signal: controller.signal,
+        filters: serverFilters,
+        onProgress: ({ data, count }) => {
+          if (controller.signal.aborted) return;
+          setLoadProgress({ loaded: data.length, total: count });
+          // Re-rendering thousands of markers for every intermediate page made
+          // completion ~7 s slower; render only the first page while the counter
+          // keeps reporting progress.
+          if (data.length <= DEFAULT_PAGE_SIZE) setAppraisals(applySpiralOffset(data));
+        },
+      });
       if (controller.signal.aborted) return;
       const nextAppraisals = applySpiralOffset(result.data);
       setAppraisals(nextAppraisals);
       setTruncated(result.truncated);
       setMetadataSupported(result.metadataSupported);
+      setFactsSupported(result.factsSupported);
+      setLoadProgress(null);
+      setServerFiltered(Boolean(serverFilters));
+      serverFilteredRef.current = Boolean(serverFilters);
+      if (!serverFilters) {
+        setAreaTruncated(result.truncated);
+        areaTruncatedRef.current = result.truncated;
+        setUnfilteredQueryKey(key);
+      }
       setCandidates((current) => current.map((candidate) => (
         nextAppraisals.find((report) => report.id === candidate.id) || candidate
       )));
@@ -475,6 +514,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       if (reportRequestRef.current === controller) {
         reportRequestRef.current = null;
         setLoadingReports(false);
+        setLoadProgress(null);
       }
     }
   }, []);
@@ -484,7 +524,10 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     if (!bounds) return;
     lastSuccessfulBoundsKeyRef.current = null;
     lastSuccessfulQueryBoundsRef.current = null;
-    fetchReports(bounds, { force: true });
+    fetchReports(bounds, {
+      force: true,
+      serverFilters: areaTruncatedRef.current ? serverFiltersRef.current : null,
+    });
   }, [fetchReports]);
 
   const handleMapIdle = useCallback(() => {
@@ -493,12 +536,36 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       const bounds = boundsFromMap(mapRef.current);
       if (!bounds) return;
       lastBoundsRef.current = bounds;
+      if (Date.now() < programmaticCameraUntilRef.current) return;
       fetchReports(bounds);
     }, MAP_IDLE_DEBOUNCE_MS);
   }, [fetchReports]);
 
+  const serverFilters = useMemo(() => getServerFilters(filters), [filters]);
+  const serverFilterKey = JSON.stringify(serverFilters);
+
+  useEffect(() => {
+    serverFiltersRef.current = serverFilters;
+  }, [serverFilters]);
+
+  // When an unfiltered fetch hits the display cap and an active filter is
+  // expressible server-side, issue exactly one filtered refetch. Clearing the
+  // filters restores the unfiltered set exactly once. Unfiltered fetches are
+  // the only writers of areaTruncated/unfilteredQueryKey, so this cannot loop.
+  useEffect(() => {
+    const bounds = lastBoundsRef.current;
+    if (!bounds) return;
+    const activeServerFilters = serverFiltersRef.current;
+    if (areaTruncated && activeServerFilters) {
+      fetchReports(bounds, { force: true, serverFilters: activeServerFilters });
+    } else if (!activeServerFilters && serverFilteredRef.current) {
+      fetchReports(bounds, { force: true });
+    }
+  }, [serverFilterKey, areaTruncated, unfilteredQueryKey, fetchReports]);
+
   useEffect(() => () => {
     if (mapIdleTimerRef.current) window.clearTimeout(mapIdleTimerRef.current);
+    if (mapLoadFallbackTimerRef.current) window.clearTimeout(mapLoadFallbackTimerRef.current);
     if (autocompleteTimerRef.current) window.clearTimeout(autocompleteTimerRef.current);
     if (reportRequestRef.current) reportRequestRef.current.abort();
   }, []);
@@ -591,24 +658,29 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     () => countReportsMissingFilterData(preparedReports),
     [preparedReports]
   );
-  const activeFilterCount = [filters.radiusKm, filters.propertyType, filters.dateFrom, filters.dateTo]
-    .filter(Boolean).length;
+  const decoratedCandidates = useMemo(() => candidates.map((candidate) => ({
+    ...candidate,
+    _distanceKm: subject ? getReportDistanceKm(candidate, subject) : null,
+    _formattedEffectiveDate: formatDateOnly(candidate.effective_date),
+    _formattedReportDate: formatDateOnly(candidate.appraisal_date),
+  })), [candidates, subject]);
+  const activeFilterCount = countActiveFilters(filters);
 
-  const getSignedUrl = useCallback(async (bucket, path, downloadName = null) => {
+  const getSignedUrl = useCallback(async (bucket, path, { downloadName = null, disposition = 'inline' } = {}) => {
     if (!path) return null;
-    const key = `${bucket}/${path}`;
+    const key = `${bucket}/${path}/${disposition}`;
     const cached = signedUrlCacheRef.current.get(key);
     if (cached && cached.expiresAt - SIGNED_URL_REFRESH_BUFFER_MS > Date.now()) return cached.url;
 
     const { data, error } = await withTimeout(
       isR2StorageEnabled()
-        ? createProtectedFileLink(supabase, bucket, path, downloadName)
+        ? createProtectedFileLink(supabase, bucket, path, { downloadName, disposition })
         : supabase.storage
         .from(bucket)
         .createSignedUrl(
           path,
           SIGNED_URL_TTL_SECONDS,
-          downloadName ? { download: downloadName } : undefined
+          disposition === 'attachment' && downloadName ? { download: downloadName } : undefined
         ),
       REMOTE_OPERATION_TIMEOUT_MS,
       'The protected report link took too long to prepare.'
@@ -617,24 +689,22 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       console.error(`Could not create a protected link for ${bucket}`, error);
       return null;
     }
+    const expiresInSeconds = Number.isFinite(data?.expiresIn)
+      ? data.expiresIn
+      : SIGNED_URL_TTL_SECONDS;
     signedUrlCacheRef.current.set(key, {
       url: data.signedUrl,
-      expiresAt: Date.now() + SIGNED_URL_TTL_SECONDS * 1000,
+      expiresAt: Date.now() + expiresInSeconds * 1000,
     });
     return data.signedUrl;
   }, []);
 
-  const handleOpenReport = useCallback(async (report, explicitFolderPath = null) => {
-    const pdfPath = explicitFolderPath ? null : report.pdf_url;
-    const folderPath = explicitFolderPath || report.folder_files?.[0];
-    const bucket = pdfPath ? 'pdfs' : folderPath ? 'appraisal-folders' : null;
-    const path = pdfPath || folderPath;
-    const isFolder = Boolean(folderPath);
-    const documentLabel = isFolder ? 'document folder' : 'PDF';
-    const downloadName = isFolder
-      ? safeDocumentName(report, 'zip')
-      : safeDocumentName(report, 'pdf');
-    if (!bucket || !path) {
+  const handleOpenReport = useCallback(async (report, options = {}) => {
+    const { folderPath = null, action = 'open' } = typeof options === 'string'
+      ? { folderPath: options }
+      : options || {};
+    const describe = describeDocument(report, { folderPath, action });
+    if (!describe) {
       showToast({ tone: 'info', message: 'No report document is attached to this record.' });
       return;
     }
@@ -642,22 +712,25 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     const pendingWindow = window.open('about:blank', '_blank');
     if (pendingWindow) {
       pendingWindow.opener = null;
-      showPendingDocument(pendingWindow, documentLabel);
+      showPendingDocument(pendingWindow, describe.label);
     }
     setOpeningReportId(report.id);
     try {
-      const url = await getSignedUrl(bucket, path, downloadName);
+      const url = await getSignedUrl(describe.bucket, describe.path, {
+        downloadName: describe.downloadName,
+        disposition: describe.disposition,
+      });
       if (!url) throw new Error('The protected report link was not returned.');
       if (pendingWindow) {
         pendingWindow.location.replace(url);
       } else {
         showToast({
           tone: 'info',
-          title: `${documentLabel === 'PDF' ? 'PDF' : 'Folder'} ready`,
+          title: `${describe.label === 'PDF' ? 'PDF' : 'Folder'} ready`,
           message: 'Your browser blocked the new tab. Use the button below to continue.',
           persistent: true,
           action: {
-            label: isFolder ? 'Download folder' : 'Open PDF',
+            label: describe.actionLabel,
             href: url,
             target: '_self',
           },
@@ -665,7 +738,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       }
       recordTelemetryEvent('document_open', {
         outcome: 'success',
-        documentType: isFolder ? 'folder' : 'pdf',
+        documentType: describe.isFolder ? 'folder' : 'pdf',
         endpoint: 'supabase_storage',
       });
     } catch (error) {
@@ -679,7 +752,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       recordTelemetryEvent('document_open', {
         outcome: 'failed',
         errorCode: error?.code || 'unknown',
-        documentType: isFolder ? 'folder' : 'pdf',
+        documentType: describe.isFolder ? 'folder' : 'pdf',
         endpoint: 'supabase_storage',
       });
     } finally {
@@ -773,6 +846,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         latitude,
         longitude,
         address: place.formattedAddress || suggestion.description,
+        streetAddress: formatCanonicalStreetAddress(place),
+        city: place.components?.city || '',
         propertyType: '',
         reportedLivingAreaSqFt: '',
         yearBuilt: '',
@@ -868,6 +943,13 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     }
   }, [fitMapToSubjectRadius, subject]);
 
+  const handleApplyFilters = useCallback((partial = {}) => {
+    setFilters((current) => ({ ...current, ...partial }));
+    if (partial.radiusKm && subject) {
+      fitMapToSubjectRadius(subject, partial.radiusKm);
+    }
+  }, [fitMapToSubjectRadius, subject]);
+
   const handleResetFilters = useCallback(() => {
     setFilters({ ...DEFAULT_FILTERS, sortBy: subject ? 'distance' : 'newest' });
   }, [subject]);
@@ -889,9 +971,10 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     });
   }, [showToast, subject]);
 
-  const focusReportOnMap = useCallback((report) => {
+  const focusReportOnMap = useCallback((report, { suppressFetch = false } = {}) => {
     const map = mapRef.current;
     if (!map || !report) return;
+    if (suppressFetch) programmaticCameraUntilRef.current = Date.now() + 1500;
     map.panTo({ lat: Number(report.latitude), lng: Number(report.longitude) });
     if ((map.getZoom?.() || 0) < 15) map.setZoom?.(15);
     window.requestAnimationFrame(() => {
@@ -905,7 +988,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
       setSelectedAppraisal(report);
       setPanelMode('detail');
       setPanelOpen(true);
-      focusReportOnMap(report);
+      focusReportOnMap(report, { suppressFetch: true });
     });
   }, [focusReportOnMap, runWorkspaceAction]);
 
@@ -947,6 +1030,9 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         String(report.id) === String(updated.id) ? { ...report, ...updated } : report
       )));
       setSelectedAppraisal((current) => current ? { ...current, ...updated } : updated);
+      setCandidates((current) => current.map((candidate) => (
+        String(candidate.id) === String(updated.id) ? { ...candidate, ...updated } : candidate
+      )));
     }
     setPanelMode('detail');
     refreshCurrentBounds();
@@ -1327,7 +1413,17 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         ) : (
           <GoogleMap
             mapContainerStyle={MAP_CONTAINER_STYLE}
-            onLoad={(map) => { mapRef.current = map; }}
+            onLoad={(map) => {
+              mapRef.current = map;
+              // Some environments never fire `idle` (seen intermittently in
+              // headless Chromium); attempt one bounds fetch anyway rather than
+              // sitting silently at "Showing 0 of 0".
+              if (mapLoadFallbackTimerRef.current) window.clearTimeout(mapLoadFallbackTimerRef.current);
+              mapLoadFallbackTimerRef.current = window.setTimeout(() => {
+                mapLoadFallbackTimerRef.current = null;
+                if (!lastBoundsRef.current) handleMapIdle();
+              }, 6000);
+            }}
             onUnmount={() => { mapRef.current = null; }}
             onIdle={handleMapIdle}
             onClick={handleMapClick}
@@ -1447,6 +1543,12 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                   onAdded={handleAdded}
                   onCancel={() => runWorkspaceAction(() => setPanelMode('nearby'))}
                   metadataSupported={metadataSupported}
+                  factsSupported={factsSupported}
+                  subjectAddress={subject?.streetAddress ? {
+                    address: subject.streetAddress,
+                    city: subject.city,
+                    formattedAddress: subject.address,
+                  } : null}
                   onWorkspaceStateChange={handleWorkspaceStateChange}
                   manualPlacement={manualPlacement}
                   onRequestManualPlacement={beginManualPlacement}
@@ -1467,6 +1569,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 onOpenReport={handleOpenReport}
                 openingReportId={openingReportId}
                 metadataSupported={metadataSupported}
+                factsSupported={factsSupported}
                 canMutate={canMutate}
                 runWorkspaceAction={runWorkspaceAction}
                 onWorkspaceStateChange={handleWorkspaceStateChange}
@@ -1482,19 +1585,19 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 error={reportsError}
                 lastUpdatedAt={lastSuccessfulAt}
                 truncated={truncated}
+                serverFiltered={serverFiltered}
+                loadProgress={loadProgress}
                 metadataSupported={metadataSupported}
+                factsSupported={factsSupported}
                 filters={filters}
                 activeFilterCount={activeFilterCount}
                 missingFilterCounts={missingFilterCounts}
                 onFilterChange={handleFilterChange}
+                onApplyFilters={handleApplyFilters}
                 onResetFilters={handleResetFilters}
+                onRefresh={refreshCurrentBounds}
                 candidateIds={candidateIds}
-                candidates={candidates.map((candidate) => ({
-                  ...candidate,
-                  _distanceKm: subject ? getReportDistanceKm(candidate, subject) : null,
-                  _formattedEffectiveDate: formatDateOnly(candidate.effective_date),
-                  _formattedReportDate: formatDateOnly(candidate.appraisal_date),
-                }))}
+                candidates={decoratedCandidates}
                 onToggleCandidate={handleToggleCandidate}
                 onOpenDetails={handleOpenDetails}
                 onOpenReport={handleOpenReport}

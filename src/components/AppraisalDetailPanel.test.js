@@ -4,6 +4,7 @@ import AppraisalDetailPanel from './AppraisalDetailPanel';
 import { geocodeFullOntarioAddress } from '../domain/geocoding';
 import { deleteAppraisal, updateAppraisal } from '../services/appraisalService';
 import { supabase } from '../supabaseClient';
+import { copyTextToClipboard } from '../services/clipboard';
 import { configureTelemetrySink } from '../services/telemetry';
 
 let uploadObject;
@@ -24,6 +25,10 @@ jest.mock('../supabaseClient', () => ({
   supabase: {
     storage: { from: jest.fn() },
   },
+}));
+
+jest.mock('../services/clipboard', () => ({
+  copyTextToClipboard: jest.fn(),
 }));
 
 const appraisal = {
@@ -60,6 +65,8 @@ function renderPanel(overrides = {}) {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  copyTextToClipboard.mockReset();
+  copyTextToClipboard.mockResolvedValue({ ok: true });
   updateAppraisal.mockReset();
   updateAppraisal.mockResolvedValue({ data: { id: appraisal.id }, error: null });
   deleteAppraisal.mockReset();
@@ -261,12 +268,12 @@ test('exposes every legacy folder with privacy-safe labels', () => {
   expect(view.onOpenReport).toHaveBeenNthCalledWith(
     1,
     expect.objectContaining({ id: appraisal.id }),
-    'private/path-one.zip'
+    { folderPath: 'private/path-one.zip' }
   );
   expect(view.onOpenReport).toHaveBeenNthCalledWith(
     2,
     expect.objectContaining({ id: appraisal.id }),
-    'private/path-two.zip'
+    { folderPath: 'private/path-two.zip' }
   );
   expect(screen.queryByText(/path-one|path-two/i)).not.toBeInTheDocument();
 });
@@ -344,4 +351,186 @@ test('explains how to switch document modes without discarding a selected file',
   expect(screen.getByRole('alert')).toHaveTextContent(/Remove the selected replacement PDF/i);
   expect(screen.getByRole('button', { name: 'Single PDF' })).toHaveAttribute('aria-pressed', 'true');
   expect(screen.getByText('replacement.pdf')).toBeInTheDocument();
+});
+
+test('shows all primary facts plus the report date when both dates exist', () => {
+  renderPanel({
+    appraisal: {
+      ...appraisal,
+      effective_date: '2025-06-08',
+      appraisal_date: '2025-06-10',
+      property_type: 'detached',
+      reported_living_area_sq_ft: 2100,
+      year_built: 1998,
+      garage_capacity: 'double',
+      lot_frontage_ft: 40.5,
+    },
+  });
+
+  const facts = screen.getByLabelText('Primary facts');
+  expect(facts).toHaveTextContent(/Effective date.*Jun 8, 2025/);
+  expect(facts).toHaveTextContent(/Report date.*Jun 10, 2025/);
+  expect(facts).toHaveTextContent(/Living area.*2,100 sq ft/);
+  expect(facts).toHaveTextContent(/Garage.*Double/);
+  expect(facts).toHaveTextContent(/Frontage.*40.5 ft/);
+  expect(facts).toHaveTextContent(/Property type.*Detached/);
+  expect(facts).toHaveTextContent(/Year built.*1998/);
+});
+
+test('copies the address and the labelled facts summary with feedback', async () => {
+  renderPanel({
+    appraisal: {
+      ...appraisal,
+      address: '10 Example Road, Unit 5',
+      appraisal_date: '2025-06-10',
+      reported_living_area_sq_ft: 2100,
+      garage_capacity: 'double',
+      lot_frontage_ft: 40.5,
+    },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Copy address for 10 Example Road, Unit 5' }));
+  await waitFor(() => expect(copyTextToClipboard).toHaveBeenCalledWith('10 Example Road, Unit 5, Aurora'));
+  expect(await screen.findByRole('status')).toHaveTextContent('Address copied.');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Copy facts for 10 Example Road, Unit 5' }));
+  await waitFor(() => expect(copyTextToClipboard).toHaveBeenCalledWith(
+    'Report date: Jun 10, 2025 | Living area: 2,100 sq ft | Garage: Double | Frontage: 40.5 ft'
+  ));
+  expect(await screen.findByRole('status')).toHaveTextContent('Facts copied.');
+});
+
+test('shows the manual-copy message when clipboard access is denied', async () => {
+  copyTextToClipboard.mockResolvedValue({ ok: false, reason: 'denied' });
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: `Copy address for ${appraisal.address}` }));
+
+  expect(await screen.findByRole('status')).toHaveTextContent(
+    'Clipboard access was denied. Select the text and copy it manually.'
+  );
+});
+
+test('opens the PDF inline and downloads it as an attachment', () => {
+  const view = renderPanel({
+    appraisal: { ...appraisal, pdf_url: 'private/report.pdf' },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Open PDF' }));
+  expect(view.onOpenReport).toHaveBeenLastCalledWith(
+    expect.objectContaining({ id: appraisal.id })
+  );
+  expect(view.onOpenReport.mock.calls.at(-1)).toHaveLength(1);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Download PDF' }));
+  expect(view.onOpenReport).toHaveBeenLastCalledWith(
+    expect.objectContaining({ id: appraisal.id }),
+    { action: 'download' }
+  );
+});
+
+test('prefills garage and frontage and saves them with the other fields', async () => {
+  const view = renderPanel({
+    appraisal: {
+      ...appraisal,
+      garage_capacity: 'single',
+      lot_frontage_ft: 30,
+      property_type: 'detached',
+    },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  expect(screen.getByLabelText('Garage capacity')).toHaveValue('single');
+  expect(screen.getByLabelText('Lot frontage (feet)')).toHaveValue('30');
+
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '40.5' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({
+      address: '10 Example Road',
+      city: 'Aurora',
+      garage_capacity: 'double',
+      lot_frontage_ft: 40.5,
+      property_type: 'detached',
+    })
+  );
+  await waitFor(() => expect(view.onUpdated).toHaveBeenCalled());
+});
+
+test('sends null facts when both fields are cleared', async () => {
+  renderPanel({
+    appraisal: { ...appraisal, garage_capacity: 'single', lot_frontage_ft: 30 },
+  });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: '' } });
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(updateAppraisal).toHaveBeenCalledWith(
+    supabase,
+    appraisal.id,
+    expect.objectContaining({ garage_capacity: null, lot_frontage_ft: null })
+  );
+});
+
+test('blocks saving an invalid unit-bearing frontage with a field error', async () => {
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '12 m' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  expect(updateAppraisal).not.toHaveBeenCalled();
+  const frontageInput = screen.getByLabelText('Lot frontage (feet)');
+  expect(frontageInput).toHaveAttribute('aria-invalid', 'true');
+  expect(frontageInput.getAttribute('aria-describedby')).toContain('appraisal-lot-frontage-error');
+  expect(screen.getByText(/Enter the lot frontage in feet as a number/i)).toBeInTheDocument();
+});
+
+test('blocks saving entered facts before uploading when the facts schema is unavailable', async () => {
+  renderPanel({ factsSupported: false });
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText('Replacement PDF'), {
+    target: { files: [new File(['pdf'], 'replacement.pdf', { type: 'application/pdf' })] },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Garage and frontage facts are temporarily unavailable/i);
+  expect(uploadObject).not.toHaveBeenCalled();
+  expect(updateAppraisal).not.toHaveBeenCalled();
+});
+
+test('shows a facts-schema-required update error and rolls back the replacement upload', async () => {
+  const factsError = Object.assign(
+    new Error('Garage and frontage facts are temporarily unavailable. Ask an administrator to finish the database update.'),
+    {
+      code: 'APPRAISAL_FACTS_SCHEMA_REQUIRED',
+      commitStatus: 'absent',
+      isUserFacing: true,
+      isInfrastructureFailure: true,
+    }
+  );
+  updateAppraisal.mockResolvedValue({ data: null, error: factsError });
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText('Replacement PDF'), {
+    target: { files: [new File(['pdf'], 'replacement.pdf', { type: 'application/pdf' })] },
+  });
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }));
+
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Garage and frontage facts are temporarily unavailable/i);
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledTimes(1));
+  expect(uploadObject).toHaveBeenCalledTimes(1);
+  await waitFor(() => expect(removeObject).toHaveBeenCalledTimes(1));
 });

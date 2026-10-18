@@ -23,6 +23,20 @@ describe('date-only helpers', () => {
     expect(formatDateOnly(null)).toBe('Not recorded');
   });
 
+  it('formats identically across cached calls and honours a custom locale', () => {
+    const first = formatDateOnly('2026-04-10');
+    const second = formatDateOnly('2026-04-10');
+    expect(first).toBe(second);
+
+    const expected = new Intl.DateTimeFormat('fr-CA', {
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+    }).format(new Date(2026, 3, 10));
+    expect(formatDateOnly('2026-04-10', { locale: 'fr-CA' })).toBe(expected);
+    expect(formatDateOnly('2026-04-10', { locale: 'fr-CA' })).toBe(expected);
+  });
+
   it('uses effective date before the report-date fallback', () => {
     expect(getReferenceDate({
       effective_date: '2026-04-10',

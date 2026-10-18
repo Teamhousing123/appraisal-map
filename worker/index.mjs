@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { chargeBudget, completedParts, LINK_SECONDS, partBytes, safeDownloadName, validateUpload } from './limits.mjs';
+import { chargeBudget, completedParts, contentDispositionHeader, LINK_SECONDS, partBytes, safeDisposition, safeDownloadName, validateUpload } from './limits.mjs';
 
 const authenticatedCache = new Map();
 const encoder = new TextEncoder();
@@ -79,8 +79,8 @@ async function hmacKey(env) {
 function encodeBase64(bytes) { return btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
 function decodeBase64(value) { return Uint8Array.from(atob(value.replace(/-/g, '+').replace(/_/g, '/')), (character) => character.charCodeAt(0)); }
 
-async function signFile(env, file, downloadName) {
-  const payload = encodeBase64(encoder.encode(JSON.stringify({ ...file, downloadName, exp: Math.floor(Date.now() / 1000) + LINK_SECONDS })));
+async function signFile(env, file, downloadName, disposition) {
+  const payload = encodeBase64(encoder.encode(JSON.stringify({ ...file, downloadName, ...(disposition ? { disposition: safeDisposition(disposition, file.bucket) } : {}), exp: Math.floor(Date.now() / 1000) + LINK_SECONDS })));
   const signature = new Uint8Array(await crypto.subtle.sign('HMAC', await hmacKey(env), encoder.encode(payload)));
   return `${payload}.${encodeBase64(signature)}`;
 }
@@ -107,8 +107,7 @@ async function readFile(request, env, url) {
   }
   if (!object) throw failure('The file is unavailable. Contact an administrator to restore it from backup.', 404);
   const headers = new Headers({ 'Content-Type': file.contentType, 'Cache-Control': 'private, max-age=60', 'X-Content-Type-Options': 'nosniff', 'Accept-Ranges': 'bytes', ETag: object.httpEtag });
-  const filename = safeDownloadName(file.downloadName, file.bucket, file.key);
-  headers.set('Content-Disposition', `${file.bucket !== 'appraisal-folders' && !file.downloadName ? 'inline' : 'attachment'}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`);
+  headers.set('Content-Disposition', contentDispositionHeader(file));
   if (request.method === 'HEAD') { headers.set('Content-Length', String(object.size)); return new Response(null, { status: 200, headers }); }
   if (!('body' in object)) return new Response(null, { status: request.headers.has('If-Match') || request.headers.has('If-Unmodified-Since') ? 412 : 304, headers });
   let status = 200;
@@ -271,7 +270,7 @@ async function handle(request, env) {
   if (request.method === 'POST' && url.pathname === '/api/files/link') {
     const input = await boundedJson(request, 4096);
     const file = await rpc(env, 'appraisal_file_resolve', { p_bucket: input.bucket, p_key: input.key }, auth.bearer);
-    const ticket = await signFile(env, file, input.downloadName ? safeDownloadName(input.downloadName, file.bucket, file.key) : null);
+    const ticket = await signFile(env, file, input.downloadName ? safeDownloadName(input.downloadName, file.bucket, file.key) : null, typeof input.disposition === 'string' ? input.disposition : undefined);
     return json({ signedUrl: `${url.origin}/api/files/content?ticket=${ticket}`, expiresIn: LINK_SECONDS });
   }
   if (request.method === 'POST' && url.pathname === '/api/uploads') return startUpload(request, env, auth);

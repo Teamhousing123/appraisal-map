@@ -41,3 +41,16 @@ export function safeDownloadName(name, bucket, key) {
   const fallback = bucket === 'pdfs' ? 'appraisal-report.pdf' : bucket === 'appraisal-folders' ? 'appraisal-documents.zip' : key.split('/').pop();
   return String(name || fallback || 'appraisal-file').replace(/[\x00-\x1f\x7f"\\/]/g, '-').slice(0, 120);
 }
+
+export function safeDisposition(value, bucket) {
+  if (bucket === 'appraisal-folders') return 'attachment';
+  return value === 'attachment' ? 'attachment' : 'inline';
+}
+
+export function contentDispositionHeader(file) {
+  const filename = safeDownloadName(file.downloadName, file.bucket, file.key);
+  const disposition = file.disposition
+    ? safeDisposition(file.disposition, file.bucket)
+    : file.bucket !== 'appraisal-folders' && !file.downloadName ? 'inline' : 'attachment';
+  return `${disposition}; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`;
+}

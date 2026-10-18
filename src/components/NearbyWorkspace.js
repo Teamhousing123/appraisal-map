@@ -1,17 +1,29 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  GARAGE_CAPACITY_OPTIONS,
+  NOT_RECORDED_LABEL,
   PROPERTY_TYPE_OPTIONS,
+  formatGarageCapacity,
+  formatLotFrontage,
   formatPropertyType,
+  formatReportedLivingArea,
+  formatYearBuilt,
   validatePropertyDetails,
 } from '../domain/appraisalFields';
+import {
+  GARAGE_FILTER_NOT_RECORDED,
+  describeActiveFilters,
+  validateFactFilters,
+} from '../domain/filters';
 import {
   calculateLivingAreaDifference,
   calculateYearBuiltDifference,
   formatLivingAreaDifference,
   formatYearBuiltDifference,
 } from '../domain/comparison';
+import { documentActionLabel, hasReportDocument } from '../services/documentLinks';
+import PrimaryFacts from './PrimaryFacts';
 
-const NOT_RECORDED = 'Not recorded';
 const REPORT_BATCH_SIZE = 60;
 
 function ArrowIcon({ direction = 'right' }) {
@@ -37,16 +49,6 @@ function DocumentIcon() {
   );
 }
 
-function formatArea(value) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed > 0 ? `${parsed.toLocaleString('en-CA')} sq ft` : NOT_RECORDED;
-}
-
-function formatYear(value) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed > 0 ? String(parsed) : NOT_RECORDED;
-}
-
 function formatDistance(value) {
   if (!Number.isFinite(value)) return 'Distance unavailable';
   if (value < 1) return `${Math.max(1, Math.round(value * 1000))} m away`;
@@ -60,7 +62,7 @@ function reportReferenceDate(report) {
   if (report.appraisal_date) {
     return { label: 'Report', formatted: report._formattedReportDate || report.appraisal_date };
   }
-  return { label: 'Report date', formatted: NOT_RECORDED };
+  return { label: 'Report date', formatted: NOT_RECORDED_LABEL };
 }
 
 function SubjectFactError({ id, message }) {
@@ -162,40 +164,55 @@ function formatLastUpdated(value) {
   }).format(date);
 }
 
-function documentActionLabel(report) {
-  if (report.pdf_url) return 'Open PDF';
-  if (report.folder_files?.length) return 'Download document folder';
-  return 'No report file';
+function formatUpdatedTime(value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', { timeStyle: 'short' }).format(date);
 }
 
-function displayFilterDate(value) {
-  if (!value) return '';
-  const [year, month, day] = value.split('-').map(Number);
-  const date = new Date(year, month - 1, day);
-  if (Number.isNaN(date.getTime())) return value;
-  return new Intl.DateTimeFormat('en-CA', {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-  }).format(date);
-}
+const FACT_RANGE_DRAFT_KEYS = [
+  'livingAreaMin',
+  'livingAreaMax',
+  'frontageMin',
+  'frontageMax',
+];
 
 function Filters({
   filters,
   subject,
   onChange,
+  onApply,
   onReset,
   activeCount,
   missingFilterCounts = {},
+  factsSupported = null,
 }) {
   const [dateDraft, setDateDraft] = useState({
     dateFrom: filters.dateFrom,
     dateTo: filters.dateTo,
   });
+  const [factDraft, setFactDraft] = useState(() => Object.fromEntries(
+    FACT_RANGE_DRAFT_KEYS.map((key) => [key, filters[key] || ''])
+  ));
   const omissionMessages = [];
   const missingPropertyType = normalizeMissingCount(missingFilterCounts.propertyType);
   const missingReferenceDate = normalizeMissingCount(missingFilterCounts.referenceDate);
   const missingCoordinates = normalizeMissingCount(missingFilterCounts.coordinates);
+  const missingLivingArea = normalizeMissingCount(missingFilterCounts.livingArea);
+  const missingFrontage = normalizeMissingCount(missingFilterCounts.frontage);
+  const missingGarageCapacity = normalizeMissingCount(missingFilterCounts.garageCapacity);
+  const factErrors = validateFactFilters(factDraft);
+  const livingAreaRangeSet = Boolean(filters.livingAreaMin || filters.livingAreaMax);
+  const frontageRangeSet = Boolean(filters.frontageMin || filters.frontageMax);
+  const specificGarageFilter = Boolean(
+    filters.garageCapacity && filters.garageCapacity !== GARAGE_FILTER_NOT_RECORDED
+  );
+  const anyFactFilterSet = livingAreaRangeSet
+    || frontageRangeSet
+    || Boolean(filters.garageCapacity)
+    || Boolean(filters.includeMissingLivingArea)
+    || Boolean(filters.includeMissingFrontage)
+    || Boolean(factErrors.livingArea || factErrors.frontage);
   const dateRangeError = dateDraft.dateFrom && dateDraft.dateTo
     && dateDraft.dateFrom > dateDraft.dateTo
     ? 'The from date must be on or before the to date. This date range has not been applied.'
@@ -204,6 +221,17 @@ function Filters({
   useEffect(() => {
     setDateDraft({ dateFrom: filters.dateFrom, dateTo: filters.dateTo });
   }, [filters.dateFrom, filters.dateTo]);
+
+  useEffect(() => {
+    setFactDraft((current) => {
+      const next = Object.fromEntries(
+        FACT_RANGE_DRAFT_KEYS.map((key) => [key, filters[key] || ''])
+      );
+      return FACT_RANGE_DRAFT_KEYS.some((key) => current[key] !== next[key])
+        ? next
+        : current;
+    });
+  }, [filters]);
 
   const handleDateChange = (field, value) => {
     const nextDraft = { ...dateDraft, [field]: value };
@@ -215,24 +243,27 @@ function Filters({
     if (nextDraft.dateTo !== filters.dateTo) onChange('dateTo', nextDraft.dateTo);
   };
 
-  const activeFilters = [
-    filters.radiusKm ? {
-      field: 'radiusKm',
-      label: `Radius: Within ${filters.radiusKm} km`,
-    } : null,
-    filters.propertyType ? {
-      field: 'propertyType',
-      label: `Property type: ${formatPropertyType(filters.propertyType)}`,
-    } : null,
-    filters.dateFrom ? {
-      field: 'dateFrom',
-      label: `From: ${displayFilterDate(filters.dateFrom)}`,
-    } : null,
-    filters.dateTo ? {
-      field: 'dateTo',
-      label: `To: ${displayFilterDate(filters.dateTo)}`,
-    } : null,
-  ].filter(Boolean);
+  const applyFilters = (patch) => {
+    if (onApply) {
+      onApply(patch);
+      return;
+    }
+    Object.entries(patch).forEach(([field, value]) => onChange(field, value));
+  };
+
+  const handleFactBoundChange = (range, field, value) => {
+    const nextDraft = { ...factDraft, [field]: value };
+    setFactDraft(nextDraft);
+    if (validateFactFilters(nextDraft)[range]) return;
+    const patch = range === 'livingArea'
+      ? { livingAreaMin: nextDraft.livingAreaMin, livingAreaMax: nextDraft.livingAreaMax }
+      : { frontageMin: nextDraft.frontageMin, frontageMax: nextDraft.frontageMax };
+    if (Object.entries(patch).some(([key, next]) => (filters[key] || '') !== next)) {
+      applyFilters(patch);
+    }
+  };
+
+  const activeFilters = describeActiveFilters(filters);
 
   if (filters.propertyType && missingPropertyType > 0) {
     omissionMessages.push(describeMissingReports(
@@ -255,6 +286,27 @@ function Filters({
       'radius filter'
     ));
   }
+  if (livingAreaRangeSet && !filters.includeMissingLivingArea && missingLivingArea > 0) {
+    omissionMessages.push(describeMissingReports(
+      missingLivingArea,
+      'without a recorded living area',
+      'living-area filter'
+    ));
+  }
+  if (frontageRangeSet && !filters.includeMissingFrontage && missingFrontage > 0) {
+    omissionMessages.push(describeMissingReports(
+      missingFrontage,
+      'without a recorded frontage',
+      'frontage filter'
+    ));
+  }
+  if (specificGarageFilter && missingGarageCapacity > 0) {
+    omissionMessages.push(describeMissingReports(
+      missingGarageCapacity,
+      'without a recorded garage capacity',
+      'garage filter'
+    ));
+  }
 
   return (
     <>
@@ -263,10 +315,10 @@ function Filters({
           <div className="active-filter-chips">
             {activeFilters.map((filter) => (
               <button
-                key={filter.field}
+                key={filter.id}
                 type="button"
                 className="active-filter-chip"
-                onClick={() => onChange(filter.field, '')}
+                onClick={() => applyFilters(filter.clear)}
                 aria-label={`Remove ${filter.label}`}
               >
                 <span>{filter.label}</span>
@@ -356,6 +408,103 @@ function Filters({
           </div>
           <p>Reference date uses the effective date when recorded; otherwise it uses the report date.</p>
         </details>
+        <details
+          className="am-date-filters am-fact-filters"
+          open={Boolean(anyFactFilterSet)}
+        >
+          <summary>Property fact filters</summary>
+          <div className="am-date-grid">
+            <label>
+              <span>Living area from (sq ft)</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={factDraft.livingAreaMin}
+                aria-invalid={Boolean(factErrors.livingArea)}
+                aria-describedby={factErrors.livingArea ? 'fact-living-area-range-error' : undefined}
+                onChange={(event) => handleFactBoundChange('livingArea', 'livingAreaMin', event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Living area to (sq ft)</span>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={factDraft.livingAreaMax}
+                aria-invalid={Boolean(factErrors.livingArea)}
+                aria-describedby={factErrors.livingArea ? 'fact-living-area-range-error' : undefined}
+                onChange={(event) => handleFactBoundChange('livingArea', 'livingAreaMax', event.target.value)}
+              />
+            </label>
+            {factErrors.livingArea && (
+              <p id="fact-living-area-range-error" className="report-filters__date-error" role="alert">
+                {factErrors.livingArea}
+              </p>
+            )}
+          </div>
+          <label className="am-fact-filters__missing">
+            <input
+              type="checkbox"
+              checked={Boolean(filters.includeMissingLivingArea)}
+              onChange={(event) => applyFilters({ includeMissingLivingArea: event.target.checked })}
+            />
+            <span>Include reports without a recorded living area</span>
+          </label>
+          {factsSupported !== false && (
+            <>
+              <div className="am-date-grid">
+                <label>
+                  <span>Frontage from (ft)</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={factDraft.frontageMin}
+                    aria-invalid={Boolean(factErrors.frontage)}
+                    aria-describedby={factErrors.frontage ? 'fact-frontage-range-error' : undefined}
+                    onChange={(event) => handleFactBoundChange('frontage', 'frontageMin', event.target.value)}
+                  />
+                </label>
+                <label>
+                  <span>Frontage to (ft)</span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={factDraft.frontageMax}
+                    aria-invalid={Boolean(factErrors.frontage)}
+                    aria-describedby={factErrors.frontage ? 'fact-frontage-range-error' : undefined}
+                    onChange={(event) => handleFactBoundChange('frontage', 'frontageMax', event.target.value)}
+                  />
+                </label>
+                {factErrors.frontage && (
+                  <p id="fact-frontage-range-error" className="report-filters__date-error" role="alert">
+                    {factErrors.frontage}
+                  </p>
+                )}
+              </div>
+              <label className="am-fact-filters__missing">
+                <input
+                  type="checkbox"
+                  checked={Boolean(filters.includeMissingFrontage)}
+                  onChange={(event) => applyFilters({ includeMissingFrontage: event.target.checked })}
+                />
+                <span>Include reports without a recorded frontage</span>
+              </label>
+              <label className="am-fact-filters__garage">
+                <span>Garage capacity</span>
+                <select
+                  value={filters.garageCapacity || ''}
+                  onChange={(event) => applyFilters({ garageCapacity: event.target.value })}
+                >
+                  <option value="">Any</option>
+                  {GARAGE_CAPACITY_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>{option.label}</option>
+                  ))}
+                  <option value={GARAGE_FILTER_NOT_RECORDED}>Not recorded</option>
+                </select>
+              </label>
+            </>
+          )}
+        </details>
         <div className="report-filters__footer">
           {omissionMessages.length > 0 && <p aria-live="polite">{omissionMessages.join(' ')}</p>}
           {activeCount > 0 && <button type="button" className="button button--quiet" onClick={onReset}>Clear filters</button>}
@@ -376,9 +525,7 @@ function ReportCard({
   openingReport,
   onHover,
 }) {
-  const date = reportReferenceDate(report);
-  const hasMetadata = report.property_type || report.reported_living_area_sq_ft || report.year_built;
-  const hasDocument = report.pdf_url || report.folder_files?.length;
+  const hasDocument = hasReportDocument(report);
   const documentLabel = documentActionLabel(report);
 
   return (
@@ -403,6 +550,7 @@ function ReportCard({
       {report.address_verification_status === 'manual' && (
         <p className="address-review-status">Manually placed · needs review</p>
       )}
+      <PrimaryFacts report={report} variant="card" />
       <div className="report-card__actions">
         <button
           type="button"
@@ -417,29 +565,6 @@ function ReportCard({
           Report details <ArrowIcon />
         </button>
       </div>
-      <dl className="report-card__facts">
-        <div>
-          <dt>{date.label}</dt>
-          <dd>{date.formatted}</dd>
-        </div>
-        {hasMetadata && (
-          <>
-            <div>
-              <dt>Type</dt>
-              <dd>{formatPropertyType(report.property_type) || NOT_RECORDED}</dd>
-            </div>
-            <div>
-              <dt>Living area</dt>
-              <dd>{formatArea(report.reported_living_area_sq_ft)}</dd>
-            </div>
-            <div>
-              <dt>Year built</dt>
-              <dd>{formatYear(report.year_built)}</dd>
-            </div>
-          </>
-        )}
-      </dl>
-      {!hasMetadata && <p className="report-card__sparse">Property details not recorded</p>}
       <label className={`candidate-toggle${selected ? ' is-selected' : ''}${selectionDisabled ? ' is-disabled' : ''}`}>
         <input
           type="checkbox"
@@ -462,22 +587,24 @@ function getAreaDifference(subject, candidate) {
   return formatLivingAreaDifference(calculateLivingAreaDifference(
     subject.reportedLivingAreaSqFt,
     candidate.reported_living_area_sq_ft
-  )) || NOT_RECORDED;
+  )) || NOT_RECORDED_LABEL;
 }
 
 function getYearDifference(subject, candidate) {
   return formatYearBuiltDifference(calculateYearBuiltDifference(
     subject.yearBuilt,
     candidate.year_built
-  )) || NOT_RECORDED;
+  )) || NOT_RECORDED_LABEL;
 }
 
 const comparisonRows = [
-  { label: 'Property type', subject: (subject) => formatPropertyType(subject.propertyType) || NOT_RECORDED, candidate: (subject, candidate) => formatPropertyType(candidate.property_type) || NOT_RECORDED },
-  { label: 'Reported living area', subject: (subject) => formatArea(subject.reportedLivingAreaSqFt), candidate: (subject, candidate) => formatArea(candidate.reported_living_area_sq_ft) },
+  { label: 'Property type', subject: (subject) => formatPropertyType(subject.propertyType), candidate: (subject, candidate) => formatPropertyType(candidate.property_type) },
+  { label: 'Reported living area', subject: (subject) => formatReportedLivingArea(subject.reportedLivingAreaSqFt), candidate: (subject, candidate) => formatReportedLivingArea(candidate.reported_living_area_sq_ft) },
   { label: 'Living area difference', subject: () => 'Reference', candidate: getAreaDifference },
-  { label: 'Reported year built', subject: (subject) => formatYear(subject.yearBuilt), candidate: (subject, candidate) => formatYear(candidate.year_built) },
+  { label: 'Reported year built', subject: (subject) => formatYearBuilt(subject.yearBuilt), candidate: (subject, candidate) => formatYearBuilt(candidate.year_built) },
   { label: 'Year difference', subject: () => 'Reference', candidate: getYearDifference },
+  { label: 'Garage capacity', subject: () => NOT_RECORDED_LABEL, candidate: (subject, candidate) => formatGarageCapacity(candidate.garage_capacity) },
+  { label: 'Lot frontage', subject: () => NOT_RECORDED_LABEL, candidate: (subject, candidate) => formatLotFrontage(candidate.lot_frontage_ft) },
   { label: 'Reference date', alwaysVisible: true, subject: () => 'Not applicable', candidate: (subject, candidate) => {
     const date = reportReferenceDate(candidate);
     return `${date.label}: ${date.formatted}`;
@@ -488,12 +615,8 @@ const comparisonRows = [
 function getVisibleComparisonRows(subject, candidates) {
   return comparisonRows.filter((row) => (
     row.alwaysVisible
-    || candidates.some((candidate) => row.candidate(subject, candidate) !== NOT_RECORDED)
+    || candidates.some((candidate) => row.candidate(subject, candidate) !== NOT_RECORDED_LABEL)
   ));
-}
-
-function hasReportDocument(candidate) {
-  return Boolean(candidate.pdf_url || candidate.folder_files?.length);
 }
 
 function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, openingReportId }) {
@@ -593,6 +716,9 @@ function ComparisonView({ subject, candidates, onBack, onRemove, onOpenReport, o
   );
 }
 
+const STALE_AFTER_MS = 10 * 60 * 1000;
+const FRESHNESS_TICK_MS = 60 * 1000;
+
 function NearbyWorkspace({
   subject,
   onSubjectFactChange,
@@ -601,10 +727,13 @@ function NearbyWorkspace({
   loading,
   error,
   truncated,
+  serverFiltered = false,
+  loadProgress = null,
   filters,
   activeFilterCount,
   missingFilterCounts,
   onFilterChange,
+  onApplyFilters,
   onResetFilters,
   candidateIds,
   candidates,
@@ -618,9 +747,12 @@ function NearbyWorkspace({
   onBackFromCompare,
   onRemoveCandidate,
   onRetry,
+  onRefresh,
   lastUpdatedAt = null,
+  factsSupported = null,
 }) {
   const [visibleReportCount, setVisibleReportCount] = useState(REPORT_BATCH_SIZE);
+  const [now, setNow] = useState(() => Date.now());
   const reportResultKey = useMemo(
     () => reports.map((report) => String(report.id)).join('\u001f'),
     [reports]
@@ -630,10 +762,18 @@ function NearbyWorkspace({
     setVisibleReportCount(REPORT_BATCH_SIZE);
   }, [reportResultKey]);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), FRESHNESS_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const visibleReports = reports.slice(0, visibleReportCount);
   const remainingReportCount = Math.max(0, reports.length - visibleReports.length);
   const nextBatchSize = Math.min(REPORT_BATCH_SIZE, remainingReportCount);
   const lastUpdatedLabel = formatLastUpdated(lastUpdatedAt);
+  const lastUpdatedTime = lastUpdatedAt ? formatUpdatedTime(lastUpdatedAt) : '';
+  const updatedAtMs = lastUpdatedAt ? new Date(lastUpdatedAt).getTime() : NaN;
+  const isStale = Number.isFinite(updatedAtMs) && now - updatedAtMs > STALE_AFTER_MS;
   const subjectFactErrors = subject ? validatePropertyDetails(subject) : {};
   const validatedSubject = subject ? {
     ...subject,
@@ -660,9 +800,20 @@ function NearbyWorkspace({
     <section className="nearby-workspace" aria-labelledby="nearby-title">
       <div className="workspace-heading">
         <h2 id="nearby-title">{subject ? 'Reports near this property' : 'Reports in this map area'}</h2>
-        <span className="result-count" aria-label={`${reports.length} matching reports`}>
-          {reports.length}
-        </span>
+        <div className="workspace-heading__meta">
+          <span className="result-count" aria-label={`${reports.length} matching reports`}>
+            {reports.length}
+          </span>
+          <button
+            type="button"
+            className="button button--quiet"
+            aria-label="Refresh reports"
+            disabled={loading}
+            onClick={onRefresh}
+          >
+            Refresh
+          </button>
+        </div>
       </div>
       {subject && <p className="workspace-intro">Nearby reports are starting points, not selected comparables.</p>}
 
@@ -679,12 +830,18 @@ function NearbyWorkspace({
         activeCount={activeFilterCount}
         missingFilterCounts={missingFilterCounts}
         onChange={onFilterChange}
+        onApply={onApplyFilters}
         onReset={onResetFilters}
+        factsSupported={factsSupported}
       />
 
-      {truncated && (
+      {(truncated || serverFiltered) && (
         <div className="workspace-notice" role="status">
-          This area contains more reports than the current display limit. Zoom in to narrow the map area.
+          {serverFiltered
+            ? truncated
+              ? 'Your filters were applied in the database to every report in this area, but more match than can be shown. Zoom in to narrow the area.'
+              : 'This area has more reports than the display limit, so your filters were applied in the database to every report in this area.'
+            : `This area contains more reports than the current display limit. Zoom in to narrow the map area.${activeFilterCount > 0 ? ' Filters below apply only to the loaded reports until the database filter finishes.' : ''}`}
         </div>
       )}
 
@@ -704,10 +861,17 @@ function NearbyWorkspace({
       )}
 
       <div id="nearby-report-list-status" className="report-list-status" aria-live="polite">
-        {loading
-          ? `Updating reports in this map area… ${visibleReports.length} of ${reports.length} matching reports currently visible`
-          : `Showing ${visibleReports.length} of ${reports.length} matching reports`}
-        {!error && lastUpdatedLabel ? ` · Last updated ${lastUpdatedLabel}` : ''}
+        {loading && loadProgress
+          ? `Loading reports… ${loadProgress.loaded} of ${loadProgress.total ?? 'more'} loaded so far · showing ${visibleReports.length} of ${reports.length} matching (partial results)`
+          : loading
+            ? `Updating reports in this map area… ${visibleReports.length} of ${reports.length} matching reports currently visible`
+            : `Showing ${visibleReports.length} of ${reports.length} matching reports`}
+        {!error && lastUpdatedTime && (
+          <span title={lastUpdatedLabel}>
+            {` · Updated ${lastUpdatedTime}`}
+            {isStale ? ' · may be out of date' : ''}
+          </span>
+        )}
       </div>
 
       {error && reports.length === 0 ? (

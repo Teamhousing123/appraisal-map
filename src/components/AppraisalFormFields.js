@@ -1,5 +1,8 @@
 import React from 'react';
-import { PROPERTY_TYPE_OPTIONS } from '../domain/appraisalFields';
+import {
+  GARAGE_CAPACITY_OPTIONS,
+  PROPERTY_TYPE_OPTIONS,
+} from '../domain/appraisalFields';
 import './AppraisalFormFields.css';
 
 function FieldError({ id, message }) {
@@ -148,6 +151,77 @@ function AppraisalFormFields({
               onChange={(event) => onPropertyDetailChange('yearBuilt', event.target.value)}
             />
             <FieldError id="appraisal-year-built-error" message={errors.yearBuilt} />
+          </div>
+        </div>
+
+        <div className="appraisal-property-grid">
+          <div className="appraisal-field">
+            <label className="appraisal-label" htmlFor="appraisal-garage-capacity">
+              Garage capacity
+            </label>
+            <select
+              id="appraisal-garage-capacity"
+              className="appraisal-input"
+              value={propertyDetails.garageCapacity || ''}
+              disabled={disabled}
+              aria-invalid={Boolean(errors.garageCapacity)}
+              aria-describedby={[
+                'appraisal-garage-capacity-help',
+                errors.garageCapacity ? 'appraisal-garage-capacity-error' : '',
+              ].filter(Boolean).join(' ')}
+              onChange={(event) =>
+                onPropertyDetailChange('garageCapacity', event.target.value)
+              }
+            >
+              <option value="">Not recorded</option>
+              {GARAGE_CAPACITY_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <p id="appraisal-garage-capacity-help" className="appraisal-field-hint">
+              Garage spaces as reported. Leave Not recorded when the report is unclear;
+              this is not a door count and excludes driveway parking.
+            </p>
+            <FieldError
+              id="appraisal-garage-capacity-error"
+              message={errors.garageCapacity}
+            />
+          </div>
+
+          <div className="appraisal-field">
+            <label className="appraisal-label" htmlFor="appraisal-lot-frontage">
+              Lot frontage (feet)
+            </label>
+            <div className="appraisal-input-with-unit">
+              <input
+                id="appraisal-lot-frontage"
+                className="appraisal-input"
+                type="text"
+                inputMode="decimal"
+                placeholder="e.g. 40.5"
+                value={propertyDetails.lotFrontageFt ?? ''}
+                disabled={disabled}
+                aria-invalid={Boolean(errors.lotFrontageFt)}
+                aria-describedby={[
+                  'appraisal-lot-frontage-help',
+                  errors.lotFrontageFt ? 'appraisal-lot-frontage-error' : '',
+                ].filter(Boolean).join(' ')}
+                onChange={(event) =>
+                  onPropertyDetailChange('lotFrontageFt', event.target.value)
+                }
+              />
+              <span aria-hidden="true">ft</span>
+            </div>
+            <p id="appraisal-lot-frontage-help" className="appraisal-field-hint">
+              Frontage in feet from the report, up to two decimal places. Do not convert
+              metres or estimate.
+            </p>
+            <FieldError
+              id="appraisal-lot-frontage-error"
+              message={errors.lotFrontageFt}
+            />
           </div>
         </div>
       </fieldset>
