@@ -27,8 +27,22 @@ export function parseDateOnly(value) {
   return parsed;
 }
 
+// Map views validate and format the same few thousand date strings on every
+// camera move; both answers depend only on the string, so remember them.
+const DATE_CACHE_LIMIT = 10000;
+const dateOnlyValidity = new Map();
+
+function remember(cache, key, value) {
+  if (cache.size >= DATE_CACHE_LIMIT) cache.clear();
+  cache.set(key, value);
+  return value;
+}
+
 export function isDateOnly(value) {
-  return parseDateOnly(value) !== null;
+  if (typeof value !== 'string') return false;
+  const known = dateOnlyValidity.get(value);
+  if (known !== undefined) return known;
+  return remember(dateOnlyValidity, value, parseDateOnly(value) !== null);
 }
 
 export function normalizeOptionalDateOnly(value) {
@@ -38,6 +52,7 @@ export function normalizeOptionalDateOnly(value) {
 }
 
 const dateOnlyFormatters = new Map();
+const formattedDateOnly = new Map();
 
 function getDateOnlyFormatter(locale) {
   let formatter = dateOnlyFormatters.get(locale);
@@ -56,10 +71,14 @@ export function formatDateOnly(
   value,
   { locale = 'en-CA', fallback = 'Not recorded' } = {}
 ) {
-  const parsed = parseDateOnly(value);
-  if (!parsed) return fallback;
-
-  return getDateOnlyFormatter(locale).format(parsed);
+  if (typeof value !== 'string') return fallback;
+  const key = `${locale}|${value}`;
+  let formatted = formattedDateOnly.get(key);
+  if (formatted === undefined) {
+    const parsed = parseDateOnly(value);
+    formatted = remember(formattedDateOnly, key, parsed ? getDateOnlyFormatter(locale).format(parsed) : null);
+  }
+  return formatted ?? fallback;
 }
 
 export function getReferenceDate(appraisal = {}) {

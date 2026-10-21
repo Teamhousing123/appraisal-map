@@ -15,7 +15,7 @@ let mockTriggerBoundsChanged;
 let mockSkipIdle = false;
 let mockBounds = { north: 44, south: 43, east: -78, west: -80 };
 let mockCenter = null;
-const mockClusterer = {};
+const mockClusterer = { repaint: jest.fn() };
 let mockMarkerRenders = [];
 
 const mockMap = {
@@ -951,3 +951,262 @@ test('expansion survives a same-area refresh but resets on filters and new-bound
   await waitFor(() =>
     expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(60));
 }, 30000);
+
+test('revisiting a fetched map area reuses the retained region instead of refetching', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [report], truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
+
+  // Pan far outside the original coverage: a second region is fetched.
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // Returning to the first area is served by the retained region cache.
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+});
+
+test('an identical re-query of a capped area hits the cache', async () => {
+  fetchAppraisalsInBounds.mockResolvedValueOnce({ data: [report], truncated: true });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+
+  // A different area fetches as usual.
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // The identical capped query bounds are still satisfied without a fetch.
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+});
+
+test('a mostly covered query fetches only the uncovered strip and keeps pooled rows', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [report], truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+
+  // Pan east so ~78% of the padded query is already proven coverage; the
+  // uncovered strip is the sliver east of the first region's edge (-77.64).
+  const stripRow = { ...report, id: 'strip', address: '5 Strip Road', latitude: 43.8, longitude: -77.55 };
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [stripRow], truncated: false });
+  mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  const stripBounds = fetchAppraisalsInBounds.mock.calls[1][1];
+  expect(stripBounds.north).toBeCloseTo(44.18, 2);
+  expect(stripBounds.south).toBeCloseTo(42.82, 2);
+  expect(stripBounds.east).toBeCloseTo(-77.14, 2);
+  expect(stripBounds.west).toBeCloseTo(-77.64, 2);
+
+  // The merged result keeps the pooled row plus the newly fetched strip row.
+  await screen.findByRole('heading', { name: stripRow.address });
+  expect(screen.getByRole('heading', { name: report.address })).toBeInTheDocument();
+});
+
+test('marker-set changes commit one cluster repaint per data change', async () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({ ...report, id: `batch-${i}`, address: `${i} Batch Road` }));
+  fetchAppraisalsInBounds.mockResolvedValue({ data: many, truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: '0 Batch Road' });
+  const repaints = mockClusterer.repaint.mock.calls.length;
+
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(mockClusterer.repaint.mock.calls.length).toBe(repaints + 1));
+});
+
+test('returning to a retained area shows that area’s reports, not the last fetched area’s', async () => {
+  const farReport = { ...report, id: 'report-far', address: '99 Far Road', latitude: 48.5, longitude: -71 };
+  fetchAppraisalsInBounds
+    .mockResolvedValueOnce({ data: [report], truncated: false, metadataSupported: true, factsSupported: true })
+    .mockResolvedValueOnce({ data: [farReport], truncated: false, metadataSupported: true, factsSupported: true });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: farReport.address });
+
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: report.address });
+  expect(screen.queryByRole('heading', { name: farReport.address })).not.toBeInTheDocument();
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+});
+
+test('a small camera move during a load lets that load finish instead of restarting it', async () => {
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  let finish;
+  let loadSignal;
+  fetchAppraisalsInBounds.mockImplementation((client, bounds, options) => {
+    loadSignal = options.signal;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // Still inside the padded area being loaded.
+  mockBounds = { north: 49.1, south: 48.1, east: -70.1, west: -72.1 };
+  act(() => mockTriggerBoundsChanged());
+  expect(loadSignal.aborted).toBe(false);
+  act(() => mockTriggerIdle());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+
+  const far = { ...report, id: 'far', address: '7 Far Road', latitude: 48.6, longitude: -71 };
+  await act(async () => finish({ data: [far], truncated: false, metadataSupported: true, factsSupported: true }));
+  await screen.findByRole('heading', { name: far.address });
+});
+
+test('a capped load that finishes after the view narrowed queries the narrower view', async () => {
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  let finish;
+  fetchAppraisalsInBounds.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  mockBounds = { north: 48.7, south: 48.3, east: -70.8, west: -71.2 };
+  act(() => mockTriggerIdle());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+
+  const local = { ...report, id: 'narrow', address: '3 Narrow Lane', latitude: 48.5, longitude: -71 };
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [local], truncated: false, metadataSupported: true, factsSupported: true });
+  await act(async () => finish({ data: [], truncated: true, metadataSupported: true, factsSupported: true }));
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+  expect(fetchAppraisalsInBounds.mock.calls[2][1].north).toBeCloseTo(48.772, 3);
+  await screen.findByRole('heading', { name: local.address });
+});
+
+test('a canvas resize that widens the same view keeps the expanded list', async () => {
+  const many = Array.from({ length: 70 }, (_, i) => ({ ...report, id: `wide-${i + 1}`, address: `${i + 1} Wide Row` }));
+  fetchAppraisalsInBounds.mockResolvedValue({ data: many, truncated: false, metadataSupported: true, factsSupported: true });
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '1 Wide Row' });
+  fireEvent.click(screen.getByRole('button', { name: /Show 10 more/ }));
+  expect(screen.getAllByRole('heading', { name: /Wide Row/ })).toHaveLength(70);
+
+  // Same zoom, wider bounds containing the previous view: a layout resize.
+  mockBounds = { north: 44, south: 43, east: -78, west: -80.6 };
+  act(() => mockTriggerIdle());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+  await waitFor(() => expect(screen.queryByText(/Updating reports/)).not.toBeInTheDocument());
+  expect(screen.getAllByRole('heading', { name: /Wide Row/ })).toHaveLength(70);
+});
+
+test('a retained area older than the cache lifetime is loaded again', async () => {
+  const realNow = Date.now;
+  let now = realNow();
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    render(<MapView session={editorSession} />);
+    await screen.findByRole('heading', { name: report.address });
+    mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+    now += 6 * 60 * 1000;
+    mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+  } finally {
+    Date.now.mockRestore();
+  }
+});
+
+test('a load that turns out capped stops as soon as the view has moved and queries the new view', async () => {
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  let progress;
+  let cappedSignal;
+  fetchAppraisalsInBounds.mockImplementationOnce((client, bounds, options) => {
+    progress = options.onProgress;
+    cappedSignal = options.signal;
+    return new Promise(() => {});
+  });
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // A small move inside the loading area keeps the load while its size is unknown.
+  mockBounds = { north: 49.1, south: 48.1, east: -70.1, west: -72.1 };
+  act(() => mockTriggerIdle());
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+
+  // The first page reports more rows than the cap: that load cannot answer the moved view.
+  await act(async () => progress({ data: [], count: 6000 }));
+  expect(cappedSignal.aborted).toBe(true);
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+  expect(fetchAppraisalsInBounds.mock.calls[2][1].north).toBeCloseTo(49.28, 2);
+});
+
+test('a dense uncovered strip falls back to one normal query for the whole view', async () => {
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  fetchAppraisalsInBounds
+    .mockResolvedValueOnce({ data: [], truncated: true, metadataSupported: true, factsSupported: true })
+    .mockResolvedValueOnce({ data: [report], truncated: false, metadataSupported: true, factsSupported: true });
+  mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+  expect(fetchAppraisalsInBounds.mock.calls[1][2].maxRecords).toBe(500);
+  const fullQuery = fetchAppraisalsInBounds.mock.calls[2][1];
+  expect(fullQuery.west).toBeCloseTo(-79.86, 2);
+  expect(fullQuery.east).toBeCloseTo(-77.14, 2);
+  await screen.findByRole('heading', { name: report.address });
+});
+
+test('the active map area is fetched again after its cache lifetime', async () => {
+  let now = Date.now();
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    render(<MapView session={editorSession} />);
+    await screen.findByRole('heading', { name: report.address });
+    now += 6 * 60 * 1000;
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+  } finally {
+    Date.now.mockRestore();
+  }
+});
+
+test('fetching an edge strip does not renew the lifetime of older cached rows', async () => {
+  let now = Date.now();
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    render(<MapView session={editorSession} />);
+    await screen.findByRole('heading', { name: report.address });
+
+    now += 4 * 60 * 1000;
+    mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/Updating reports/)).not.toBeInTheDocument());
+
+    // Leave the merged region, then return after its oldest rows expire.
+    mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByText(/Updating reports/)).not.toBeInTheDocument());
+    now += 2 * 60 * 1000;
+    mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(4));
+  } finally {
+    Date.now.mockRestore();
+  }
+});

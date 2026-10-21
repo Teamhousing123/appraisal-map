@@ -86,77 +86,92 @@ function getActivePropertyTypes(filters) {
   return [];
 }
 
-export function matchesReportFilters(report, filters = {}, subject = null) {
+// Validates the filter inputs once and returns the per-report predicate.
+// Filtering 5k reports used to run validateFactFilters per report.
+export function createReportMatcher(filters = {}, subject = null) {
+  const radiusEnabled = filters.radiusKm !== null
+    && filters.radiusKm !== undefined
+    && filters.radiusKm !== '';
   const radiusKm = Number(filters.radiusKm);
-  if (filters.radiusKm !== null && filters.radiusKm !== undefined && filters.radiusKm !== '') {
-    const distance = getReportDistanceKm(report, subject);
-    if (!Number.isFinite(radiusKm) || radiusKm <= 0 || distance === null || distance > radiusKm) {
-      return false;
-    }
-  }
+  const radiusValid = Number.isFinite(radiusKm) && radiusKm > 0;
 
   const propertyTypes = getActivePropertyTypes(filters);
-  if (propertyTypes.length > 0 && !propertyTypes.includes(report.property_type)) {
-    return false;
-  }
-
-  const referenceDate = getReferenceDate(report)?.value || null;
-  if (isDateOnly(filters.dateFrom) && (!referenceDate || referenceDate < filters.dateFrom)) {
-    return false;
-  }
-  if (isDateOnly(filters.dateTo) && (!referenceDate || referenceDate > filters.dateTo)) {
-    return false;
-  }
-
+  const dateFrom = isDateOnly(filters.dateFrom) ? filters.dateFrom : null;
+  const dateTo = isDateOnly(filters.dateTo) ? filters.dateTo : null;
   const factErrors = validateFactFilters(filters);
   const livingAreaMin = normalizeBound(filters.livingAreaMin);
   const livingAreaMax = normalizeBound(filters.livingAreaMax);
-  if (
-    !factErrors.livingArea
-    && (livingAreaMin || livingAreaMax)
-    && !matchesNumericRange(
-      report.reported_living_area_sq_ft,
-      livingAreaMin,
-      livingAreaMax,
-      Boolean(filters.includeMissingLivingArea)
-    )
-  ) {
-    return false;
-  }
-
+  const livingAreaEnabled = !factErrors.livingArea && (livingAreaMin || livingAreaMax);
+  const includeMissingLivingArea = Boolean(filters.includeMissingLivingArea);
   const frontageMin = normalizeBound(filters.frontageMin);
   const frontageMax = normalizeBound(filters.frontageMax);
-  if (
-    !factErrors.frontage
-    && (frontageMin || frontageMax)
-    && !matchesNumericRange(
-      report.lot_frontage_ft,
-      frontageMin,
-      frontageMax,
-      Boolean(filters.includeMissingFrontage)
-    )
-  ) {
-    return false;
-  }
-
+  const frontageEnabled = !factErrors.frontage && (frontageMin || frontageMax);
+  const includeMissingFrontage = Boolean(filters.includeMissingFrontage);
   const garageCapacity = normalizeBound(filters.garageCapacity);
-  if (garageCapacity === GARAGE_FILTER_NOT_RECORDED) {
+
+  return (report) => {
+    if (radiusEnabled) {
+      const distance = getReportDistanceKm(report, subject);
+      if (!radiusValid || distance === null || distance > radiusKm) return false;
+    }
+
+    if (propertyTypes.length > 0 && !propertyTypes.includes(report.property_type)) {
+      return false;
+    }
+
+    if (dateFrom || dateTo) {
+      const referenceDate = getReferenceDate(report)?.value || null;
+      if (dateFrom && (!referenceDate || referenceDate < dateFrom)) return false;
+      if (dateTo && (!referenceDate || referenceDate > dateTo)) return false;
+    }
+
     if (
-      report.garage_capacity !== null
-      && report.garage_capacity !== undefined
-      && report.garage_capacity !== ''
+      livingAreaEnabled
+      && !matchesNumericRange(
+        report.reported_living_area_sq_ft,
+        livingAreaMin,
+        livingAreaMax,
+        includeMissingLivingArea
+      )
     ) {
       return false;
     }
-  } else if (garageCapacity && report.garage_capacity !== garageCapacity) {
-    return false;
-  }
 
-  return true;
+    if (
+      frontageEnabled
+      && !matchesNumericRange(
+        report.lot_frontage_ft,
+        frontageMin,
+        frontageMax,
+        includeMissingFrontage
+      )
+    ) {
+      return false;
+    }
+
+    if (garageCapacity === GARAGE_FILTER_NOT_RECORDED) {
+      if (
+        report.garage_capacity !== null
+        && report.garage_capacity !== undefined
+        && report.garage_capacity !== ''
+      ) {
+        return false;
+      }
+    } else if (garageCapacity && report.garage_capacity !== garageCapacity) {
+      return false;
+    }
+
+    return true;
+  };
+}
+
+export function matchesReportFilters(report, filters = {}, subject = null) {
+  return createReportMatcher(filters, subject)(report);
 }
 
 export function filterReports(reports = [], filters = {}, subject = null) {
-  return reports.filter((report) => matchesReportFilters(report, filters, subject));
+  const matches = createReportMatcher(filters, subject);
+  return reports.filter(matches);
 }
 
 function compareNullableNumbers(left, right, direction = 'asc') {
@@ -170,24 +185,23 @@ function compareNullableNumbers(left, right, direction = 'asc') {
 
 export function sortReports(reports = [], sortBy = 'distance', subject = null) {
   return reports
-    .map((report, originalIndex) => ({ report, originalIndex }))
+    .map((report, originalIndex) => ({
+      report,
+      originalIndex,
+      sortKey: sortBy === 'newest'
+        ? (getReferenceDate(report)?.value || null)
+        : getReportDistanceKm(report, subject),
+    }))
     .sort((leftEntry, rightEntry) => {
-      const left = leftEntry.report;
-      const right = rightEntry.report;
       let comparison = 0;
 
       if (sortBy === 'newest') {
-        const leftDate = getReferenceDate(left)?.value || null;
-        const rightDate = getReferenceDate(right)?.value || null;
-        if (!leftDate && !rightDate) comparison = 0;
-        else if (!leftDate) comparison = 1;
-        else if (!rightDate) comparison = -1;
-        else comparison = rightDate.localeCompare(leftDate);
+        if (!leftEntry.sortKey && !rightEntry.sortKey) comparison = 0;
+        else if (!leftEntry.sortKey) comparison = 1;
+        else if (!rightEntry.sortKey) comparison = -1;
+        else comparison = rightEntry.sortKey.localeCompare(leftEntry.sortKey);
       } else {
-        comparison = compareNullableNumbers(
-          getReportDistanceKm(left, subject),
-          getReportDistanceKm(right, subject)
-        );
+        comparison = compareNullableNumbers(leftEntry.sortKey, rightEntry.sortKey);
       }
 
       return comparison || leftEntry.originalIndex - rightEntry.originalIndex;
@@ -204,26 +218,23 @@ export function filterAndSortReports(
 }
 
 export function countReportsMissingFilterData(reports = []) {
-  return reports.reduce(
-    (counts, report) => ({
-      coordinates: counts.coordinates + (getCanonicalCoordinates(report) ? 0 : 1),
-      referenceDate: counts.referenceDate + (getReferenceDate(report) ? 0 : 1),
-      propertyType: counts.propertyType + (report.property_type ? 0 : 1),
-      livingArea: counts.livingArea
-        + (finiteReportNumber(report.reported_living_area_sq_ft) === null ? 1 : 0),
-      frontage: counts.frontage
-        + (finiteReportNumber(report.lot_frontage_ft) === null ? 1 : 0),
-      garageCapacity: counts.garageCapacity + (report.garage_capacity ? 0 : 1),
-    }),
-    {
-      coordinates: 0,
-      referenceDate: 0,
-      propertyType: 0,
-      livingArea: 0,
-      frontage: 0,
-      garageCapacity: 0,
-    }
-  );
+  const counts = {
+    coordinates: 0,
+    referenceDate: 0,
+    propertyType: 0,
+    livingArea: 0,
+    frontage: 0,
+    garageCapacity: 0,
+  };
+  for (const report of reports) {
+    if (!getCanonicalCoordinates(report)) counts.coordinates += 1;
+    if (!getReferenceDate(report)) counts.referenceDate += 1;
+    if (!report.property_type) counts.propertyType += 1;
+    if (finiteReportNumber(report.reported_living_area_sq_ft) === null) counts.livingArea += 1;
+    if (finiteReportNumber(report.lot_frontage_ft) === null) counts.frontage += 1;
+    if (!report.garage_capacity) counts.garageCapacity += 1;
+  }
+  return counts;
 }
 
 export function countActiveFilters(filters = {}) {

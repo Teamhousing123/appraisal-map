@@ -218,10 +218,15 @@ export function formatPropertyType(value, fallback = NOT_RECORDED_LABEL) {
   return PROPERTY_TYPE_LABELS[value] || fallback;
 }
 
+// Reused formatters: toLocaleString builds a new formatter on every call,
+// which dominated rendering report cards during map moves.
+const LIVING_AREA_FORMAT = new Intl.NumberFormat('en-CA');
+const LOT_FRONTAGE_FORMAT = new Intl.NumberFormat('en-CA', { maximumFractionDigits: LOT_FRONTAGE_FRACTION_DIGITS });
+
 export function formatReportedLivingArea(value, fallback = NOT_RECORDED_LABEL) {
   const normalized = normalizeOptionalInteger(value);
   if (!Number.isInteger(normalized) || normalized < 1) return fallback;
-  return `${normalized.toLocaleString('en-CA')} sq ft`;
+  return `${LIVING_AREA_FORMAT.format(normalized)} sq ft`;
 }
 
 export function formatYearBuilt(value, fallback = NOT_RECORDED_LABEL) {
@@ -237,7 +242,7 @@ export function formatGarageCapacity(value, fallback = NOT_RECORDED_LABEL) {
 export function formatLotFrontage(value, fallback = NOT_RECORDED_LABEL) {
   const normalized = normalizeOptionalDecimal(value);
   if (!Number.isFinite(normalized) || normalized <= 0) return fallback;
-  return `${normalized.toLocaleString('en-CA', { maximumFractionDigits: LOT_FRONTAGE_FRACTION_DIGITS })} ft`;
+  return `${LOT_FRONTAGE_FORMAT.format(normalized)} ft`;
 }
 
 export function formatLotFrontageFact(report = {}, fallback = NOT_RECORDED_LABEL) {

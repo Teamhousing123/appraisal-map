@@ -949,6 +949,17 @@
   transition: border-color 140ms ease-out, box-shadow 140ms ease-out, transform 140ms ease-out;
 }
 
+/* Map moves re-rank the whole list; off-screen cards skip layout, style and
+   paint. Only where the clip margin exists, so focus rings of controls at a
+   card's edge are never clipped. */
+@supports (overflow-clip-margin: 8px) {
+  .report-card {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 260px;
+    overflow-clip-margin: 8px;
+  }
+}
+
 .report-card:hover,
 .report-card:focus-within {
   border-color: rgba(7, 95, 89, 0.3);
