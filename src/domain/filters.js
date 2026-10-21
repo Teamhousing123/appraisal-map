@@ -119,9 +119,11 @@ export function createReportMatcher(filters = {}, subject = null) {
       return false;
     }
 
-    const referenceDate = getReferenceDate(report)?.value || null;
-    if (dateFrom && (!referenceDate || referenceDate < dateFrom)) return false;
-    if (dateTo && (!referenceDate || referenceDate > dateTo)) return false;
+    if (dateFrom || dateTo) {
+      const referenceDate = getReferenceDate(report)?.value || null;
+      if (dateFrom && (!referenceDate || referenceDate < dateFrom)) return false;
+      if (dateTo && (!referenceDate || referenceDate > dateTo)) return false;
+    }
 
     if (
       livingAreaEnabled

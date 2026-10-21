@@ -48,12 +48,13 @@ export const STORAGE_KEY = 'sb-127-auth-token';
 export const HARNESS_PORT = 54321;
 export const SUPABASE_URL = `http://127.0.0.1:${HARNESS_PORT}`;
 
-// Build-time environment. REACT_APP_GOOGLE_MAPS_API_KEY stays empty on purpose:
-// keyless Maps runs in development mode (watermark), which is what the report
-// calls out as a measurement caveat.
+// Build-time environment. Without PERF_MAPS_KEY, Maps runs keyless in
+// development mode (watermark), which the report calls out as a measurement
+// caveat. A restricted key can be supplied through the environment for a
+// production-like check; it is never written to the repository.
 export const BUILD_ENV = {
   REACT_APP_SUPABASE_URL: SUPABASE_URL,
   REACT_APP_SUPABASE_ANON_KEY: ANON_KEY,
-  REACT_APP_GOOGLE_MAPS_API_KEY: '',
+  REACT_APP_GOOGLE_MAPS_API_KEY: process.env.PERF_MAPS_KEY || '',
   REACT_APP_VERSION: 'perf-harness',
 };

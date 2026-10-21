@@ -531,7 +531,16 @@ function Filters({
   );
 }
 
-const ReportCard = React.memo(function ReportCard({
+// Cards are handed a fresh report object whenever the map centre moves (new
+// distance); the rest of the card only needs to change with the report itself.
+function sameReportApartFromDistance(previous, next) {
+  if (previous === next) return true;
+  const keys = Object.keys(previous);
+  if (keys.length !== Object.keys(next).length) return false;
+  return keys.every((key) => key === '_distanceKm' || previous[key] === next[key]);
+}
+
+const ReportCardBody = React.memo(function ReportCardBody({
   report,
   selected,
   selectionDisabled,
@@ -540,28 +549,12 @@ const ReportCard = React.memo(function ReportCard({
   onDetails,
   onOpenReport,
   openingReport,
-  onHover,
 }) {
   const hasDocument = hasReportDocument(report);
   const documentLabel = documentActionLabel(report);
 
   return (
-    <article
-      data-report-id={report.id}
-      className={`report-card${selected ? ' is-selected' : ''}`}
-      onMouseEnter={() => onHover(report.id)}
-      onMouseLeave={() => onHover(null)}
-      onFocus={() => onHover(report.id)}
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) onHover(null);
-      }}
-    >
-      <div className="report-card__topline">
-        <p>{formatDistance(report._distanceKm)}</p>
-        {report.locationCount > 1 && report.locationIndex === 0 && (
-          <span>{report.locationCount} reports here</span>
-        )}
-      </div>
+    <>
       <h3>{report.address}</h3>
       <p className="report-card__city">{report.city}</p>
       {report.address_verification_status === 'manual' && (
@@ -596,6 +589,57 @@ const ReportCard = React.memo(function ReportCard({
             ? `Select as candidate — ${selectionDisabledReason}`
             : 'Select as candidate'}
       </label>
+    </>
+  );
+}, (previous, next) => (
+  previous.selected === next.selected
+  && previous.selectionDisabled === next.selectionDisabled
+  && previous.selectionDisabledReason === next.selectionDisabledReason
+  && previous.onToggle === next.onToggle
+  && previous.onDetails === next.onDetails
+  && previous.onOpenReport === next.onOpenReport
+  && previous.openingReport === next.openingReport
+  && sameReportApartFromDistance(previous.report, next.report)
+));
+
+const ReportCard = React.memo(function ReportCard({
+  report,
+  selected,
+  selectionDisabled,
+  selectionDisabledReason,
+  onToggle,
+  onDetails,
+  onOpenReport,
+  openingReport,
+  onHover,
+}) {
+  return (
+    <article
+      data-report-id={report.id}
+      className={`report-card${selected ? ' is-selected' : ''}`}
+      onMouseEnter={() => onHover(report.id)}
+      onMouseLeave={() => onHover(null)}
+      onFocus={() => onHover(report.id)}
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) onHover(null);
+      }}
+    >
+      <div className="report-card__topline">
+        <p>{formatDistance(report._distanceKm)}</p>
+        {report.locationCount > 1 && report.locationIndex === 0 && (
+          <span>{report.locationCount} reports here</span>
+        )}
+      </div>
+      <ReportCardBody
+        report={report}
+        selected={selected}
+        selectionDisabled={selectionDisabled}
+        selectionDisabledReason={selectionDisabledReason}
+        onToggle={onToggle}
+        onDetails={onDetails}
+        onOpenReport={onOpenReport}
+        openingReport={openingReport}
+      />
     </article>
   );
 });

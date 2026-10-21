@@ -6,6 +6,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
 } from 'react';
 import { GoogleMap, Marker, MarkerClusterer, useJsApiLoader } from '@react-google-maps/api';
 import { supabase, supportEmail } from './supabaseClient';
@@ -48,8 +49,11 @@ const MAP_CONTAINER_STYLE = { height: '100%', width: '100%' };
 const DEFAULT_CENTER = { lat: 43.7, lng: -79.4 };
 const DEFAULT_ZOOM = 9;
 const MAP_IDLE_DEBOUNCE_MS = 300;
-const MAX_CACHED_REGIONS = 10;
-const LOADED_ROWS_MAX = 30000;
+// Recently loaded areas kept for instant revisits. Each entry holds its full
+// result, so the cache is bounded by entries, rows and age.
+const MAX_CACHED_REGIONS = 8;
+const MAX_CACHED_REGION_ROWS = 15000;
+const REGION_CACHE_TTL_MS = 5 * 60 * 1000;
 const AUTOCOMPLETE_DEBOUNCE_MS = 260;
 const GOOGLE_MAP_LIBRARIES = ['places'];
 const SIGNED_URL_TTL_SECONDS = isR2StorageEnabled() ? 600 : 3600;
@@ -161,10 +165,40 @@ const markerIconFor = ({ selected, candidate, hovered }) => ({
   zIndex: selected ? 999 : candidate ? 600 : hovered ? 500 : undefined,
 });
 
+// Report-row hover changes many times a second. Keeping it outside React
+// state lets only the two affected markers re-render instead of the whole
+// map view and every marker.
+function createHoverStore() {
+  let hoveredId = null;
+  const listenersById = new Map();
+  const notify = (id) => listenersById.get(id)?.forEach((listener) => listener());
+  return {
+    get: () => hoveredId,
+    set: (id) => {
+      if (id === hoveredId) return;
+      const previous = hoveredId;
+      hoveredId = id;
+      notify(previous);
+      notify(id);
+    },
+    subscribe: (id, listener) => {
+      if (!listenersById.has(id)) listenersById.set(id, new Set());
+      listenersById.get(id).add(listener);
+      return () => {
+        const listeners = listenersById.get(id);
+        listeners?.delete(listener);
+        if (listeners?.size === 0) listenersById.delete(id);
+      };
+    },
+  };
+}
+
 // Keep native pointer targets stable; report-row hover supplies marker emphasis.
 const AppraisalMarker = React.memo(function AppraisalMarker({
-  appraisal, clusterer, selected, candidate, hovered, onMarkerClick,
+  appraisal, clusterer, selected, candidate, hoverStore, onMarkerClick,
 }) {
+  const subscribeHover = useCallback((listener) => hoverStore.subscribe(appraisal.id, listener), [hoverStore, appraisal.id]);
+  const hovered = useSyncExternalStore(subscribeHover, () => hoverStore.get() === appraisal.id);
   const icon = useMemo(() => markerIconFor({ selected, candidate, hovered }), [selected, candidate, hovered]);
   const position = useMemo(() => ({
     lat: appraisal.displayLatitude ?? appraisal.latitude,
@@ -191,7 +225,7 @@ const MarkerLayer = React.memo(function MarkerLayer({
   appraisals,
   selectedId,
   candidateIds,
-  hoveredId,
+  hoverStore,
   onMarkerClick,
 }) {
   const clustererRef = useRef(null);
@@ -224,7 +258,7 @@ const MarkerLayer = React.memo(function MarkerLayer({
                 clusterer={clusterer}
                 selected={appraisal.id === selectedId}
                 candidate={candidateIds.includes(appraisal.id)}
-                hovered={appraisal.id === hoveredId}
+                hoverStore={hoverStore}
                 onMarkerClick={onMarkerClick}
               />
           ))}
@@ -276,6 +310,17 @@ function boundsContain(outer, inner) {
   );
 }
 
+// Layout resizes recentre through projection maths, so an unchanged edge can
+// differ by floating-point noise (1e-7° is about 1 cm).
+const RESIZE_EDGE_TOLERANCE_DEG = 1e-7;
+
+function boundsContainWithin(outer, inner, tolerance) {
+  return outer.north + tolerance >= inner.north
+    && outer.south - tolerance <= inner.south
+    && outer.east + tolerance >= inner.east
+    && outer.west - tolerance <= inner.west;
+}
+
 function boundsArea(bounds) {
   return Math.max(0, bounds.north - bounds.south) * Math.max(0, bounds.east - bounds.west);
 }
@@ -297,15 +342,20 @@ function subtractBounds(inner, cut) {
   return out.filter((r) => r.north > r.south && r.east > r.west);
 }
 
-// Part of `queryBounds` not covered by any proven (non-capped) region.
-function uncoveredRects(queryBounds, regions, filterKey) {
+// Part of `queryBounds` not covered by any of the given complete regions.
+function uncoveredRects(queryBounds, regions) {
   let remaining = [queryBounds];
   for (const region of regions) {
-    if (region.filterKey !== filterKey || region.truncated) continue;
     remaining = remaining.flatMap((r) => subtractBounds(r, region.bounds));
     if (!remaining.length) break;
   }
   return remaining;
+}
+
+function rowInBounds(row, bounds) {
+  const c = getCanonicalCoordinates(row);
+  return Boolean(c && c.latitude <= bounds.north && c.latitude >= bounds.south
+    && c.longitude <= bounds.east && c.longitude >= bounds.west);
 }
 
 // Matches the service ordering (created_at desc, id asc) so merged results
@@ -354,7 +404,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const [selectedAppraisal, setSelectedAppraisal] = useState(null);
   const [viewport, setViewport] = useState(null);
   const [detailReturnsToPreview, setDetailReturnsToPreview] = useState(false);
-  const [hoveredReportId, setHoveredReportId] = useState(null);
+  const [hoverStore] = useState(createHoverStore);
   const [panelMode, setPanelMode] = useState('nearby');
   const [panelOpen, setPanelOpen] = useState(true);
   const [subject, setSubject] = useState(null);
@@ -385,15 +435,16 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const autocompleteRequestRef = useRef(0);
   const autocompleteSessionTokenRef = useRef(null);
   const reportRequestRef = useRef(null);
-  const pendingQueryKeyRef = useRef(null);
+  // The in-flight area query: { queryKey, bounds (padded), filterKey }.
+  const pendingRequestRef = useRef(null);
   const lastBoundsRef = useRef(null);
-  // Recently fetched (padded) query regions. A non-capped region proves
-  // coverage of its whole area; a capped region only proves its exact key.
-  const successfulRegionsRef = useRef([]);
-  const lastFilterKeyRef = useRef(null);
-  // Every row ever fetched this session (id -> {row, filterKey}), feeding
-  // delta merges. Entries are pruned to rows inside still-tracked regions.
-  const loadedRowsRef = useRef(new Map());
+  // Recently loaded areas, oldest first. Each region keeps the exact result
+  // it displayed: a complete region proves every report inside its padded
+  // bounds; a capped region only answers an identical re-query.
+  const regionsRef = useRef([]);
+  // The region whose rows are on screen (null after local edits).
+  const activeRegionRef = useRef(null);
+  const lastZoomRef = useRef(null);
   const hasCompleteResultRef = useRef(false);
   const localEditSinceFetchRef = useRef(false);
   const signedUrlCacheRef = useRef(new Map());
@@ -524,34 +575,105 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     ],
   }), []);
 
+  // Show a loaded area's result and the state that describes it.
+  const applyRegion = useCallback((region) => {
+    activeRegionRef.current = region;
+    hasCompleteResultRef.current = true;
+    const nextAppraisals = region.rows;
+    setAppraisals(nextAppraisals);
+    setTruncated(region.truncated);
+    setMetadataSupported(region.metadataSupported);
+    setFactsSupported(region.factsSupported);
+    setLoadProgress(null);
+    const filtered = Boolean(region.serverFilters);
+    setServerFiltered(filtered);
+    serverFilteredRef.current = filtered;
+    if (!filtered) {
+      setAreaTruncated(region.truncated);
+      areaTruncatedRef.current = region.truncated;
+      setUnfilteredQueryKey(region.key);
+    }
+    setCandidates((current) => current.map((candidate) => (
+      nextAppraisals.find((report) => report.id === candidate.id) || candidate
+    )));
+    setSelectedAppraisal((current) => (
+      current ? nextAppraisals.find((report) => report.id === current.id) || current : null
+    ));
+    setLastSuccessfulAt(new Date(region.fetchedAt));
+  }, []);
+
+  const rememberRegion = useCallback((region) => {
+    const regions = regionsRef.current.filter((r) => !(r.key === region.key && r.filterKey === region.filterKey));
+    regions.push(region);
+    let rows = regions.reduce((total, r) => total + r.rows.length, 0);
+    while (regions.length > 1 && (regions.length > MAX_CACHED_REGIONS || rows > MAX_CACHED_REGION_ROWS)) {
+      rows -= regions.shift().rows.length;
+    }
+    regionsRef.current = regions;
+  }, []);
+
+  const forgetRegions = useCallback(() => {
+    regionsRef.current = [];
+    activeRegionRef.current = null;
+  }, []);
+
   const fetchReports = useCallback(async (bounds, { force = false, serverFilters = null } = {}) => {
     if (!bounds) return;
     const filterKey = JSON.stringify(serverFilters);
-    const regions = successfulRegionsRef.current;
-    if (!force && regions.some((r) => !r.truncated && r.filterKey === filterKey
-      && boundsContain(r.bounds, bounds))) {
-      setReportsError('');
-      return;
-    }
     const queryBounds = padBounds(bounds);
     const key = boundsKey(queryBounds);
     const queryKey = `${key}/${filterKey}`;
-    if (!force && regions.some((r) => r.filterKey === filterKey
-      && (r.truncated ? boundsKey(r.bounds) === key : boundsContain(r.bounds, queryBounds)))) return;
-    if (!force && pendingQueryKeyRef.current === queryKey
-      && !reportRequestRef.current?.signal.aborted) return;
+    const now = Date.now();
+    const covers = (region) => (region.truncated
+      ? region.key === key
+      : boundsContain(region.bounds, bounds));
+    const fresh = (region) => now - region.fetchedAt < REGION_CACHE_TTL_MS;
+
+    if (!force) {
+      // The result on screen still answers this view. Idle requests are
+      // always unfiltered; a database-filtered result for a capped area is
+      // the refined answer for the same area, so it stays.
+      const active = activeRegionRef.current;
+      if (active && covers(active) && (active.filterKey === filterKey || !serverFilters)) {
+        setReportsError('');
+        return;
+      }
+      // A recently loaded area answers it: show that result instantly.
+      const cached = [...regionsRef.current].reverse()
+        .find((region) => region.filterKey === filterKey && fresh(region) && covers(region));
+      if (cached) {
+        rememberRegion(cached);
+        applyRegion(cached);
+        setReportsError('');
+        return;
+      }
+      // The in-flight query already covers this view; let it finish.
+      const pending = pendingRequestRef.current;
+      if (pending && !reportRequestRef.current?.signal.aborted && pending.filterKey === filterKey
+        && (pending.queryKey === queryKey || (!pending.capped && boundsContain(pending.bounds, bounds)))) return;
+    }
 
     localEditSinceFetchRef.current = false;
 
     if (reportRequestRef.current) reportRequestRef.current.abort();
     const controller = new AbortController();
     reportRequestRef.current = controller;
-    pendingQueryKeyRef.current = queryKey;
+    pendingRequestRef.current = { queryKey, bounds: queryBounds, filterKey };
     setLoadingReports(true);
     setReportsError('');
 
     const onProgress = ({ data, count }) => {
       if (controller.signal.aborted || reportRequestRef.current !== controller) return;
+      // A capped result only answers this exact view, so once the count says
+      // this load will be capped, a moved camera needs its own query now.
+      if (Number.isFinite(count) && count > MAX_RECORDS_PER_BOUNDS_FETCH && pendingRequestRef.current) {
+        pendingRequestRef.current.capped = true;
+        const latest = lastBoundsRef.current;
+        if (!force && latest && boundsKey(padBounds(latest)) !== key) {
+          fetchReportsRef.current(latest);
+          return;
+        }
+      }
       setLoadProgress({ loaded: data.length, total: count });
       // Re-rendering thousands of markers for every intermediate page made
       // completion ~7 s slower; the first page already gives the first
@@ -563,112 +685,88 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         setAppraisals(applySpiralOffset(data));
       }
     };
-    const poolRows = (rows) => {
-      const pool = loadedRowsRef.current;
-      for (const row of rows) { pool.delete(row.id); pool.set(row.id, { row, filterKey }); }
-      while (pool.size > LOADED_ROWS_MAX) pool.delete(pool.keys().next().value);
-    };
 
+    let narrowedView = null;
     try {
-      // When most of the padded query is already covered by proven regions,
-      // fetch only the uncovered strips and merge with pooled rows instead of
-      // re-downloading the whole area (the expensive path in capped areas).
-      const uncovered = force ? [queryBounds] : uncoveredRects(queryBounds, regions, filterKey);
+      // When most of the padded query is already proven by complete recent
+      // regions, fetch only the uncovered strips and merge them with those
+      // regions' rows instead of re-downloading the whole area.
+      const sources = force ? [] : [...regionsRef.current].reverse()
+        .filter((region) => region.filterKey === filterKey && !region.truncated && fresh(region));
+      const uncovered = uncoveredRects(queryBounds, sources);
       const uncoveredArea = uncovered.reduce((area, r) => area + boundsArea(r), 0);
-      const useDeltaFetch = uncovered.length > 0 && uncovered.length <= 4
-        && uncoveredArea > 0 && uncoveredArea < boundsArea(queryBounds) * 0.6;
+      const useDeltaFetch = sources.length > 0 && uncovered.length <= 4
+        && uncoveredArea < boundsArea(queryBounds) * 0.6;
 
-      let result;
+      let result = null;
       if (useDeltaFetch) {
-        const parts = [];
+        // Strips are edges of the view, so one page normally holds them. A
+        // denser strip falls back to one normal query rather than paging
+        // through every strip separately.
+        let merged = new Map();
+        let lastPart = sources[0];
         for (const rect of uncovered) {
           if (controller.signal.aborted || reportRequestRef.current !== controller) return;
           const part = await fetchAppraisalsInBounds(supabase, rect, {
             signal: controller.signal,
             filters: serverFilters,
-            onProgress,
+            maxRecords: DEFAULT_PAGE_SIZE,
           });
-          parts.push(part);
-          poolRows(part.data);
-        }
-        const merged = [];
-        for (const entry of loadedRowsRef.current.values()) {
-          if (entry.filterKey !== filterKey) continue;
-          const c = getCanonicalCoordinates(entry.row);
-          if (c && c.latitude <= queryBounds.north && c.latitude >= queryBounds.south
-            && c.longitude <= queryBounds.east && c.longitude >= queryBounds.west) {
-            merged.push(entry.row);
+          if (part.truncated) {
+            merged = null;
+            break;
           }
+          lastPart = part;
+          for (const row of part.data) merged.set(row.id, row);
         }
-        merged.sort(compareReportRows);
-        const lastPart = parts[parts.length - 1] || {};
-        result = {
-          data: merged.slice(0, MAX_RECORDS_PER_BOUNDS_FETCH),
-          truncated: parts.some((p) => p.truncated)
-            || merged.length > MAX_RECORDS_PER_BOUNDS_FETCH,
-          metadataSupported: lastPart.metadataSupported,
-          factsSupported: lastPart.factsSupported,
-        };
-      } else {
+        if (merged) {
+          for (const region of sources) {
+            for (const row of region.rows) {
+              if (!merged.has(row.id) && rowInBounds(row, queryBounds)) merged.set(row.id, row);
+            }
+          }
+          const rows = [...merged.values()].sort(compareReportRows);
+          result = {
+            data: rows.slice(0, MAX_RECORDS_PER_BOUNDS_FETCH),
+            truncated: rows.length > MAX_RECORDS_PER_BOUNDS_FETCH,
+            metadataSupported: lastPart.metadataSupported,
+            factsSupported: lastPart.factsSupported,
+          };
+        }
+      }
+      if (!result) {
+        if (controller.signal.aborted || reportRequestRef.current !== controller) return;
         result = await fetchAppraisalsInBounds(supabase, queryBounds, {
           signal: controller.signal,
           filters: serverFilters,
           onProgress,
         });
-        poolRows(result.data);
       }
       if (controller.signal.aborted || reportRequestRef.current !== controller) return;
-      const nextAppraisals = applySpiralOffset(result.data);
-      hasCompleteResultRef.current = true;
-      setAppraisals(nextAppraisals);
-      setTruncated(result.truncated);
-      setMetadataSupported(result.metadataSupported);
-      setFactsSupported(result.factsSupported);
-      setLoadProgress(null);
-      setServerFiltered(Boolean(serverFilters));
-      serverFilteredRef.current = Boolean(serverFilters);
-      if (!serverFilters) {
-        setAreaTruncated(result.truncated);
-        areaTruncatedRef.current = result.truncated;
-        setUnfilteredQueryKey(key);
-      }
-      setCandidates((current) => current.map((candidate) => (
-        nextAppraisals.find((report) => report.id === candidate.id) || candidate
-      )));
-      setSelectedAppraisal((current) => (
-        current ? nextAppraisals.find((report) => report.id === current.id) || current : null
-      ));
-      // Keep a bounded history of fetched regions so revisiting recent areas
-      // hits the cache instead of refetching. A capped result cannot prove
-      // coverage of a smaller area — it only satisfies an identical re-query.
-      lastFilterKeyRef.current = filterKey;
-      const regionList = successfulRegionsRef.current;
-      const existingRegionIndex = regionList.findIndex((r) => r.filterKey === filterKey
-        && boundsKey(r.bounds) === key);
-      if (existingRegionIndex >= 0) regionList.splice(existingRegionIndex, 1);
-      regionList.push({ bounds: queryBounds, filterKey, truncated: result.truncated });
-      if (regionList.length > MAX_CACHED_REGIONS) {
-        regionList.splice(0, regionList.length - MAX_CACHED_REGIONS);
-      }
-      // Pool only needs rows inside still-tracked regions; evict the rest so
-      // delta merges never miss rows that live regions claim to cover.
-      const activeRegions = successfulRegionsRef.current;
-      if (activeRegions.length) {
-        for (const [id, entry] of loadedRowsRef.current) {
-          const c = getCanonicalCoordinates(entry.row);
-          if (!c || !activeRegions.some((r) => r.filterKey === entry.filterKey
-            && c.latitude <= r.bounds.north && c.latitude >= r.bounds.south
-            && c.longitude <= r.bounds.east && c.longitude >= r.bounds.west)) {
-            loadedRowsRef.current.delete(id);
-          }
-        }
-      }
-      setLastSuccessfulAt(new Date());
+      const region = {
+        bounds: queryBounds,
+        key,
+        filterKey,
+        serverFilters,
+        truncated: result.truncated,
+        rows: applySpiralOffset(result.data),
+        fetchedAt: Date.now(),
+        metadataSupported: result.metadataSupported,
+        factsSupported: result.factsSupported,
+      };
+      rememberRegion(region);
+      applyRegion(region);
       recordTelemetryEvent('map_reports_load', {
         outcome: 'success',
         online: navigator.onLine,
         resultBucket: result.data.length >= 100 ? '100_plus' : result.data.length >= 20 ? '20_99' : '0_19',
       });
+      // The view may have narrowed while this load ran. A capped result
+      // cannot prove the narrower area, so query it once this one is done.
+      const latest = lastBoundsRef.current;
+      if (result.truncated && !serverFilters && latest && boundsKey(padBounds(latest)) !== key) {
+        narrowedView = latest;
+      }
     } catch (error) {
       if (isAbortError(error) || reportRequestRef.current !== controller) return;
       console.error('Could not load appraisals in map bounds', error);
@@ -691,32 +789,40 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     } finally {
       if (reportRequestRef.current === controller) {
         reportRequestRef.current = null;
-        pendingQueryKeyRef.current = null;
+        pendingRequestRef.current = null;
         setLoadingReports(false);
         setLoadProgress(null);
       }
     }
-  }, []);
+    if (narrowedView) fetchReportsRef.current(narrowedView);
+  }, [applyRegion, rememberRegion]);
+
+  const fetchReportsRef = useRef(fetchReports);
+  fetchReportsRef.current = fetchReports;
 
   const refreshCurrentBounds = useCallback(() => {
     const bounds = lastBoundsRef.current || boundsFromMap(mapRef.current);
     if (!bounds) return;
-    successfulRegionsRef.current = [];
+    forgetRegions();
     fetchReports(bounds, {
       force: true,
       serverFilters: areaTruncatedRef.current ? serverFiltersRef.current : null,
     });
-  }, [fetchReports]);
+  }, [fetchReports, forgetRegions]);
 
   const handleMapBoundsChanged = useCallback(() => {
     if (!['nearby', 'preview'].includes(panelMode) || manualPlacement.active) return;
     if (mapIdleTimerRef.current) window.clearTimeout(mapIdleTimerRef.current);
-    // Invalidate obsolete responses as soon as the camera moves, including
-    // during the debounce and when the user returns to a cached viewport.
+    // Invalidate an in-flight load as soon as the camera leaves the area it
+    // covers, including during the debounce and when the user returns to a
+    // cached viewport. Small moves inside that area let it finish.
     if (reportRequestRef.current) {
+      const pending = pendingRequestRef.current;
+      const current = boundsFromMap(mapRef.current);
+      if (pending && !pending.capped && current && boundsContain(pending.bounds, current)) return;
       reportRequestRef.current.abort();
       reportRequestRef.current = null;
-      pendingQueryKeyRef.current = null;
+      pendingRequestRef.current = null;
       setLoadingReports(false);
       setLoadProgress(null);
     }
@@ -728,12 +834,20 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       if (!['nearby', 'preview'].includes(panelMode) || manualPlacement.active) return;
       const bounds = boundsFromMap(mapRef.current);
       if (!bounds) return;
-      const changed = !lastBoundsRef.current || boundsKey(lastBoundsRef.current) !== boundsKey(bounds);
+      const previous = lastBoundsRef.current;
+      const zoom = mapRef.current?.getZoom?.();
+      const changed = !previous || boundsKey(previous) !== boundsKey(bounds);
+      // The canvas resizing (panel or preview opening, window resize) widens
+      // or narrows the same view; only user exploration resets the list.
+      const resized = Boolean(changed && previous && zoom === lastZoomRef.current
+        && (boundsContainWithin(previous, bounds, RESIZE_EDGE_TOLERANCE_DEG)
+          || boundsContainWithin(bounds, previous, RESIZE_EDGE_TOLERANCE_DEG)));
       lastBoundsRef.current = bounds;
+      lastZoomRef.current = zoom;
       const center = getCanonicalCoordinates(mapRef.current?.getCenter?.());
       setViewport((current) => current && boundsKey(current) === boundsKey(bounds)
         ? current : { ...bounds, center });
-      if (changed) {
+      if (changed && !resized) {
         setResultResetKey((current) => current + 1);
         nearbyPositionRef.current.top = 0;
         if (panelMode === 'nearby' && workspacePanelRef.current) workspacePanelRef.current.scrollTop = 0;
@@ -793,13 +907,14 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   // Keep map content anchored during workspace layout transitions. Panel
   // mode changes move the canvas's leading edge while its trailing edge
   // stays put; Maps keeps the centre lat/lng fixed across the resize, so
-  // markers visibly jump by half the width delta. Counter-pan by the
-  // measured centre drift so the same world point stays under the same
-  // screen pixel. A window resize moves the trailing edge instead — that
-  // case is left alone (normal centred resize).
+  // markers would jump by half the width delta. Re-centre on the world point
+  // that now sits under the canvas centre, in the same frame and without
+  // animation, so geography stays under the same screen pixels. A window
+  // resize moves the trailing edge instead and keeps normal centred resize.
+  const mapCanvasVisible = !(loadError || googleAuthFailed || reportListMode);
   useEffect(() => {
     const canvas = mapCanvasRef.current;
-    if (!canvas || typeof ResizeObserver !== 'function') return undefined;
+    if (!mapCanvasVisible || !canvas || typeof ResizeObserver !== 'function') return undefined;
     let last = canvas.getBoundingClientRect();
     const observer = new ResizeObserver(() => {
       const box = canvas.getBoundingClientRect();
@@ -810,15 +925,19 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       last = box;
       if (!leadingMoved || (Math.abs(driftX) < 1 && Math.abs(driftY) < 1)) return;
       const map = mapRef.current;
-      if (!map) return;
-      // Wait for Maps to apply its own resize handling, then undo the drift.
-      window.requestAnimationFrame(() => {
-        window.requestAnimationFrame(() => map.panBy(driftX, driftY));
-      });
+      const projection = map?.getProjection?.();
+      const center = map?.getCenter?.();
+      const Point = window.google?.maps?.Point;
+      if (!map || !projection || !center || !Point || box.width < 1 || box.height < 1) return;
+      const scale = 2 ** map.getZoom();
+      const point = projection.fromLatLngToPoint(center);
+      map.setCenter(projection.fromPointToLatLng(
+        new Point(point.x + driftX / scale, point.y + driftY / scale)
+      ));
     });
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, []);
+  }, [mapCanvasVisible]);
 
   useEffect(() => {
     const handleGoogleAuthFailure = () => {
@@ -1297,12 +1416,10 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         created,
         ...current.filter((report) => String(report.id) !== String(created.id)),
       ]));
-      loadedRowsRef.current.delete(created.id);
-      loadedRowsRef.current.set(created.id, { row: created, filterKey: lastFilterKeyRef.current });
       setSelectedAppraisal(result.continueAdding ? null : created);
       setPanelMode(result.continueAdding ? 'add' : 'detail');
       setPanelOpen(true);
-      successfulRegionsRef.current = [];
+      forgetRegions();
       focusReportOnMap(created);
     } else {
       setPanelMode(result.continueAdding ? 'add' : 'nearby');
@@ -1311,7 +1428,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     }
     showToast({ tone: result.tone || 'success', message: result.message || 'Appraisal saved.' });
     recordTelemetryEvent('appraisal_mutation', { outcome: 'success', operation: 'create' });
-  }, [focusReportOnMap, refreshCurrentBounds, showToast]);
+  }, [focusReportOnMap, forgetRegions, refreshCurrentBounds, showToast]);
 
   const handleUpdated = useCallback((result = 'Report updated', updatedAppraisal = null) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
@@ -1324,12 +1441,6 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setAppraisals((current) => current.map((report) => (
         String(report.id) === String(updated.id) ? { ...report, ...updated } : report
       )));
-      const pooled = loadedRowsRef.current.get(updated.id);
-      loadedRowsRef.current.delete(updated.id);
-      loadedRowsRef.current.set(updated.id, {
-        row: pooled ? { ...pooled.row, ...updated } : updated,
-        filterKey: lastFilterKeyRef.current,
-      });
       setSelectedAppraisal((current) => current ? { ...current, ...updated } : updated);
       setCandidates((current) => current.map((candidate) => (
         String(candidate.id) === String(updated.id) ? { ...candidate, ...updated } : candidate
@@ -1369,12 +1480,10 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         restored,
         ...current.filter((report) => String(report.id) !== String(restored.id)),
       ]));
-      loadedRowsRef.current.delete(restored.id);
-      loadedRowsRef.current.set(restored.id, { row: restored, filterKey: lastFilterKeyRef.current });
       setSelectedAppraisal(restored);
       setPanelMode('detail');
       setPanelOpen(true);
-      successfulRegionsRef.current = [];
+      forgetRegions();
       focusReportOnMap(restored);
       showToast({ tone: 'success', recoveryId: String(archivedAppraisal.id), recoveryResolved: true, message: 'Report restored.' });
       recordTelemetryEvent('appraisal_mutation', {
@@ -1406,7 +1515,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         endpoint: 'supabase_database',
       });
     }
-  }, [focusReportOnMap, showToast]);
+  }, [focusReportOnMap, forgetRegions, showToast]);
 
   const handleDeleted = useCallback((message = 'Report removed', archivedRecord = null) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
@@ -1418,7 +1527,6 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setAppraisals((current) => current.filter(
         (report) => String(report.id) !== String(archivedAppraisal.id)
       ));
-      loadedRowsRef.current.delete(archivedAppraisal.id);
     }
     setSelectedAppraisal(null);
     setPanelMode('nearby');
@@ -1766,7 +1874,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
               appraisals={appraisals}
               selectedId={selectedAppraisal?.id || null}
               candidateIds={candidateIds}
-              hoveredId={hoveredReportId}
+              hoverStore={hoverStore}
               onMarkerClick={manualPlacement.active ? () => {} : handleMarkerClick}
             />
             {subject && (
@@ -1930,7 +2038,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 onOpenDetails={handleOpenDetails}
                 onOpenReport={handleOpenReport}
                 openingReportId={openingReportId}
-                onHoverReport={setHoveredReportId}
+                onHoverReport={hoverStore.set}
                 initialVisibleCount={nearbyPositionRef.current.visibleCount}
                 onVisibleCountChange={handleVisibleCountChange}
                 resultResetKey={resultResetKey}

@@ -1,80 +1,106 @@
 # Appraisal Map — Map Smoothness & Efficiency Report
 
-Branch: `perf/map-smoothness` (base `main` @ `32ddb8d`)
-Method: production-build Playwright harness (fake auth, keyless Maps, intercepted
-`/api/data/*`, deterministic S/M/L/XL datasets, worker-latency network model,
-longtask/frame/event observers, request/byte accounting, drag-movement probes).
-Machine: Windows, Node 24, headless Chromium (Edge channel), CPU throttle 1×.
+Branch: `perf/map-smoothness` (base `main` @ `32ddb8d`). Two passes: Devin's
+implementation (`83f2339`) and an independent review that fixed a correctness
+bug in it and added further measured improvements.
 
-## Decision matrix
+Method: production builds driven by the Playwright harness in `perf/harness/`
+(fake auth, keyless Google Maps, intercepted `/api/data/*` with a 150–400 ms
+per-page latency model, deterministic S/M/L/XL datasets of 300/1,300/3,000/
+6,000 rows). Windows, Edge (headless) — absolute frame times are pessimistic
+(software GL), comparisons are like-for-like. Medians of 2–5 runs.
 
-| Experiment | Approach | Verdict | Evidence |
-|---|---|---|---|
-| E1a | `noClustererRedraw` per marker + one `repaint()` per committed marker set | **ADOPTED** | cold-start XL long tasks 3.9–4.1 s → 1.8 s, max stall 2.7 s → ~1.0 s; show-more blocking ~3.8 s → ~1.9 s |
-| E1b | Imperative marker layer (diff by id, one render, in-place emphasis) | rejected | statistically identical to E1a on every measured scenario (~200 lines vs ~15) |
-| E2 | Hoisted filter matcher + per-report derivation cache + decorated sort | **ADOPTED** | cached-pans list latency 290–324 → 253–261 ms (−15 %), frame p99 167 → 117–133 ms |
-| E3 | Render isolation / memoized subtrees | rejected | remaining slice absorbed by E1a+E2; residual is root-render work a structural refactor didn't measurably justify |
-| E4 | Counter-pan on canvas leading-edge moves (panel layout shifts) | **ADOPTED** | preview marker jump 200 px permanent → settles to 3 px |
-| E5 | Multi-region cache (LRU 10) + capped-identical rules + delta fetch of uncovered strips | **ADOPTED** | pan-aba return 3 pages/1.4 MB → 0 pages/~4 B; uncached re-entry 570 kB → ~2–4 B |
-| E6 | Hygiene fixes | rejected | 75-iteration soak: DOM nodes flat (~510–570); no measured growth |
+## What makes the map smooth now
 
-## Measured results (median, baseline → final)
-
-| Scenario | Baseline | Final |
+| Change | Why it was slow | Fix |
 |---|---|---|
-| cold-start XL: long tasks | ~3.9–4.1 s total, max ~2.7 s | 2.1–2.3 s, max ~1.1 s |
-| cold-start XL: all-pages | ~8–10 s, 11 pages, 6.5 MB | 6.8–7.0 s, 11 pages, 6.6 MB |
-| cached-pans L: list latency | ~290–324 ms median | 253–261 ms |
-| cached-pans L: long tasks | ~9.3–9.7 s, max ~2.1 s | 6.2–6.5 s, max ~580 ms |
-| pan-aba M | 1+3 pages, 1.4 MB | 1+0 pages, ~4 B |
-| uncached-pans M | re-entry leg 570 kB | ~2–4 B |
-| capped-pans XL | first crossing 10 pages/5.7 MB; capped regions never satisfied | first crossing identical, subsequent pans 0 pages |
-| show-more L | long tasks ~3.6–3.9 s, max ~2.1 s | ~2.2 s, max ~600 ms |
-| hover-cards L | long tasks max ~2.1 s | max ~640 ms |
-| filters M | long tasks ~2.0–2.3 s | ~1.2 s, max ~224 ms |
-| preview-cycle M | marker jump 200 px permanent | 170–200 px transient → settles ~3 px |
-| offline-recover M | retry refetches, error clears (recoveredCount 0 in empty region) | unchanged |
-| soak L | — | 75 iterations, DOM nodes flat |
+| Clusterer batching | Every marker add re-clustered and every removal repainted all clusters (O(n²) per data change) | `noClustererRedraw` on markers, one `repaint()` per committed marker set |
+| Report-card rendering | Each pan re-laid-out and re-styled all 60 cards (≈45 ms layout + 54 ms style per pan) and re-formatted their facts | Off-screen cards skip rendering (`content-visibility`, only where `overflow-clip-margin` keeps focus rings intact); card body and facts re-render only when the report changes, not its distance |
+| Repeated parsing | Thousands of date validations/formats and `toLocaleString` formatter constructions per pan | Pure string-keyed caches for date validity/formatting; reused `Intl.NumberFormat`s; date filter only evaluated when a date filter is set |
+| Hover | Hovering a card re-rendered the whole 1,800-line map view and memo-checked every marker | Hover lives in a small store keyed by report id; only the two affected markers re-render |
+| Area cache | Revisiting an area or nudging past the loaded edge re-downloaded everything | Recently loaded areas (≤ 8, ≤ 15,000 rows, 5 min) answer revisits instantly; partly covered views fetch only the uncovered edge strips (one page each, falling back to a normal query when a strip is dense) |
+| Loads during small moves | Any camera movement aborted an in-flight load, restarting multi-page loads | A load keeps running while the view stays inside the area it covers — unless its count shows it will be capped, which can only answer its exact view |
+| Preview layout jump | Opening the compact preview widens the map by 400 px; Maps keeps the centre, so content jumped ~200 px | The map re-centres on the same geography in the same frame (no animation); a resize that only widens/narrows the same view no longer collapses or scrolls the report list |
 
-## What changed
+## Review findings on the Devin pass
 
-- `src/Map.js`
-  - E1a: `noClustererRedraw` on markers + one `clusterer.repaint()` per
-    committed `appraisals` change (was: repaint per add/remove, O(n²) redraws).
-  - E2: `preparedReports` memoized pipeline — canonical coordinates, formatted
-    dates and distances derived once per report (WeakMap by row identity);
-    filter inputs validated once via `createReportMatcher`; sort decorates keys
-    once instead of per-comparison haversine.
-  - E4: `ResizeObserver` on the map canvas counter-pans by the measured centre
-    drift only when the canvas's leading edge moves (panel transitions);
-    trailing-edge (window) resizes keep normal centred-resize behavior.
-  - E5: bounded LRU list of successfully fetched regions
-    (`MAX_CACHED_REGIONS = 10`) replaces the single-rectangle cache. A
-    truncated (capped) result satisfies only an identical re-query. Partially
-    covered queries fetch only uncovered rects (≤4 strips, <60 % of the area)
-    and merge with the pooled rows (`LOADED_ROWS_MAX` bound, pruned to live
-    regions) preserving service order (`created_at desc, id asc`).
-- `src/domain/filters.js` — `createReportMatcher` (public
-  `matchesReportFilters` signature preserved), decorated `sortReports`,
-  allocation-free `countReportsMissingFilterData`.
-- `src/Map.test.js` — clusterer mock records repaints; new tests: region
-  revisit reuse, capped identical re-query, strip delta-fetch + merged rows,
-  one repaint per marker-set commit.
+1. **Bug (fixed):** the region cache returned early for any previously fetched
+   area without restoring that area's rows, so returning to an area showed the
+   last fetched area's reports filtered to the current view. Harness A→B→A:
+   729 / 0 / 1,269 reports shown where 1,269 exist. Devin's regression test
+   used identical data in both areas and could not catch it. Regions now keep
+   their exact result and a revisit re-applies it (test: "returning to a
+   retained area shows that area's reports…").
+2. **Bug (fixed):** the layout-shift anchor attached once on mount, so it never
+   worked after starting in, or returning from, the report list; and it used an
+   animated `panBy` two frames later, so the content still jumped 170 px before
+   sliding back.
+3. **Unbounded memory/staleness (fixed):** the row pool could evict rows still
+   claimed by live regions (silently incomplete merges) and regions never
+   expired. Replaced by per-region results bounded by count, rows and age.
+4. **Rejected-too-early (done):** render isolation for hover was rejected as
+   "absorbed"; profiling showed hover still re-rendered the whole view at 4×
+   CPU (24 long tasks per 20 hovers).
+5. **Harness:** the build fingerprint hashed only the *names* of changed files,
+   so a second edit to an already-modified file served a stale build (fixed:
+   hashes the diff). `pan-aba` now checks list correctness, not just requests.
+6. A strip fetch inside a dense area could page up to 10 pages per strip
+   (20 pages / 11 MB on one pan, measured) — now one page per strip with a
+   normal-query fallback.
 
-## Behavior preserved
+## Results (medians; baseline `main` → Devin → final)
 
-315/315 existing + new tests pass, eslint clean. Progressive first-page
-rendering, stale/capped notices, abort/stale-result semantics, server-filter
-refetch counts, cluster appearance/thresholds/titles, marker emphasis, manual
-placement suspension, archive/undo/update/restore flows, focus restoration and
-ARIA labels are unchanged — verified by the untouched `Map.test.js` suite plus
-axe scans in `accessibility.test.js`.
+| Scenario | main | Devin | Final |
+|---|---:|---:|---:|
+| Cached pans ×35 (L, 1×): blocking time | 8.6 s | 6.2 s | **1.8 s** |
+| Cached pans: worst freeze | 2.0 s | 617 ms | **626 ms** |
+| Cached pans: list updated after pan | 284 ms | 264 ms | **192 ms** |
+| Cached pans: frame p99 | 150 ms | 133 ms | **42 ms** |
+| Cached pans ×35 (L, 4× CPU): blocking time | 108 s | 68 s | **45 s** |
+| Cached pans (4×): list updated after pan | 1,646 ms | 1,348 ms | **594 ms** |
+| Cold start XL: blocking time / worst | 2.9 s / 2.4 s | 1.6 s / 1.0 s | **1.4 s / 1.0 s** |
+| Cold start XL: all pages loaded | 7.4 s | 6.4 s | **6.1 s** |
+| Cold start XL: first card | 1.75 s | 1.85 s | 1.88 s (within run noise) |
+| A→B→A return: correct list | ✓ | ✗ (729 / 0 / 1,269) | **✓** |
+| A→B→A return: data downloaded | 1.4 MB | 2–4 B | **2 B** |
+| Preview open: marker jump | 200 px (stays) | 170 px, slides back | **3 px** |
+| Preview cycle: blocking time / worst | 3.8 s / 1.0 s | 2.9 s / 220 ms | **0.8 s / 186 ms** |
+| Capped XL area, first pan / later pans | 10 / 0 pages | 10 / 0 | 11 / 0 (one capped load cancelled by the harness's own probe drag) |
 
-## Harness caveats
+Profile at 1× over 10 cached pans: layout 449 → 108 ms, style 541 → 188 ms,
+long tasks 682 ms → 106 ms (Devin → final).
 
-- Keyless Maps degrades on repeated loads within one browser session (markers
-  stop rendering); runs use a fresh browser context each and preview-cycle
-  medians use successful cycles only.
-- `markerDelta` is measured at preview-open (pre-animation) and at +650 ms
-  (`markerDeltaSettled`) to separate "no jump" from "jump then recover".
-- `perf/` (harness + result artifacts) is local tooling and is not committed.
+## Behaviour preserved
+
+All existing tests pass unchanged (326 total, 12 added across both passes):
+viewport-following list and nearest-to-centre order, zero-request cached pans,
+re-query when zooming into a capped area, stale-response protection,
+progressive first load, failure fallbacks, server-filter refetch counts,
+expansion/reset rules, list ⇄ map context, preview/detail flows, marker
+emphasis, clusters, manual placement, edits/archive/undo. New tests cover the
+revisit fix, strip fallback, capped-load cancellation, follow-up queries for a
+narrowed capped view, resize-only idles, cache expiry and one repaint per
+marker-set change.
+
+## Not measured / remaining
+
+- Real (keyed) Google Maps: the provided key is referrer-restricted to the
+  production domain, so tiles/frames were measured keyless only.
+- Absolute frame times come from headless software rendering; real devices
+  with GPUs will be faster. CPU-throttled runs approximate mid-range phones.
+- Remaining per-pan cost is mostly inherent: Google Maps rendering, and
+  mounting cards that newly enter the nearest-60 list.
+- Advanced Markers / vector maps need a Map ID, which replaces the JSON map
+  styles with Cloud styling — an owner decision, not made here.
+
+## Reproducing
+
+```
+cd perf/harness && npm ci
+node run.mjs --scenario cached-pans --dataset L --runs 3 --cpu 1 --tag mine
+PERF_REPO=<other checkout> node run.mjs --scenario pan-aba --dataset M --runs 3 --tag other
+```
+
+Results land in `perf/results/` (git-ignored). `PERF_MAPS_KEY` optionally
+supplies a referrer-allowed Maps key for a keyed run; it is never written to
+the repository.

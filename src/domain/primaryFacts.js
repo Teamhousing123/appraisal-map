@@ -15,6 +15,19 @@ export const ESSENTIAL_FACT_KEYS = Object.freeze([
   'frontage',
 ]);
 
+// Every report field getPrimaryFacts reads; renderers compare these to skip
+// recomputing facts for an unchanged report.
+export const PRIMARY_FACT_FIELDS = Object.freeze([
+  'effective_date',
+  'appraisal_date',
+  'reported_living_area_sq_ft',
+  'garage_capacity',
+  'lot_frontage_ft',
+  'lot_frontage_status',
+  'property_type',
+  'year_built',
+]);
+
 export function getPrimaryFacts(
   report = {},
   { includeSecondary = true, includeReportDate = false } = {}

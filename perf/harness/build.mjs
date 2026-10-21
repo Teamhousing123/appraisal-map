@@ -19,8 +19,11 @@ const STAMP = join(REPO_ROOT, 'build', '.harness-env');
 function sourceStamp() {
   try {
     const head = execSync('git rev-parse HEAD', { cwd: REPO_ROOT }).toString().trim();
-    const dirty = execSync('git status --porcelain -- src package.json package-lock.json', { cwd: REPO_ROOT }).toString();
-    return createHash('sha1').update(head + dirty).digest('hex').slice(0, 12);
+    // Hash the uncommitted content, not just the list of dirty files, so a
+    // second edit to an already-modified file still triggers a rebuild.
+    const dirty = execSync('git diff HEAD -- src public package.json package-lock.json', { cwd: REPO_ROOT, maxBuffer: 64 * 1024 * 1024 }).toString();
+    const untracked = execSync('git ls-files --others --exclude-standard -- src public', { cwd: REPO_ROOT }).toString();
+    return createHash('sha1').update(head + dirty + untracked).digest('hex').slice(0, 12);
   } catch {
     // Not a git repo — fall back to the src/ mtime.
     return String(statSync(join(REPO_ROOT, 'src')).mtimeMs);

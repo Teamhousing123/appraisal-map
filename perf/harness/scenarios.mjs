@@ -136,6 +136,11 @@ export const scenarios = {
   // regions are retained.
   async 'pan-aba'(ctx) {
     await boot(ctx);
+    // Correctness: the list shown back at A must match the list first shown
+    // at A (a cache hit must restore A's reports, not B's).
+    const listAt = () => ctx.page.locator('.report-card h3').allTextContents();
+    const countBefore = await ctx.h.reportCount();
+    const listBefore = await listAt();
     const mark = ctx.h.requestMark();
     const outDrags = [];
     let distance = 0;
@@ -155,7 +160,16 @@ export const scenarios = {
     const totals = ctx.h.requestTotals(mark);
     const legs = ctx.h.dataRequests(mark);
     const returnLegs = ctx.h.dataRequests(leftMark);
+    // The quiet check can return before a delayed (debounced) load starts;
+    // read the list only once the app no longer reports a load in progress.
+    for (let i = 0; i < 40 && /Updating|Loading/.test(await ctx.h.listStatusText()); i += 1) await ctx.h.sleep(250);
+    const countAfterReturn = await ctx.h.reportCount();
+    const listAfterReturn = await listAt();
     return {
+      countBefore,
+      countAfterReturn,
+      sameListAfterReturn: listBefore.length === listAfterReturn.length
+        && listBefore.every((address, i) => address === listAfterReturn[i]),
       outDrags,
       returnDrag,
       outPages: legs.length - returnLegs.length,
