@@ -179,3 +179,13 @@ test('announces archive recovery and restore errors without including action con
   fireEvent.click(screen.getByRole('button', { name: 'Dismiss recovery' }));
   expect(screen.queryByRole('region', { name: 'Archive recovery' })).not.toBeInTheDocument();
 });
+
+test('an old session lookup cannot overwrite a newer auth event', async () => {
+  let finishLookup;
+  supabase.auth.getSession.mockImplementation(() => new Promise((resolve) => { finishLookup = resolve; }));
+  render(<App />);
+  await act(async () => mockAuthStateChange('SIGNED_IN', { user: { id: 'synthetic-user', app_metadata: { role: 'editor' } } }));
+  expect(await screen.findByText('Test map')).toBeInTheDocument();
+  await act(async () => finishLookup({ data: { session: null }, error: null }));
+  expect(screen.getByText('Test map')).toBeInTheDocument();
+});

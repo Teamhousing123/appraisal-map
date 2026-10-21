@@ -1200,7 +1200,7 @@ export function buildSearchOrFilter(token, { includePropertyType = true } = {}) 
 
 function executeSearchPage(
   supabase,
-  { columns, tokens, offset, pageSize, includeDeletedFilter, includePropertyType = true, signal }
+  { columns, tokens, offset, pageSize, includeDeletedFilter, includePropertyType = true, includeFacts = true, missingFactsOnly = false, signal }
 ) {
   let query = supabase
     .from('appraisals')
@@ -1211,13 +1211,20 @@ function executeSearchPage(
   for (const token of tokens) {
     query = query.or(buildSearchOrFilter(token, { includePropertyType }));
   }
+  if (missingFactsOnly) {
+    query = query.or([
+      includePropertyType ? 'and(effective_date.is.null,appraisal_date.is.null)' : 'appraisal_date.is.null',
+      ...(includePropertyType ? ['property_type.is.null', 'reported_living_area_sq_ft.is.null', 'year_built.is.null'] : []),
+      ...(includeFacts ? ['garage_capacity.is.null', 'and(lot_frontage_ft.is.null,lot_frontage_status.is.null)'] : []),
+    ].join(','));
+  }
   if (signal && typeof query.abortSignal === 'function') query = query.abortSignal(signal);
   return query.range(offset, offset + pageSize - 1);
 }
 
 async function searchWithAvailableSchema(
   supabase,
-  { tokens, offset, pageSize, signal }
+  { tokens, offset, pageSize, missingFactsOnly, signal }
 ) {
   while (true) {
     const includeFoundation = foundationSchemaCapability !== CAPABILITY_UNSUPPORTED;
@@ -1235,6 +1242,8 @@ async function searchWithAvailableSchema(
       pageSize,
       includeDeletedFilter: includeFoundation,
       includePropertyType: includeMetadata,
+      includeFacts,
+      missingFactsOnly,
       signal,
     });
     if (response.error) {
@@ -1268,7 +1277,7 @@ async function searchWithAvailableSchema(
 
 export async function searchAppraisals(
   supabase,
-  { term = '', offset = 0, pageSize = DEFAULT_SEARCH_PAGE_SIZE, signal } = {}
+  { term = '', offset = 0, pageSize = DEFAULT_SEARCH_PAGE_SIZE, missingFactsOnly = false, signal } = {}
 ) {
   const normalizedTerm = normalizeSearchTerm(term);
   const normalizedOffset = normalizePositiveInteger(offset + 1, 1, Number.MAX_SAFE_INTEGER) - 1;
@@ -1282,6 +1291,7 @@ export async function searchAppraisals(
       tokens: searchTokens(normalizedTerm),
       offset: normalizedOffset,
       pageSize: normalizedPageSize,
+      missingFactsOnly,
       signal: operationSignal,
     }),
     {

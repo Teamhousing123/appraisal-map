@@ -34,10 +34,11 @@ function AddressPicker({
   const requestRef = useRef(0);
   const timerRef = useRef(null);
   const sessionTokenRef = useRef(null);
-  const suppressedLookupRef = useRef('');
+  const suppressedLookupRef = useRef(addressFingerprint(address, city));
 
   useEffect(() => {
     if (timerRef.current) window.clearTimeout(timerRef.current);
+    const requestId = ++requestRef.current;
     const street = address.trim();
     const locality = city.trim();
     const currentFingerprint = addressFingerprint(street, locality);
@@ -54,7 +55,8 @@ function AddressPicker({
       return undefined;
     }
 
-    const requestId = ++requestRef.current;
+    setSuggestions([]);
+    setActiveIndex(-1);
     setBusy(true);
     setLookupError('');
     timerRef.current = window.setTimeout(async () => {
@@ -143,6 +145,9 @@ function AddressPicker({
       else setActiveIndex(0);
     } else if (event.key === 'Escape') {
       event.preventDefault();
+      requestRef.current += 1;
+      if (timerRef.current) window.clearTimeout(timerRef.current);
+      setBusy(false);
       setSuggestions([]);
       setActiveIndex(-1);
     }

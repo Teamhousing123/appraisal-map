@@ -103,3 +103,10 @@ test('all operation counters stop at their cap and reject corrupted state', () =
   // Keep room under the 100,000/day Free request and SQLite write allowances.
   assert.ok(Object.values(DAILY_LIMITS).reduce((total, limit) => total + limit, 0) <= 85000);
 });
+
+test('staff access matches browser role normalization and never grants unknown roles', async () => {
+  const { staffAccess } = await import('./limits.mjs');
+  for (const role of ['viewer', 'reader', 'read_only', 'readonly', ' VIEWER ']) assert.deepEqual(staffAccess(role), { canRead: true, canWrite: false });
+  for (const role of ['admin', 'editor', 'writer', 'appraiser', ' Editor ']) assert.deepEqual(staffAccess(role), { canRead: true, canWrite: true });
+  for (const role of [null, undefined, '', 'owner', {}, 'authenticated']) assert.deepEqual(staffAccess(role), { canRead: false, canWrite: false });
+});

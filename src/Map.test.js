@@ -838,7 +838,7 @@ test('returning from the report list restores scroll context, visible count, and
   await screen.findByRole('heading', { name: 'Your reports' });
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
 
-  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Back to map' }));
 
   await screen.findByRole('heading', { name: '1 Test Row' });
   expect(screen.getAllByRole('heading', { name: /Test Row/ })).toHaveLength(70);
@@ -876,7 +876,7 @@ test('a data change invalidates the saved report-list context', async () => {
   await screen.findByRole('listitem');
 
   // Back to the map and straight into the list again: restored, no search.
-  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Back to map' }));
   await screen.findByRole('button', { name: 'Report list' });
   fireEvent.click(screen.getByRole('button', { name: 'Report list' }));
   await screen.findByRole('heading', { name: 'Your reports' });
@@ -885,7 +885,7 @@ test('a data change invalidates the saved report-list context', async () => {
   expect(searchAppraisals).toHaveBeenCalledTimes(1);
 
   // After an update, the next list open must search again.
-  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Back to map' }));
   fireEvent.click(await screen.findByRole('button', { name: /10 Example Road, Aurora/i }));
   fireEvent.click(await screen.findByRole('button', { name: 'Save test update' }));
   await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));

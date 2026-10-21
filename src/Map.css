@@ -424,6 +424,8 @@
   right: 14px;
   z-index: 700;
   display: flex;
+  flex-wrap: wrap;
+  max-width: calc(100% - 28px);
   gap: 2px;
   padding: 3px;
   border: 1px solid var(--map-border);

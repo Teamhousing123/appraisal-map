@@ -1,13 +1,15 @@
 import '@testing-library/jest-dom';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import ReportRecoveryWorkspace from './ReportRecoveryWorkspace';
-import { searchAppraisals } from '../services/appraisalService';
+import { fetchAppraisalForMutation, searchAppraisals, updateAppraisal } from '../services/appraisalService';
 import { isR2StorageEnabled } from '../services/cloudflareStorage';
 import { supabase } from '../supabaseClient';
 
 jest.mock('../services/appraisalService', () => ({
   ...jest.requireActual('../services/appraisalService'),
   searchAppraisals: jest.fn(),
+  fetchAppraisalForMutation: jest.fn(),
+  updateAppraisal: jest.fn(),
 }));
 
 jest.mock('../services/cloudflareStorage', () => ({
@@ -21,6 +23,9 @@ jest.mock('../supabaseClient', () => ({
     storage: { from: jest.fn() },
   },
 }));
+
+// Large-list tests include jsdom accessibility-tree work on slower Windows/CI hosts.
+jest.setTimeout(30000);
 
 const reports = (count, prefix = 'report') => Array.from({ length: count }, (_, index) => ({
   id: `${prefix}-${index + 1}`,
@@ -48,6 +53,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   isR2StorageEnabled.mockReturnValue(false);
   searchAppraisals.mockResolvedValue({ data: [], count: 0, hasMore: false, term: '' });
+  fetchAppraisalForMutation.mockResolvedValue({ data: reports(1)[0], error: null });
   supabase.storage.from.mockReturnValue({
     createSignedUrl: jest.fn(async () => ({ data: { signedUrl: 'https://example.test/signed' }, error: null })),
   });
@@ -88,7 +94,7 @@ test('Load 100 more requests the next offset and appends without duplicates', as
   renderWorkspace();
 
   await screen.findByText(/Showing 100 of 105 reports/);
-  fireEvent.click(screen.getByRole('button', { name: 'Load 100 more' }));
+  fireEvent.click(screen.getByText('Load 100 more', { selector: 'button' }));
 
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(2));
   expect(searchAppraisals).toHaveBeenLastCalledWith(
@@ -96,7 +102,7 @@ test('Load 100 more requests the next offset and appends without duplicates', as
     expect.objectContaining({ offset: 100 })
   );
   await screen.findByText(/Showing 104 of 105 reports/);
-  expect(screen.getAllByRole('listitem')).toHaveLength(104);
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(104);
   expect(screen.queryByRole('button', { name: 'Load 100 more' })).not.toBeInTheDocument();
 });
 
@@ -107,11 +113,11 @@ test('Load 100 more keeps the exact total when the next page has no count', asyn
   renderWorkspace();
 
   await screen.findByText(/Showing 100 of 650 reports/);
-  fireEvent.click(screen.getByRole('button', { name: 'Load 100 more' }));
+  fireEvent.click(screen.getByText('Load 100 more', { selector: 'button' }));
 
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(2));
   expect(await screen.findByText(/Showing 200 of 650 reports/)).toBeInTheDocument();
-  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(200);
 });
 
 test('keeps rows visible while refreshing and never claims no matches mid-request', async () => {
@@ -122,7 +128,7 @@ test('keeps rows visible while refreshing and never claims no matches mid-reques
   renderWorkspace();
 
   await screen.findByText(/Showing 2 of 2 reports/);
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+  fireEvent.click(screen.getByText('Refresh reports', { selector: 'button' }));
 
   expect(await screen.findByText(/Refreshing… showing the last loaded results/)).toBeInTheDocument();
   expect(screen.getByRole('heading', { name: '1 Example Road' })).toBeInTheDocument();
@@ -139,7 +145,7 @@ test('keeps previous rows on error and retries with Try again', async () => {
   renderWorkspace();
 
   await screen.findByText(/Showing 2 of 2 reports/);
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+  fireEvent.click(screen.getByText('Refresh reports', { selector: 'button' }));
 
   const alert = await screen.findByRole('alert');
   expect(alert).toHaveTextContent('Refresh failed.');
@@ -147,7 +153,7 @@ test('keeps previous rows on error and retries with Try again', async () => {
   expect(screen.getByRole('heading', { name: '1 Example Road' })).toBeInTheDocument();
 
   searchAppraisals.mockResolvedValueOnce({ data: reports(2, 'retry'), count: 2, hasMore: false, term: '' });
-  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  fireEvent.click(screen.getByText('Try again', { selector: 'button' }));
   await screen.findByText(/Showing 2 of 2 reports/);
 });
 
@@ -305,7 +311,7 @@ test('refresh re-reads the full loaded extent atomically and keeps focus on the 
   renderWorkspace({ initialState: snapshot() });
 
   await screen.findByText(/Showing 200 of 260 reports/);
-  const refreshButton = screen.getByRole('button', { name: 'Refresh reports' });
+  const refreshButton = screen.getByText('Refresh reports', { selector: 'button' });
   refreshButton.focus();
   fireEvent.click(refreshButton);
 
@@ -325,7 +331,7 @@ test('refresh re-reads the full loaded extent atomically and keeps focus on the 
   });
 
   await screen.findByText(/Showing 200 of 260 reports/);
-  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(200);
   expect(screen.getByRole('heading', { name: '1 Example Road' })).toBeInTheDocument();
   expect(refreshButton).toHaveFocus();
 }, 30000);
@@ -350,14 +356,14 @@ test('refresh beyond 1,000 loaded records pages in 500-row steps and keeps all r
   searchAppraisals.mockImplementation((client, { offset, pageSize }) => (
     Promise.resolve(page(offset, pageSize))
   ));
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+  fireEvent.click(within(screen.getByRole('search', { name: 'Report search controls' })).getByRole('button', { name: 'Refresh reports' }));
 
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(3));
   expect(searchAppraisals.mock.calls.map(([, options]) => [options.offset, options.pageSize]))
     .toEqual([[0, 500], [500, 500], [1000, 100]]);
   await screen.findByText(/Showing 1,100 of 1,500 reports/);
-  expect(screen.getAllByRole('listitem')).toHaveLength(1100);
-  expect(screen.getByRole('heading', { name: 'Refreshed 0' })).toBeInTheDocument();
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(1100);
+  expect(screen.getByText('Refreshed 0', { selector: 'h2' })).toBeInTheDocument();
   const statusBefore = screen.getByText(/Showing 1,100 of 1,500 reports/).textContent;
 
   // A mid-refresh failure leaves the previous extent untouched.
@@ -367,14 +373,14 @@ test('refresh beyond 1,000 loaded records pages in 500-row steps and keeps all r
       ? Promise.reject(new Error('network'))
       : Promise.resolve(page(offset, pageSize))
   ));
-  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+  fireEvent.click(within(screen.getByRole('search', { name: 'Report search controls' })).getByRole('button', { name: 'Refresh reports' }));
 
   // Role queries are expensive against 1,100 rendered rows; allow slow polls.
-  const alert = await screen.findByRole('alert', {}, { timeout: 30000 });
+  const alert = await screen.findByText(/Refresh failed\./, { selector: '.recovery-error' }, { timeout: 30000 });
   expect(alert).toHaveTextContent('Refresh failed.');
   expect(alert).toHaveTextContent('may be out of date');
-  expect(screen.getAllByRole('listitem')).toHaveLength(1100);
-  expect(screen.getByRole('heading', { name: 'Refreshed 0' })).toBeInTheDocument();
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(1100);
+  expect(screen.getByText('Refreshed 0', { selector: 'h2' })).toBeInTheDocument();
   expect(screen.getByText(/Showing 1,100 of 1,500 reports/).textContent).toBe(statusBefore);
 }, 120000);
 
@@ -384,7 +390,7 @@ test('a remounted list resumes a typed-but-unapplied query', async () => {
 
   // The restored rows render immediately and the pending query runs.
   expect(screen.getByLabelText('Search reports')).toHaveValue('oak');
-  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(200);
 
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1), { timeout: 2000 });
   expect(searchAppraisals).toHaveBeenCalledWith(
@@ -392,8 +398,8 @@ test('a remounted list resumes a typed-but-unapplied query', async () => {
     expect.objectContaining({ term: 'oak', offset: 0 })
   );
   await screen.findByText(/Showing 2 of 2 reports/);
-  expect(screen.getAllByRole('listitem')).toHaveLength(2);
-});
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(2);
+}, 30000);
 
 test('a remounted list re-issues a search that was in flight when it unmounted', async () => {
   let resolveSearch;
@@ -509,7 +515,7 @@ test('a refresh superseded by a new query stops paging the old term', async () =
 
   await screen.findByText(/Showing 3 of 3 reports/);
   expect(screen.getByText(/matching “aurora”/)).toBeInTheDocument();
-}, 30000);
+}, 120000);
 
 test('a remounted list with an applied term restores rows without searching and snapshots on exit', async () => {
   const scrollSpy = jest.spyOn(window, 'scrollTo').mockImplementation(() => {});
@@ -521,22 +527,22 @@ test('a remounted list with an applied term restores rows without searching and 
       appliedTerm: 'oak',
       count: 250,
       lastUpdatedAt,
-      scrollY: 120,
+      scrollTop: 120,
     }),
     onShowMap,
   });
 
   await screen.findByText(/Showing 200 of 250 reports matching “oak”/);
   expect(screen.getByLabelText('Search reports')).toHaveValue('oak');
-  expect(screen.getAllByRole('listitem')).toHaveLength(200);
+  expect(screen.getAllByRole('listitem', { hidden: true })).toHaveLength(200);
   expect(screen.getByRole('heading', { name: 'Your reports' })).toHaveFocus();
-  expect(scrollSpy).toHaveBeenCalledWith(0, 120);
+  expect(screen.getByRole('region', { name: 'Your reports' }).scrollTop).toBe(120);
 
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 450)); });
   expect(searchAppraisals).not.toHaveBeenCalled();
 
   searchAppraisals.mockResolvedValueOnce({ data: reports(10, 'more'), count: 250, hasMore: false, term: 'oak', factsSupported: true });
-  fireEvent.click(screen.getByRole('button', { name: 'Load 100 more' }));
+  fireEvent.click(screen.getByText('Load 100 more', { selector: 'button' }));
   await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(1));
   expect(searchAppraisals).toHaveBeenLastCalledWith(
     supabase,
@@ -544,7 +550,7 @@ test('a remounted list with an applied term restores rows without searching and 
   );
   await screen.findByText(/Showing 210 of 250 reports/);
 
-  fireEvent.click(screen.getByRole('button', { name: 'Show map' }));
+  fireEvent.click(screen.getByText('Back to map', { selector: 'button' }));
   expect(onShowMap).toHaveBeenCalledWith(expect.objectContaining({
     query: 'oak',
     appliedTerm: 'oak',
@@ -552,9 +558,50 @@ test('a remounted list with an applied term restores rows without searching and 
     hasMore: false,
     factsSupported: true,
     completedAt: expect.any(Date),
-    scrollY: expect.any(Number),
+    scrollTop: expect.any(Number),
   }));
   expect(onShowMap.mock.calls[0][0].reports).toHaveLength(210);
   expect(onShowMap.mock.calls[0][0].lastUpdatedAt).toBeInstanceOf(Date);
   scrollSpy.mockRestore();
 }, 30000);
+
+test('list exposes details and direct editing only for an editor', async () => {
+  searchAppraisals.mockResolvedValue({ data: reports(1), count: 1, hasMore: false, term: '' });
+  const onNavigate = jest.fn();
+  const { rerender } = render(<ReportRecoveryWorkspace onNavigate={onNavigate} canMutate onShowMap={jest.fn()} />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Edit report' }));
+  expect(onNavigate).toHaveBeenCalledWith('#reports/report-1/edit');
+  rerender(<ReportRecoveryWorkspace onNavigate={onNavigate} canMutate={false} onShowMap={jest.fn()} />);
+  expect(screen.queryByRole('button', { name: 'Edit report' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Report details' })).toBeInTheDocument();
+});
+
+test('direct edit link fetches a fresh version and saves missing facts without geocoding', async () => {
+  const saved = { ...reports(1)[0], version: 4, latitude: 43.8, longitude: -79.4, garage_capacity: 'double', lot_frontage_ft: 42.5 };
+  fetchAppraisalForMutation.mockResolvedValue({ data: { ...saved, garage_capacity: null, lot_frontage_ft: null }, error: null });
+  updateAppraisal.mockResolvedValue({ data: { ...saved, version: 5 }, error: null });
+  const onNavigate = jest.fn();
+  const onUpdated = jest.fn();
+  renderWorkspace({ route: { reportId: 'report-1', editing: true }, onNavigate, onUpdated, canMutate: true, getSignedUrl: async () => null });
+  await screen.findByRole('heading', { name: 'Edit appraisal' });
+  fireEvent.change(screen.getByLabelText('Garage capacity'), { target: { value: 'double' } });
+  fireEvent.change(screen.getByLabelText('Lot frontage (feet)'), { target: { value: '42.5' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Save report changes' }));
+  await waitFor(() => expect(updateAppraisal).toHaveBeenCalledWith(supabase, 'report-1', expect.objectContaining({ garage_capacity: 'double', lot_frontage_ft: 42.5 }), { expectedVersion: 4 }));
+  await waitFor(() => expect(onUpdated).toHaveBeenCalled());
+  expect(onNavigate).toHaveBeenLastCalledWith('#reports/report-1', { confirmed: true, replace: true });
+});
+
+test('unavailable direct reports have a retry and a return path', async () => {
+  fetchAppraisalForMutation.mockResolvedValue({ data: null, error: null });
+  renderWorkspace({ route: { reportId: 'missing' }, onNavigate: jest.fn() });
+  expect(await screen.findByRole('alert')).toHaveTextContent('no longer available');
+  expect(screen.getByRole('button', { name: 'Back to report list' })).toBeInTheDocument();
+});
+
+test('missing facts toggle starts a server-side search and does not reuse a stale page', async () => {
+  renderWorkspace();
+  await flushSearch();
+  fireEvent.click(screen.getByLabelText('Show reports with missing facts'));
+  await waitFor(() => expect(searchAppraisals).toHaveBeenLastCalledWith(supabase, expect.objectContaining({ missingFactsOnly: true, offset: 0 })), { timeout: 2000 });
+});

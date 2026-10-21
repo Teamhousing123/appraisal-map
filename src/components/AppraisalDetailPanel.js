@@ -38,6 +38,7 @@ import AppraisalFormFields from './AppraisalFormFields';
 import AddressPicker from './AddressPicker';
 import PrimaryFacts from './PrimaryFacts';
 import CopyActions from './CopyActions';
+import ReportCompletion from './ReportCompletion';
 import { uploadStorageObject } from '../services/resumableUpload';
 import { isAbortError } from '../services/operation';
 import { recordTelemetryEvent } from '../services/telemetry';
@@ -147,11 +148,14 @@ function AppraisalDetailPanel({
   compact = false,
   onExpand,
   backToPreview = false,
+  initialEditing = false,
+  onEditingChange,
+  backLabel,
   onWorkspaceStateChange,
   runWorkspaceAction = (action) => action?.(),
 }) {
   const [photoState, setPhotoState] = useState({ status: 'idle', url: null });
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState(initialEditing && canMutate);
   const screenRef = useRef(null);
   const editReturnFocusRef = useRef(null);
   const previousEditingRef = useRef(false);
@@ -230,7 +234,7 @@ function AppraisalDetailPanel({
 
   useEffect(() => {
     setPhotoState({ status: appraisal.photo_url ? 'loading' : 'empty', url: null });
-    setEditing(false);
+    setEditing(initialEditing && canMutate);
     const nextForm = initialFormState(appraisal);
     formRef.current = nextForm;
     geocodeRequestRef.current += 1;
@@ -259,7 +263,19 @@ function AppraisalDetailPanel({
       });
     }
     return () => { active = false; };
+  // Editing is initialized per report; route changes are handled separately.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [appraisal, getSignedUrl]);
+
+  useEffect(() => {
+    setEditing(initialEditing && canMutate);
+  }, [initialEditing, canMutate]);
+
+  const beginEditing = (event) => {
+    editReturnFocusRef.current = event.currentTarget;
+    if (onEditingChange) onEditingChange(true);
+    else setEditing(true);
+  };
 
   const updateForm = (field, value) => {
     setForm((current) => {
@@ -304,6 +320,7 @@ function AppraisalDetailPanel({
     const nextForm = initialFormState(appraisal);
     geocodeRequestRef.current += 1;
     setEditing(false);
+    onEditingChange?.(false);
     formRef.current = nextForm;
     setForm(nextForm);
     setFieldErrors({});
@@ -730,6 +747,7 @@ function AppraisalDetailPanel({
       }
 
       setEditing(false);
+      onEditingChange?.(false);
       onUpdated(updateMessage, updatedAppraisal);
     } catch (saveError) {
       setStatus('');
@@ -845,6 +863,7 @@ function AppraisalDetailPanel({
             </button>
             <button type="button" className="button button--secondary" onClick={() => runWorkspaceAction(resetEditing)} disabled={formBusy}>Cancel</button>
           </div>
+          <p className="appraisal-field-hint" role="status">{editDirty ? 'You have unsaved changes.' : 'Enter only facts confirmed in the source report. Blank fields remain Not recorded.'}</p>
           {error && (
             <div ref={errorSummaryRef} className="form-alert" role="alert" tabIndex="-1">
               {error}
@@ -1036,6 +1055,12 @@ function AppraisalDetailPanel({
             </div>
           )}
 
+          <div className="detail-form__actions am-form-actions am-form-actions--footer">
+            <button type="submit" className="button button--primary" aria-label="Save report changes" disabled={formBusy}>
+              {formBusy ? 'Saving…' : 'Save changes'}
+            </button>
+            <button type="button" className="button button--secondary" onClick={() => runWorkspaceAction(resetEditing)} disabled={formBusy}>Cancel changes</button>
+          </div>
         </form>
       </section>
     );
@@ -1049,7 +1074,7 @@ function AppraisalDetailPanel({
   const openingDocument = openingReportId === appraisal.id;
   const propertyPhoto = (
     <div className={`detail-photo detail-photo--${photoState.status}`}>
-      {photoState.url ? <img src={photoState.url} alt={`Property at ${appraisal.address}`} onError={() => setPhotoState({ status: 'error', url: null })} /> : (
+      {photoState.url ? <img src={photoState.url} loading="lazy" decoding="async" alt={`Property at ${appraisal.address}`} onError={() => setPhotoState({ status: 'error', url: null })} /> : (
         <span>{photoState.status === 'loading' ? 'Loading property photo…' : photoState.status === 'error' ? 'Photo unavailable' : 'No property photo'}</span>
       )}
     </div>
@@ -1058,7 +1083,7 @@ function AppraisalDetailPanel({
   return (
     <section ref={screenRef} className={`detail-panel${compact ? ' detail-panel--preview' : ''}`} aria-labelledby="appraisal-detail-title">
       <div className="workspace-heading workspace-heading--with-back detail-panel__heading">
-        <button type="button" className="button button--quiet" onClick={onBack} aria-label={backToPreview ? 'Back to map preview' : 'Back to nearby reports'}><BackIcon /> {backToPreview ? 'Back to map preview' : 'Back to reports'}</button>
+        <button type="button" className="button button--quiet" onClick={onBack} aria-label={backLabel || (backToPreview ? 'Back to map preview' : 'Back to nearby reports')}><BackIcon /> {backLabel || (backToPreview ? 'Back to map preview' : 'Back to reports')}</button>
         <h2 id="appraisal-detail-title" tabIndex="-1">{compact ? 'Report preview' : 'Report details'}</h2>
       </div>
 
@@ -1075,6 +1100,12 @@ function AppraisalDetailPanel({
         )}
         {compact && propertyPhoto}
         <PrimaryFacts report={appraisal} variant={compact ? 'preview' : 'detail'} includeReportDate={!compact} />
+        <ReportCompletion report={appraisal} />
+        {canMutate && !compact && <div className="detail-edit-action">
+          <button type="button" className="button button--primary" onClick={beginEditing}>Edit report</button>
+          <p>Complete missing facts or correct report details. Use values from the source report.</p>
+        </div>}
+        {!canMutate && !compact && <p className="appraisal-field-hint">Your account has view-only access. Ask your administrator to enable editing.</p>}
         {!compact && <CopyActions report={appraisal} idPrefix="detail" />}
         {hasPdf ? (
           <div className="detail-document-actions">
@@ -1129,7 +1160,6 @@ function AppraisalDetailPanel({
 
         {canMutate && !compact && (
           <div className="maintenance-actions">
-            <button type="button" className="button button--secondary" onClick={(event) => { editReturnFocusRef.current = event.currentTarget; setEditing(true); }}>Edit report</button>
             {!confirmDelete ? (
               <button type="button" className="button button--secondary" onClick={() => setConfirmDelete(true)}>Archive…</button>
             ) : (
@@ -1149,6 +1179,7 @@ function AppraisalDetailPanel({
       {compact && (
         <div className="detail-panel__expand">
           <button type="button" className="button button--primary button--full" onClick={onExpand}>Expand to full view</button>
+          {canMutate && <button type="button" className="button button--secondary button--full" onClick={() => onExpand({ editing: true })}>Edit report</button>}
         </div>
       )}
     </section>

@@ -3,6 +3,12 @@ export const LINK_SECONDS = 600;
 export const DAILY_LIMITS = Object.freeze({ request: 40000, readRequest: 20000, maintenance: 2000, classA: 2000, classB: 19000, maintenanceB: 1000, upstreamRequest: 1000 });
 export const FILE_LIMITS = Object.freeze({ photos: 15 * 1024 * 1024, pdfs: 40 * 1024 * 1024, 'appraisal-folders': 104 * 1024 * 1024 });
 
+export function staffAccess(role) {
+  const normalized = typeof role === 'string' ? role.trim().toLowerCase() : '';
+  const canWrite = ['admin', 'editor', 'writer', 'appraiser'].includes(normalized);
+  return { canRead: canWrite || ['viewer', 'reader', 'read_only', 'readonly'].includes(normalized), canWrite };
+}
+
 export function validateUpload(input) {
   if (!input || !Object.hasOwn(FILE_LIMITS, input.bucket)) throw new Error('Choose a supported attachment type.');
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[a-z0-9]+$/.test(input.key || '')) throw new Error('The upload key is invalid.');

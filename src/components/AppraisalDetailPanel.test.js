@@ -91,7 +91,7 @@ test('compact preview shows the photo and key facts with an explicit full-view a
   expect(screen.getByRole('heading', { name: 'Report preview' })).toBeInTheDocument();
   expect(await screen.findByRole('img', { name: /Property at 10 Example Road/ })).toBeInTheDocument();
   expect(screen.getByText('2,100 sq ft')).toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Edit report' })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Edit report' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Download PDF' })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole('button', { name: 'Open PDF' }));
   expect(view.onOpenReport).toHaveBeenCalledWith(view.appraisal);

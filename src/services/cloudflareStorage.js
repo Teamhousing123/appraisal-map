@@ -37,7 +37,13 @@ export async function storageRequest(supabase, path, { signal, method = 'GET', b
     method, signal: controller.signal, headers: { Authorization: `Bearer ${session.access_token}`, ...(raw ? { 'Content-Type': 'application/octet-stream' } : body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
     body: body === undefined ? undefined : raw ? body : JSON.stringify(body),
   });
-  const result = await response.json();
+  let result;
+  try { result = await response.json(); } catch {
+    const error = new Error('The storage service returned an unreadable response. Check your connection and retry.');
+    error.status = response.ok ? 502 : response.status;
+    error.isUserFacing = true;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(result.error || result.message || 'Storage is temporarily unavailable.');
     error.status = response.status; error.isUserFacing = true; throw error;

@@ -107,3 +107,8 @@ test('keeps sign-in calls at Supabase and preserves appraisal mutation bodies', 
   expect(forwarded.method).toBe('PATCH');
   expect(await forwarded.text()).toBe('{"city":"Toronto"}');
 });
+
+test('a malformed storage response returns recovery guidance without exposing response content', async () => {
+  fetch.mockResolvedValueOnce({ ok: false, status: 503, json: async () => { throw new SyntaxError('private upstream html'); } });
+  await expect(createProtectedFileLink(supabase, 'pdfs', key)).rejects.toMatchObject({ status: 503, isUserFacing: true, message: expect.stringContaining('unreadable response') });
+});

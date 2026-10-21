@@ -40,6 +40,9 @@ import NearbyWorkspace from './components/NearbyWorkspace';
 import AppraisalDetailPanel from './components/AppraisalDetailPanel';
 import BrandLogo from './components/BrandLogo';
 import ReportRecoveryWorkspace from './components/ReportRecoveryWorkspace';
+import DiscardChangesDialog from './components/DiscardChangesDialog';
+import useWorkspaceRoute from './hooks/useWorkspaceRoute';
+import useLiveLocation from './hooks/useLiveLocation';
 import './Map.css';
 import './presentation.css';
 
@@ -404,6 +407,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const [selectedAppraisal, setSelectedAppraisal] = useState(null);
   const [viewport, setViewport] = useState(null);
   const [detailReturnsToPreview, setDetailReturnsToPreview] = useState(false);
+  const [detailEditing, setDetailEditing] = useState(false);
   const [hoverStore] = useState(createHoverStore);
   const [panelMode, setPanelMode] = useState('nearby');
   const [panelOpen, setPanelOpen] = useState(true);
@@ -425,8 +429,8 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   });
   const [signingOut, setSigningOut] = useState(false);
   const [refreshingAccess, setRefreshingAccess] = useState(false);
+  const [reportRevision, setReportRevision] = useState(0);
   const [googleAuthFailed, setGoogleAuthFailed] = useState(false);
-  const [reportListMode, setReportListMode] = useState(() => window.location.hash === '#reports');
 
   const mapRef = useRef(null);
   const mapIdleTimerRef = useRef(null);
@@ -525,6 +529,20 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
     action?.();
   }, [discardAction]);
+
+  const { route, navigate } = useWorkspaceRoute(runWorkspaceAction);
+  const reportListMode = route.page === 'reports';
+  const liveLocation = useLiveLocation({ enabled: !reportListMode && !loadError && !googleAuthFailed,
+    onPosition: (position) => {
+      mapRef.current?.panTo({ lat: position.latitude, lng: position.longitude });
+      if ((mapRef.current?.getZoom?.() || 0) < 14) mapRef.current?.setZoom(14);
+    } });
+  const rememberListState = useCallback((snapshot) => { listContextRef.current = snapshot; }, []);
+  const wasReportListRef = useRef(reportListMode);
+  useEffect(() => {
+    if (wasReportListRef.current && !reportListMode) returnedFromListRef.current = true;
+    wasReportListRef.current = reportListMode;
+  }, [reportListMode]);
 
   const fitMapToSubjectRadius = useCallback((nextSubject, radiusKm) => {
     const map = mapRef.current;
@@ -772,7 +790,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       }
     } catch (error) {
       if (isAbortError(error) || reportRequestRef.current !== controller) return;
-      console.error('Could not load appraisals in map bounds', error);
+      if (process.env.NODE_ENV === 'development') console.error('Could not load appraisals in map bounds');
       if (hasCompleteResultRef.current) {
         // Keep the last complete result on screen; it may be stale but it is
         // still the best information we have.
@@ -1093,7 +1111,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       'The protected report link took too long to prepare.'
     );
     if (error || !data?.signedUrl) {
-      console.error(`Could not create a protected link for ${bucket}`, error);
+      if (process.env.NODE_ENV === 'development') console.error('Could not create a protected file link');
       return null;
     }
     const expiresInSeconds = Number.isFinite(data?.expiresIn)
@@ -1398,6 +1416,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const handleOpenDetails = useCallback((report) => {
     runWorkspaceAction(() => {
       setSelectedAppraisal(report);
+      setDetailEditing(false);
       setDetailReturnsToPreview(false);
       setPanelMode('preview');
       setPanelOpen(true);
@@ -1444,7 +1463,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setAppraisals((current) => current.map((report) => (
         String(report.id) === String(updated.id) ? { ...report, ...updated } : report
       )));
-      setSelectedAppraisal((current) => current ? { ...current, ...updated } : updated);
+      setSelectedAppraisal((current) => current && String(current.id) === String(updated.id) ? { ...current, ...updated } : updated);
       setCandidates((current) => current.map((candidate) => (
         String(candidate.id) === String(updated.id) ? { ...candidate, ...updated } : candidate
       )));
@@ -1474,6 +1493,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         ? await restoreAppraisal(supabase, archivedAppraisal.id, restoreOptions)
         : await restoreAppraisal(supabase, archivedAppraisal.id);
       if (error || !data?.id) throw error || new Error('The restored report was not returned.');
+      setReportRevision((revision) => revision + 1);
 
       const restored = { ...archivedAppraisal, ...data, deleted_at: null, deleted_by: null };
       reportRequestRef.current?.abort();
@@ -1719,15 +1739,26 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
 
   if (loadError || googleAuthFailed || reportListMode) {
     return (
+      <>
       <ReportRecoveryWorkspace onSignOut={handleSignOut}
-        onShowMap={reportListMode && !loadError && !googleAuthFailed ? (snapshot) => {
+        onShowMap={(snapshot) => {
           listContextRef.current = snapshot || null;
-          window.location.hash = '';
-          returnedFromListRef.current = true;
-          setReportListMode(false);
-        } : undefined}
+          if (loadError || googleAuthFailed) runWorkspaceAction(() => {
+            window.history.replaceState(null, '', `${window.location.pathname}${window.location.search}`);
+            window.location.reload();
+          });
+          else navigate('');
+        }}
+        mapUnavailable={Boolean(loadError || googleAuthFailed)} refreshKey={reportRevision}
+        route={route} onNavigate={navigate} onStateChange={rememberListState}
+        canMutate={canMutate} getSignedUrl={getSignedUrl} onOpenReport={handleOpenReport}
+        openingReportId={openingReportId} onUpdated={handleUpdated} onDeleted={handleDeleted}
+        onWorkspaceStateChange={handleWorkspaceStateChange} runWorkspaceAction={runWorkspaceAction}
+        signingOut={signingOut}
         initialState={reportListMode ? listContextRef.current : null}
         reason={reportListMode ? 'The report list is ready.' : googleAuthFailed ? 'Google Maps is unavailable for this website.' : 'The map could not load.'} />
+      {discardAction && <DiscardChangesDialog onCancel={cancelDiscard} onDiscard={confirmDiscard} />}
+      </>
     );
   }
 
@@ -1775,8 +1806,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 zoom: mapRef.current.getZoom(),
               };
             }
-            window.location.hash = 'reports';
-            setReportListMode(true);
+            navigate('#reports', { confirmed: true });
           })}>Report list</button>
           <button type="button" className="button button--secondary am-map-toggle" onClick={() => {
             runWorkspaceAction(() => {
@@ -1867,7 +1897,12 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 if (!lastBoundsRef.current) handleMapIdle();
               }, 6000);
             }}
-            onUnmount={() => { mapRef.current = null; }}
+            onUnmount={(map) => {
+              const center = map?.getCenter?.();
+              if (center) savedCameraRef.current = { center: center.toJSON(), zoom: map.getZoom() };
+              nearbyPositionRef.current.top = workspacePanelRef.current?.scrollTop ?? nearbyPositionRef.current.top;
+              mapRef.current = null;
+            }}
             onIdle={handleMapIdle}
             onBoundsChanged={handleMapBoundsChanged}
             onClick={handleMapClick}
@@ -1888,6 +1923,10 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 zIndex={1200}
               />
             )}
+            {liveLocation.position && <Marker
+              position={{ lat: liveLocation.position.latitude, lng: liveLocation.position.longitude }}
+              title="Your live location" zIndex={1300}
+              icon={{ path: window.google?.maps?.SymbolPath?.CIRCLE || 0, scale: 8, fillColor: '#245743', fillOpacity: 1, strokeColor: '#ffffff', strokeWeight: 3 }} />}
             {manualPlacement.location && (
               <Marker
                 position={{
@@ -1908,8 +1947,16 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
             <button type="button" onClick={resetMapView}>Reset map</button>
             <button type="button" onClick={fitLoadedReports}>Fit reports</button>
             {subject && <button type="button" onClick={returnToSubject}>Subject</button>}
+            <button type="button" aria-pressed={['locating', 'tracking'].includes(liveLocation.status)}
+              onClick={['locating', 'tracking'].includes(liveLocation.status) ? liveLocation.stop : () => runWorkspaceAction(liveLocation.start)}>
+              {liveLocation.status === 'locating' ? 'Cancel location' : liveLocation.status === 'tracking' ? 'Stop tracking' : 'Track my location'}
+            </button>
           </div>
         )}
+        {(liveLocation.error || liveLocation.status === 'locating') && <div className="map-location-status am-ui" role={liveLocation.error ? 'alert' : 'status'}>
+          <span>{liveLocation.error || 'Finding your location… Allow location access when your browser asks.'}</span>
+          {liveLocation.error && <button type="button" className="button button--quiet" onClick={liveLocation.stop}>Dismiss</button>}
+        </div>}
 
         </div>
 
@@ -1990,7 +2037,10 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 appraisal={selectedAppraisal}
                 getSignedUrl={getSignedUrl}
                 compact={panelMode === 'preview'}
-                onExpand={() => {
+                initialEditing={detailEditing}
+                onEditingChange={setDetailEditing}
+                onExpand={(options = {}) => {
+                  setDetailEditing(Boolean(options.editing));
                   setDetailReturnsToPreview(true);
                   setPanelMode('detail');
                 }}
@@ -2058,28 +2108,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
           </aside>
         )}
 
-        {discardAction && (
-          <div className="calm-dialog-backdrop" role="presentation">
-            <section
-              className="calm-dialog am-ui"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="discard-dialog-title"
-              aria-describedby="discard-dialog-copy"
-            >
-              <h2 id="discard-dialog-title">Leave this form?</h2>
-              <p id="discard-dialog-copy">Your unsaved entries will stay here if you continue editing.</p>
-              <div className="calm-dialog__actions">
-                <button type="button" className="button button--secondary" onClick={cancelDiscard} autoFocus>
-                  Continue editing
-                </button>
-                <button type="button" className="button button--primary" onClick={confirmDiscard}>
-                  Discard changes
-                </button>
-              </div>
-            </section>
-          </div>
-        )}
+        {discardAction && <DiscardChangesDialog onCancel={cancelDiscard} onDiscard={confirmDiscard} />}
       </div>
     </main>
   );

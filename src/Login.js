@@ -24,6 +24,11 @@ function Login({ supportEmail = '', message = '' }) {
       setError('Enter your email and password to continue.');
       return;
     }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) {
+      setError('Enter a valid staff email address.');
+      document.getElementById('login-email')?.focus();
+      return;
+    }
 
     setLoading(true);
     setError('');

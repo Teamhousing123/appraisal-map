@@ -1061,3 +1061,12 @@ describe('report search', () => {
     expect(databaseSignal.aborted).toBe(true);
   });
 });
+
+test('missing-fact search is filtered on the server and preserves Not applicable frontage', async () => {
+  const client = createReadClient(() => ({ data: [], count: 0, error: null }));
+  await searchAppraisals(client, { missingFactsOnly: true });
+  const filter = client.calls[0].filterCalls.find(([method]) => method === 'or')[1];
+  expect(filter).toContain('and(effective_date.is.null,appraisal_date.is.null)');
+  expect(filter).toContain('and(lot_frontage_ft.is.null,lot_frontage_status.is.null)');
+  expect(filter).toContain('garage_capacity.is.null');
+});

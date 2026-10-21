@@ -492,3 +492,26 @@
  .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.workspace-panel--preview:not(.workspace-panel--placing) {top:auto;right:8px;bottom:8px;left:8px;width:auto;max-height:64%;border-radius:4px;}
  .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel--preview .detail-panel__heading h2 {font-size:18px;}
 }
+
+/* Report maintenance uses the same typography, controls and surfaces as the map. */
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .recovery-missing-filter {display:flex;align-items:center;gap:8px;min-height:44px;font-size:14px;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .recovery-missing-filter input {width:18px;height:18px;accent-color:var(--am-forest);}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .appraisal-checkbox {display:flex;align-items:center;gap:8px;min-height:44px;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .report-completion {margin-block:8px;color:var(--am-muted);}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .report-completion p {margin:0;overflow-wrap:anywhere;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .recovery-report-actions {display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;max-width:360px;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.recovery-workspace {scrollbar-gutter:stable;scroll-padding-block:20px;min-height:0;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.recovery-workspace--detail {padding:0;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.recovery-workspace--detail>.detail-panel {max-width:860px;margin-inline:auto;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-edit-action {margin-block:16px;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-edit-action p {margin-block:8px;color:var(--am-muted);}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .detail-panel__expand {display:grid;gap:8px;}
+.am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .am-form-actions--footer {position:static;margin-top:16px;}
+.map-location-status {position:absolute;top:64px;right:12px;z-index:1000;display:flex;align-items:center;gap:8px;max-width:min(400px,calc(100% - 24px));padding:12px;background:var(--am-paper);border:1px solid var(--am-border);border-radius:4px;box-shadow:var(--am-shadow);}
+.map-location-status span {font-size:14px;}
+@media(max-width:720px) {
+ .map-location-status {top:116px;}
+ .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui .recovery-report-actions {justify-content:flex-start;max-width:none;}
+ .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.recovery-header .map-header__actions {grid-row:auto;}
+ .am-ui.am-ui.am-ui.am-ui.am-ui.am-ui.recovery-header .map-header__actions .button {flex:0 1 auto;}
+}

@@ -95,7 +95,7 @@ function App() {
       () => supabase.auth.getSession(),
       { label: 'Session check', timeoutMs: SESSION_TIMEOUT_MS }
     ).then(({ data, error }) => {
-      if (!active) return;
+      if (!active || authStateObserved) return;
       if (error) throw error;
       setSession(data?.session || null);
       sessionRef.current = data?.session || null;

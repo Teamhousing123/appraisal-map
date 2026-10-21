@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { chargeBudget, completedParts, contentDispositionHeader, LINK_SECONDS, partBytes, safeDisposition, safeDownloadName, validateUpload } from './limits.mjs';
+import { chargeBudget, completedParts, contentDispositionHeader, LINK_SECONDS, partBytes, safeDisposition, safeDownloadName, staffAccess, validateUpload } from './limits.mjs';
 
 const authenticatedCache = new Map();
 const encoder = new TextEncoder();
@@ -61,8 +61,9 @@ async function authenticate(request, env, write = false) {
     if (authenticatedCache.size >= 32) authenticatedCache.clear();
     authenticatedCache.set(bearer, cached);
   }
-  if (!['admin', 'editor', 'writer', 'appraiser', 'viewer', 'reader'].includes(cached.user.app_metadata?.role)) throw failure('This account does not have staff access.', 403);
-  if (write && !['admin', 'editor', 'writer', 'appraiser'].includes(cached.user.app_metadata?.role)) throw failure('Your account has read-only access.', 403);
+  const access = staffAccess(cached.user.app_metadata?.role);
+  if (!access.canRead) throw failure('This account does not have staff access.', 403);
+  if (write && !access.canWrite) throw failure('Your account has read-only access.', 403);
   return { bearer, user: cached.user };
 }
 
