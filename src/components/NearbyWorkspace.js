@@ -49,6 +49,23 @@ function DocumentIcon() {
   );
 }
 
+function RefreshIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" width="18" height="18" fill="none">
+      <path d="M15.5 8.5A5.75 5.75 0 1 0 15 13" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M16 4v4.5h-4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function CloseIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 20 20" width="18" height="18" fill="none">
+      <path d="m5.5 5.5 9 9m0-9-9 9" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function formatDistance(value) {
   if (!Number.isFinite(value)) return 'Distance unavailable';
   if (value < 1) return `${Math.max(1, Math.round(value * 1000))} m away`;
@@ -376,7 +393,7 @@ function Filters({
           </p>
         )}
         <details className="am-date-filters" open={Boolean(filters.dateFrom || filters.dateTo || dateRangeError)}>
-          <summary>Reference date filter</summary>
+          <summary>Reference date</summary>
           <div className="am-date-grid">
           <label>
             <span>Reference date from</span>
@@ -412,7 +429,7 @@ function Filters({
           className="am-date-filters am-fact-filters"
           open={Boolean(anyFactFilterSet)}
         >
-          <summary>Property fact filters</summary>
+          <summary>Property facts</summary>
           <div className="am-date-grid">
             <label>
               <span>Living area from (sq ft)</span>
@@ -826,28 +843,30 @@ function NearbyWorkspace({
           </span>
           <button
             type="button"
-            className="button button--quiet"
+            className="icon-button workspace-heading__icon"
             aria-label="Refresh reports"
+            title="Refresh reports"
             disabled={loading}
             onClick={onRefresh}
           >
-            Refresh
+            <RefreshIcon />
           </button>
           {onClose && (
             <button
               type="button"
-              className="button button--quiet"
+              className="icon-button workspace-heading__icon"
               aria-label="Close workspace panel"
+              title="Close reports"
               onClick={onClose}
             >
-              Close
+              <CloseIcon />
             </button>
           )}
         </div>
       </div>
       <p className="workspace-intro">{subject
-        ? 'Reports in this map view. Distances are from the subject property.'
-        : 'Reports in this map view. Distances are from the map centre.'}</p>
+        ? 'Distances are measured from the subject property.'
+        : 'Distances are measured from the map centre.'}</p>
 
       {subject && (
         <SubjectFacts
