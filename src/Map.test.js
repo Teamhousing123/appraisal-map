@@ -1169,3 +1169,44 @@ test('a dense uncovered strip falls back to one normal query for the whole view'
   expect(fullQuery.east).toBeCloseTo(-77.14, 2);
   await screen.findByRole('heading', { name: report.address });
 });
+
+test('the active map area is fetched again after its cache lifetime', async () => {
+  let now = Date.now();
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    render(<MapView session={editorSession} />);
+    await screen.findByRole('heading', { name: report.address });
+    now += 6 * 60 * 1000;
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+  } finally {
+    Date.now.mockRestore();
+  }
+});
+
+test('fetching an edge strip does not renew the lifetime of older cached rows', async () => {
+  let now = Date.now();
+  jest.spyOn(Date, 'now').mockImplementation(() => now);
+  try {
+    render(<MapView session={editorSession} />);
+    await screen.findByRole('heading', { name: report.address });
+
+    now += 4 * 60 * 1000;
+    mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByText(/Updating reports/)).not.toBeInTheDocument());
+
+    // Leave the merged region, then return after its oldest rows expire.
+    mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.queryByText(/Updating reports/)).not.toBeInTheDocument());
+    now += 2 * 60 * 1000;
+    mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+    act(() => mockTriggerIdle());
+    await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(4));
+  } finally {
+    Date.now.mockRestore();
+  }
+});

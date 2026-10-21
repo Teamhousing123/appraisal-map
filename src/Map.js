@@ -634,7 +634,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       // always unfiltered; a database-filtered result for a capped area is
       // the refined answer for the same area, so it stays.
       const active = activeRegionRef.current;
-      if (active && covers(active) && (active.filterKey === filterKey || !serverFilters)) {
+      if (active && fresh(active) && covers(active) && (active.filterKey === filterKey || !serverFilters)) {
         setReportsError('');
         return;
       }
@@ -699,6 +699,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         && uncoveredArea < boundsArea(queryBounds) * 0.6;
 
       let result = null;
+      let oldestSourceAt = null;
       if (useDeltaFetch) {
         // Strips are edges of the view, so one page normally holds them. A
         // denser strip falls back to one normal query rather than paging
@@ -720,6 +721,8 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
           for (const row of part.data) merged.set(row.id, row);
         }
         if (merged) {
+          // A new edge fetch must not renew the older rows it reuses.
+          oldestSourceAt = Math.min(...sources.map((region) => region.fetchedAt));
           for (const region of sources) {
             for (const row of region.rows) {
               if (!merged.has(row.id) && rowInBounds(row, queryBounds)) merged.set(row.id, row);
@@ -750,7 +753,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         serverFilters,
         truncated: result.truncated,
         rows: applySpiralOffset(result.data),
-        fetchedAt: Date.now(),
+        fetchedAt: oldestSourceAt ?? Date.now(),
         metadataSupported: result.metadataSupported,
         factsSupported: result.factsSupported,
       };

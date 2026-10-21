@@ -104,3 +104,10 @@ PERF_REPO=<other checkout> node run.mjs --scenario pan-aba --dataset M --runs 3 
 Results land in `perf/results/` (git-ignored). `PERF_MAPS_KEY` optionally
 supplies a referrer-allowed Maps key for a keyed run; it is never written to
 the repository.
+
+## Additional release review
+
+The five-minute cache limit now also applies to the active map area on the
+next idle event. A merged area keeps the oldest source timestamp, so fetching
+an edge strip cannot extend the lifetime of older rows. Two regression tests
+failed before these fixes and pass afterward. All 39 map tests pass.
