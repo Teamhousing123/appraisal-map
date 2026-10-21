@@ -11,8 +11,12 @@ import { supabase } from './supabaseClient';
 
 let mockLatestMapOptions;
 let mockTriggerIdle;
+let mockTriggerBoundsChanged;
 let mockSkipIdle = false;
 let mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+let mockCenter = null;
+const mockClusterer = {};
+let mockMarkerRenders = [];
 
 const mockMap = {
   getBounds: () => ({
@@ -20,7 +24,11 @@ const mockMap = {
     getSouthWest: () => ({ lat: () => mockBounds.south, lng: () => mockBounds.west }),
   }),
   getZoom: () => 10,
-  getCenter: () => ({ toJSON: () => ({ lat: 43.7, lng: -79.4 }) }),
+  getCenter: () => ({
+    lat: () => mockCenter?.lat ?? (mockBounds.north + mockBounds.south) / 2,
+    lng: () => mockCenter?.lng ?? (mockBounds.east + mockBounds.west) / 2,
+    toJSON: () => mockCenter || ({ lat: (mockBounds.north + mockBounds.south) / 2, lng: (mockBounds.east + mockBounds.west) / 2 }),
+  }),
   setCenter: jest.fn(),
   fitBounds: jest.fn(),
   panBy: jest.fn(),
@@ -30,21 +38,25 @@ const mockMap = {
 
 jest.mock('@react-google-maps/api', () => ({
   useJsApiLoader: () => ({ isLoaded: true, loadError: null }),
-  GoogleMap: ({ children, onLoad, onIdle, onClick, options }) => {
+  GoogleMap: ({ children, onLoad, onIdle, onBoundsChanged, onClick, options }) => {
     const ReactRuntime = jest.requireActual('react');
     const initialHandlers = ReactRuntime.useRef({ onLoad, onIdle });
     mockLatestMapOptions = options;
-    mockTriggerIdle = () => onIdle?.();
+    mockTriggerBoundsChanged = () => onBoundsChanged?.();
+    mockTriggerIdle = () => { onBoundsChanged?.(); onIdle?.(); };
     ReactRuntime.useEffect(() => {
       initialHandlers.current.onLoad(mockMap);
       if (!mockSkipIdle) initialHandlers.current.onIdle();
     }, [initialHandlers]);
     return <div data-testid="map-surface" onClick={() => onClick?.({})}>{children}</div>;
   },
-  MarkerClusterer: ({ children }) => children({}),
-  Marker: ({ title, onClick }) => onClick
+  MarkerClusterer: ({ children }) => children(mockClusterer),
+  Marker: ({ title, onClick }) => {
+    mockMarkerRenders.push(title);
+    return onClick
     ? <button type="button" aria-label={title} onClick={onClick}>marker</button>
-    : <span aria-label={title} />,
+    : <span aria-label={title} />;
+  },
 }));
 
 jest.mock('./services/appraisalService', () => ({
@@ -97,12 +109,16 @@ jest.mock('./components/AppraisalDetailPanel', () => function TestDetailPanel({
   onDeleted,
   onOpenReport,
   onUpdated,
+  compact,
+  onExpand,
+  backToPreview,
 }) {
   return (
     <section aria-label="Report details">
       <h2>Report details</h2>
       <span>{appraisal.address}</span>
-      <button type="button" onClick={onBack}>Back to reports</button>
+      <button type="button" onClick={onBack}>{backToPreview ? 'Back to map preview' : 'Back to reports'}</button>
+      {compact && <button type="button" onClick={onExpand}>Expand to full view</button>}
       <button
         type="button"
         onClick={() => onDeleted(
@@ -173,6 +189,8 @@ beforeEach(() => {
   window.google = { maps: {} };
   mockSkipIdle = false;
   mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  mockCenter = null;
+  mockMarkerRenders = [];
   fetchAppraisalsInBounds.mockResolvedValue({
     data: [report],
     truncated: false,
@@ -237,6 +255,107 @@ test('uses direct map gestures and keeps report details open after a map click',
   expect(mockLatestMapOptions).not.toHaveProperty('restriction');
   expect(screen.getByRole('button', { name: 'Reset map' })).toBeInTheDocument();
   expect(screen.getByRole('button', { name: 'Fit reports' })).toBeInTheDocument();
+});
+
+test('map selections preview first, expand explicitly, and return to the same map preview', async () => {
+  render(<MapView session={editorSession} />);
+  fireEvent.click(await screen.findByRole('button', { name: /10 Example Road, Aurora/i }));
+  expect(screen.getByRole('complementary')).toHaveClass('workspace-panel--preview');
+  expect(mockMap.panTo).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole('button', { name: 'Expand to full view' }));
+  expect(screen.getByRole('complementary')).toHaveClass('workspace-panel--detail');
+  fireEvent.click(screen.getByRole('button', { name: 'Back to map preview' }));
+  expect(screen.getByRole('complementary')).toHaveClass('workspace-panel--preview');
+  fireEvent.click(screen.getByRole('button', { name: 'Back to reports' }));
+  expect(await screen.findByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+});
+
+test('hovering one report updates only its marker instead of rebuilding the whole map', async () => {
+  const many = Array.from({ length: 80 }, (_, i) => ({ ...report, id: `marker-${i}`, address: `${i + 1} Marker Road` }));
+  fetchAppraisalsInBounds.mockResolvedValue({ data: many, truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: '1 Marker Road' });
+  mockMarkerRenders = [];
+  fireEvent.mouseEnter(screen.getAllByRole('article')[0]);
+  expect(mockMarkerRenders).toHaveLength(1);
+  mockMarkerRenders = [];
+  fireEvent.mouseEnter(screen.getAllByRole('article')[1]);
+  expect(mockMarkerRenders).toHaveLength(2);
+});
+
+test('cached viewport changes filter and rank reports without new network requests', async () => {
+  const west = { ...report, id: 'west', address: '1 West Street', latitude: 43.5, longitude: -79.7 };
+  const east = { ...report, id: 'east', address: '2 East Street', latitude: 43.5, longitude: -78.3 };
+  const padding = { ...report, id: 'padding', address: '3 Outside Street', latitude: 44.1 };
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [west, east, padding], truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: west.address });
+  expect(screen.queryByRole('heading', { name: padding.address })).not.toBeInTheDocument();
+  expect(screen.getByLabelText('Sort')).toHaveValue('distance');
+
+  mockBounds = { north: 43.8, south: 43.2, east: -79.4, west: -80 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(1));
+  expect(screen.getByRole('heading', { name: west.address })).toBeInTheDocument();
+
+  mockBounds = { north: 43.8, south: 43.2, east: -78, west: -78.6 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: east.address });
+  expect(screen.queryByRole('heading', { name: west.address })).not.toBeInTheDocument();
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
+
+  // Both are visible, but moving the centre must still change the nearest order.
+  mockBounds = { north: 44, south: 43, east: -78.2, west: -79.8 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(2));
+  mockBounds = { north: 44, south: 43, east: -78, west: -79.8 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(within(screen.getAllByRole('article')[0]).getByRole('heading')).toHaveTextContent(east.address));
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
+});
+
+test('zooming inside a capped cached area queries again for previously omitted reports', async () => {
+  fetchAppraisalsInBounds.mockResolvedValueOnce({ data: [report], truncated: true });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  const local = { ...report, id: 'local', address: '2 Local Street', latitude: 43.81 };
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [local], truncated: false });
+  mockBounds = { north: 43.85, south: 43.75, east: -79.35, west: -79.45 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: local.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+});
+
+test('nearest order uses the map camera centre rather than the geographic bounds midpoint', async () => {
+  mockCenter = { lat: 43.5, lng: -78.3 };
+  const nearMidpoint = { ...report, id: 'midpoint', address: '1 Midpoint Road', latitude: 43.5, longitude: -79 };
+  const nearCamera = { ...report, id: 'camera', address: '2 Camera Road', latitude: 43.5, longitude: -78.3 };
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [nearMidpoint, nearCamera], truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: nearCamera.address });
+  expect(within(screen.getAllByRole('article')[0]).getByRole('heading')).toHaveTextContent(nearCamera.address);
+});
+
+test('rapid movement cancels obsolete work before debounce and a late response cannot replace cached results', async () => {
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  let finish;
+  let obsoleteSignal;
+  fetchAppraisalsInBounds.mockImplementation((client, bounds, options) => {
+    obsoleteSignal = options.signal;
+    return new Promise((resolve) => { finish = resolve; });
+  });
+  mockBounds = { north: 45, south: 44, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerBoundsChanged());
+  expect(obsoleteSignal.aborted).toBe(true);
+  await act(async () => finish({ data: [], truncated: false }));
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+  expect(screen.queryByText(/Updating reports in this map area/)).not.toBeInTheDocument();
 });
 
 test('treats an account without an assigned server role as view only', async () => {
@@ -418,11 +537,10 @@ test('issues exactly one filtered refetch for a server filter and one unfiltered
   expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3);
 });
 
-test('does not refetch when opening report details moves the camera to idle', async () => {
+test('preview preserves the camera and user movement immediately resumes area loading', async () => {
   render(<MapView session={editorSession} showToast={jest.fn()} />);
   await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1));
 
-  mockBounds = { north: 45, south: 44, east: -77, west: -79 };
   fireEvent.click(await screen.findByRole('button', { name: /10 Example Road, Aurora/i }));
   await screen.findByRole('heading', { name: 'Report details' });
 
@@ -430,7 +548,8 @@ test('does not refetch when opening report details moves the camera to idle', as
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
   expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
 
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1300)); });
+  expect(mockMap.panTo).not.toHaveBeenCalled();
+  mockBounds = { north: 45, south: 44, east: -77, west: -79 };
   act(() => mockTriggerIdle());
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 400)); });
   expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
@@ -572,7 +691,7 @@ test('a failed refresh keeps the last complete results and warns they may be out
   expect(banner.textContent).toContain(updatedTime);
 });
 
-test('an in-progress fetch never replaces complete results and a failed pan keeps them', async () => {
+test('a failed pan keeps the complete cache but hides reports outside the current viewport', async () => {
   fetchAppraisalsInBounds.mockResolvedValue({
     data: [report],
     truncated: false,
@@ -593,8 +712,8 @@ test('an in-progress fetch never replaces complete results and a failed pan keep
   act(() => mockTriggerIdle());
   await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
 
-  // The first page of the next fetch must not displace the complete result.
-  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  // Cached results and partial responses from other areas do not enter this list.
+  expect(screen.queryByRole('heading', { name: '10 Example Road' })).not.toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: '1 Partial Road' })).not.toBeInTheDocument();
 
   // Pan again before that request settles: it is superseded, and the new one fails.
@@ -603,13 +722,12 @@ test('an in-progress fetch never replaces complete results and a failed pan keep
   await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3));
   await act(async () => { pending[1].reject(new Error('network')); });
 
-  expect(await screen.findByText(/may be out of date/)).toBeInTheDocument();
-  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
-  expect(screen.getAllByText(/may be out of date/)).toHaveLength(1);
+  expect(await screen.findByRole('heading', { name: 'Reports could not be loaded' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: '10 Example Road' })).not.toBeInTheDocument();
 
   // The superseded request can neither fail nor succeed over the current results.
   await act(async () => { pending[0].reject(new Error('network')); });
-  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: '10 Example Road' })).not.toBeInTheDocument();
   await act(async () => {
     pending[0].resolve({
       data: [{ ...report, id: 'stale-b', address: '5 Stale Road' }],
@@ -618,8 +736,14 @@ test('an in-progress fetch never replaces complete results and a failed pan keep
       factsSupported: true,
     });
   });
-  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: '10 Example Road' })).not.toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: '5 Stale Road' })).not.toBeInTheDocument();
+
+  // Returning to the complete cached viewport is instant, without a request.
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: '10 Example Road' });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(3);
 });
 
 test('a failed first load clears the partial page and shows the generic error', async () => {
@@ -821,7 +945,7 @@ test('expansion survives a same-area refresh but resets on filters and new-bound
     metadataSupported: true,
     factsSupported: true,
   });
-  mockBounds = { north: 50, south: 49, east: -70, west: -72 };
+  mockBounds = { north: 44.2, south: 43.1, east: -78, west: -80 };
   act(() => mockTriggerIdle());
   await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1), { timeout: 3000 });
   await waitFor(() =>

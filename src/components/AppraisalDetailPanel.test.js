@@ -81,6 +81,32 @@ beforeEach(() => {
 
 afterEach(() => configureTelemetrySink(null));
 
+test('compact preview shows the photo and key facts with an explicit full-view action', async () => {
+  const view = renderPanel({
+    appraisal: { ...appraisal, photo_url: 'synthetic-photo.jpg', pdf_url: 'synthetic.pdf', reported_living_area_sq_ft: 2100 },
+    compact: true,
+    onExpand: jest.fn(),
+    getSignedUrl: jest.fn(async () => 'https://example.com/synthetic-photo.jpg'),
+  });
+  expect(screen.getByRole('heading', { name: 'Report preview' })).toBeInTheDocument();
+  expect(await screen.findByRole('img', { name: /Property at 10 Example Road/ })).toBeInTheDocument();
+  expect(screen.getByText('2,100 sq ft')).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Edit report' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Download PDF' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Open PDF' }));
+  expect(view.onOpenReport).toHaveBeenCalledWith(view.appraisal);
+  fireEvent.click(screen.getByRole('button', { name: 'Expand to full view' }));
+  expect(view.onExpand).toHaveBeenCalledTimes(1);
+});
+
+test('compact preview handles failed photo links and failed image loads', async () => {
+  const { rerender } = render(<AppraisalDetailPanel appraisal={{ ...appraisal, photo_url: 'missing.jpg' }} compact getSignedUrl={() => Promise.reject(new Error('network'))} />);
+  await screen.findByText('Photo unavailable');
+  rerender(<AppraisalDetailPanel appraisal={{ ...appraisal, photo_url: 'broken.jpg' }} compact getSignedUrl={() => Promise.resolve('https://example.com/broken.jpg')} />);
+  fireEvent.error(await screen.findByRole('img'));
+  await screen.findByText('Photo unavailable');
+});
+
 test('keeps manual address placement visible in report details', () => {
   renderPanel({
     appraisal: { ...appraisal, address_verification_status: 'manual' },

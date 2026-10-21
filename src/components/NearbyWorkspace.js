@@ -365,7 +365,7 @@ function Filters({
               aria-describedby={!subject ? 'subject-filter-guidance' : undefined}
               onChange={(event) => onChange('sortBy', event.target.value)}
             >
-              <option value="distance" disabled={!subject}>Nearest first</option>
+              <option value="distance">{subject ? 'Nearest to subject first' : 'Nearest to map centre first'}</option>
               <option value="newest">Newest reference date first</option>
             </select>
           </label>
@@ -514,7 +514,7 @@ function Filters({
   );
 }
 
-function ReportCard({
+const ReportCard = React.memo(function ReportCard({
   report,
   selected,
   selectionDisabled,
@@ -581,7 +581,7 @@ function ReportCard({
       </label>
     </article>
   );
-}
+});
 
 function getAreaDifference(subject, candidate) {
   return formatLivingAreaDifference(calculateLivingAreaDifference(
@@ -845,7 +845,9 @@ function NearbyWorkspace({
           )}
         </div>
       </div>
-      {subject && <p className="workspace-intro">Nearby reports are starting points, not selected comparables.</p>}
+      <p className="workspace-intro">{subject
+        ? 'Reports in this map view. Distances are from the subject property.'
+        : 'Reports in this map view. Distances are from the map centre.'}</p>
 
       {subject && (
         <SubjectFacts

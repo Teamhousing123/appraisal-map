@@ -11,6 +11,7 @@ import { GoogleMap, Marker, MarkerClusterer, useJsApiLoader } from '@react-googl
 import { supabase, supportEmail } from './supabaseClient';
 import { applySpiralOffset, COORDINATE_PRECISION } from './mapUtils';
 import { formatDateOnly } from './domain/dates';
+import { getCanonicalCoordinates } from './domain/geo';
 import { getAppraisalAccess } from './domain/access';
 import {
   GEOCODING_ERROR_CODES,
@@ -58,7 +59,7 @@ const DEFAULT_FILTERS = {
   propertyType: '',
   dateFrom: '',
   dateTo: '',
-  sortBy: 'newest',
+  sortBy: 'distance',
   ...DEFAULT_FACT_FILTERS,
 };
 
@@ -87,6 +88,7 @@ export function getServerFilters(filters = {}) {
 }
 const EMPTY_WORKSPACE_STATE = { dirty: false, busy: false };
 const GOOGLE_AUTH_FAILURE_EVENT = 'appraisal-map:google-auth-failure';
+const NOOP = () => {};
 
 if (typeof window !== 'undefined' && !window.gm_authFailure?.appraisalMapHandler) {
   const previousAuthFailure = window.gm_authFailure;
@@ -157,13 +159,37 @@ const markerIconFor = ({ selected, candidate, hovered }) => ({
   zIndex: selected ? 999 : candidate ? 600 : hovered ? 500 : undefined,
 });
 
+// Keep native pointer targets stable; report-row hover supplies marker emphasis.
+const AppraisalMarker = React.memo(function AppraisalMarker({
+  appraisal, clusterer, selected, candidate, hovered, onMarkerClick,
+}) {
+  const icon = useMemo(() => markerIconFor({ selected, candidate, hovered }), [selected, candidate, hovered]);
+  const position = useMemo(() => ({
+    lat: appraisal.displayLatitude ?? appraisal.latitude,
+    lng: appraisal.displayLongitude ?? appraisal.longitude,
+  }), [appraisal]);
+  const onClick = useCallback(() => onMarkerClick(appraisal), [appraisal, onMarkerClick]);
+  return (
+    <Marker
+      clusterer={clusterer}
+      position={position}
+      icon={icon}
+      zIndex={icon.zIndex}
+      title={`${appraisal.address}, ${appraisal.city}${appraisal.locationCount > 1 ? ` — ${appraisal.locationCount} reports at this location` : ''}`}
+      label={appraisal.locationCount > 1 && appraisal.locationIndex === 0 ? {
+        text: String(appraisal.locationCount), color: '#ffffff', fontSize: '10px', fontWeight: '700',
+      } : undefined}
+      onClick={onClick}
+    />
+  );
+});
+
 const MarkerLayer = React.memo(function MarkerLayer({
   appraisals,
   selectedId,
   candidateIds,
   hoveredId,
   onMarkerClick,
-  onMarkerHover,
 }) {
   return (
     <MarkerClusterer
@@ -179,34 +205,17 @@ const MarkerLayer = React.memo(function MarkerLayer({
     >
       {(clusterer) => (
         <>
-          {appraisals.map((appraisal) => {
-            const selected = appraisal.id === selectedId;
-            const candidate = candidateIds.includes(appraisal.id);
-            const hovered = appraisal.id === hoveredId;
-            const icon = markerIconFor({ selected, candidate, hovered });
-            return (
-              <Marker
+          {appraisals.map((appraisal) => (
+              <AppraisalMarker
                 key={appraisal.id}
+                appraisal={appraisal}
                 clusterer={clusterer}
-                position={{
-                  lat: appraisal.displayLatitude ?? appraisal.latitude,
-                  lng: appraisal.displayLongitude ?? appraisal.longitude,
-                }}
-                icon={icon}
-                zIndex={icon.zIndex}
-                title={`${appraisal.address}, ${appraisal.city}${appraisal.locationCount > 1 ? ` — ${appraisal.locationCount} reports at this location` : ''}`}
-                label={appraisal.locationCount > 1 && appraisal.locationIndex === 0 ? {
-                  text: String(appraisal.locationCount),
-                  color: '#ffffff',
-                  fontSize: '10px',
-                  fontWeight: '700',
-                } : undefined}
-                onClick={() => onMarkerClick(appraisal)}
-                onMouseOver={() => onMarkerHover(appraisal.id)}
-                onMouseOut={() => onMarkerHover(null)}
+                selected={appraisal.id === selectedId}
+                candidate={candidateIds.includes(appraisal.id)}
+                hovered={appraisal.id === hoveredId}
+                onMarkerClick={onMarkerClick}
               />
-            );
-          })}
+          ))}
         </>
       )}
     </MarkerClusterer>
@@ -275,7 +284,7 @@ function getAddressFailurePresentation(error, fallbackMessage) {
   return { message: message || fallbackMessage };
 }
 
-function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) {
+function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const [appraisals, setAppraisals] = useState([]);
   const [loadingReports, setLoadingReports] = useState(false);
   const [reportsError, setReportsError] = useState('');
@@ -289,6 +298,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const [serverFiltered, setServerFiltered] = useState(false);
   const [unfilteredQueryKey, setUnfilteredQueryKey] = useState(null);
   const [selectedAppraisal, setSelectedAppraisal] = useState(null);
+  const [viewport, setViewport] = useState(null);
+  const [detailReturnsToPreview, setDetailReturnsToPreview] = useState(false);
   const [hoveredReportId, setHoveredReportId] = useState(null);
   const [panelMode, setPanelMode] = useState('nearby');
   const [panelOpen, setPanelOpen] = useState(true);
@@ -320,6 +331,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const autocompleteRequestRef = useRef(0);
   const autocompleteSessionTokenRef = useRef(null);
   const reportRequestRef = useRef(null);
+  const pendingQueryKeyRef = useRef(null);
+  const successfulFilterKeyRef = useRef(null);
   const lastBoundsRef = useRef(null);
   const lastSuccessfulBoundsKeyRef = useRef(null);
   const lastSuccessfulQueryBoundsRef = useRef(null);
@@ -336,7 +349,6 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const serverFilteredRef = useRef(false);
   const areaTruncatedRef = useRef(false);
   const serverFiltersRef = useRef(null);
-  const programmaticCameraUntilRef = useRef(0);
   const discardReturnFocusRef = useRef(null);
   const savedCameraRef = useRef(null);
   const listContextRef = useRef(null);
@@ -455,16 +467,26 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   const fetchReports = useCallback(async (bounds, { force = false, serverFilters = null } = {}) => {
     if (!bounds) return;
-    if (!force && boundsContain(lastSuccessfulQueryBoundsRef.current, bounds)) return;
+    const filterKey = JSON.stringify(serverFilters);
+    if (!force && successfulFilterKeyRef.current === filterKey
+      && boundsContain(lastSuccessfulQueryBoundsRef.current, bounds)) {
+      setReportsError('');
+      return;
+    }
     const queryBounds = padBounds(bounds);
     const key = boundsKey(queryBounds);
-    if (!force && lastSuccessfulBoundsKeyRef.current === key) return;
+    const queryKey = `${key}/${filterKey}`;
+    if (!force && successfulFilterKeyRef.current === filterKey
+      && lastSuccessfulBoundsKeyRef.current === key) return;
+    if (!force && pendingQueryKeyRef.current === queryKey
+      && !reportRequestRef.current?.signal.aborted) return;
 
     localEditSinceFetchRef.current = false;
 
     if (reportRequestRef.current) reportRequestRef.current.abort();
     const controller = new AbortController();
     reportRequestRef.current = controller;
+    pendingQueryKeyRef.current = queryKey;
     setLoadingReports(true);
     setReportsError('');
 
@@ -473,7 +495,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         signal: controller.signal,
         filters: serverFilters,
         onProgress: ({ data, count }) => {
-          if (controller.signal.aborted) return;
+          if (controller.signal.aborted || reportRequestRef.current !== controller) return;
           setLoadProgress({ loaded: data.length, total: count });
           // Re-rendering thousands of markers for every intermediate page made
           // completion ~7 s slower; the first page already gives the first
@@ -508,10 +530,10 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         current ? nextAppraisals.find((report) => report.id === current.id) || current : null
       ));
       lastSuccessfulBoundsKeyRef.current = key;
-      lastSuccessfulQueryBoundsRef.current = queryBounds;
-      // Only user-driven exploration (a new-bounds idle fetch) collapses the
-      // expanded list; forced refreshes and server-filter refetches keep it.
-      if (!force) setResultResetKey((current) => current + 1);
+      successfulFilterKeyRef.current = filterKey;
+      // A capped result cannot prove coverage of a smaller area. Zooming in
+      // must query again, including when it stays inside the padded bounds.
+      lastSuccessfulQueryBoundsRef.current = result.truncated ? null : queryBounds;
       setLastSuccessfulAt(new Date());
       recordTelemetryEvent('map_reports_load', {
         outcome: 'success',
@@ -540,6 +562,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     } finally {
       if (reportRequestRef.current === controller) {
         reportRequestRef.current = null;
+        pendingQueryKeyRef.current = null;
         setLoadingReports(false);
         setLoadProgress(null);
       }
@@ -557,16 +580,43 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     });
   }, [fetchReports]);
 
+  const handleMapBoundsChanged = useCallback(() => {
+    if (!['nearby', 'preview'].includes(panelMode) || manualPlacement.active) return;
+    if (mapIdleTimerRef.current) window.clearTimeout(mapIdleTimerRef.current);
+    // Invalidate obsolete responses as soon as the camera moves, including
+    // during the debounce and when the user returns to a cached viewport.
+    if (reportRequestRef.current) {
+      reportRequestRef.current.abort();
+      reportRequestRef.current = null;
+      pendingQueryKeyRef.current = null;
+      setLoadingReports(false);
+      setLoadProgress(null);
+    }
+  }, [manualPlacement.active, panelMode]);
+
   const handleMapIdle = useCallback(() => {
     if (mapIdleTimerRef.current) window.clearTimeout(mapIdleTimerRef.current);
     mapIdleTimerRef.current = window.setTimeout(() => {
+      if (!['nearby', 'preview'].includes(panelMode) || manualPlacement.active) return;
       const bounds = boundsFromMap(mapRef.current);
       if (!bounds) return;
+      const changed = !lastBoundsRef.current || boundsKey(lastBoundsRef.current) !== boundsKey(bounds);
       lastBoundsRef.current = bounds;
-      if (Date.now() < programmaticCameraUntilRef.current) return;
+      const center = getCanonicalCoordinates(mapRef.current?.getCenter?.());
+      setViewport((current) => current && boundsKey(current) === boundsKey(bounds)
+        ? current : { ...bounds, center });
+      if (changed) {
+        setResultResetKey((current) => current + 1);
+        nearbyPositionRef.current.top = 0;
+        if (panelMode === 'nearby' && workspacePanelRef.current) workspacePanelRef.current.scrollTop = 0;
+      }
       fetchReports(bounds);
     }, MAP_IDLE_DEBOUNCE_MS);
-  }, [fetchReports]);
+  }, [fetchReports, manualPlacement.active, panelMode]);
+
+  useEffect(() => () => {
+    if (mapIdleTimerRef.current) window.clearTimeout(mapIdleTimerRef.current);
+  }, [handleMapIdle]);
 
   const serverFilters = useMemo(() => getServerFilters(filters), [filters]);
   const serverFilterKey = JSON.stringify(serverFilters);
@@ -683,19 +733,28 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     return () => { window.cancelAnimationFrame(frame); screenObserverRef.current?.disconnect(); };
   }, [focusPanelHeading, panelMode, panelOpen]);
 
-  const preparedReports = useMemo(() => appraisals.map((report) => ({
+  const distanceOrigin = useMemo(() => subject || viewport?.center || (viewport ? {
+    latitude: (viewport.north + viewport.south) / 2,
+    longitude: (viewport.east + viewport.west) / 2,
+  } : null), [subject, viewport]);
+  const preparedReports = useMemo(() => appraisals.filter((report) => {
+    if (!viewport) return true;
+    const coordinates = getCanonicalCoordinates(report);
+    return coordinates && coordinates.latitude >= viewport.south
+      && coordinates.latitude <= viewport.north
+      && coordinates.longitude >= viewport.west && coordinates.longitude <= viewport.east;
+  }).map((report) => ({
     ...report,
-    _distanceKm: subject ? getReportDistanceKm(report, subject) : null,
+    _distanceKm: distanceOrigin ? getReportDistanceKm(report, distanceOrigin) : null,
     _formattedEffectiveDate: formatDateOnly(report.effective_date),
     _formattedReportDate: formatDateOnly(report.appraisal_date),
-  })), [appraisals, subject]);
+  })), [appraisals, distanceOrigin, viewport]);
 
-  const effectiveSort = !subject && filters.sortBy === 'distance' ? 'newest' : filters.sortBy;
   const filteredReports = useMemo(() => filterAndSortReports(
     preparedReports,
-    { ...filters, sortBy: effectiveSort },
+    filters,
     subject
-  ), [effectiveSort, filters, preparedReports, subject]);
+  ), [filters, preparedReports, subject]);
   const missingFilterCounts = useMemo(
     () => countReportsMissingFilterData(preparedReports),
     [preparedReports]
@@ -999,8 +1058,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   const handleResetFilters = useCallback(() => {
     setResultResetKey((current) => current + 1);
-    setFilters({ ...DEFAULT_FILTERS, sortBy: subject ? 'distance' : 'newest' });
-  }, [subject]);
+    setFilters(DEFAULT_FILTERS);
+  }, []);
 
   const handleToggleCandidate = useCallback((report) => {
     if (!subject) {
@@ -1019,10 +1078,9 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
     });
   }, [showToast, subject]);
 
-  const focusReportOnMap = useCallback((report, { suppressFetch = false } = {}) => {
+  const focusReportOnMap = useCallback((report) => {
     const map = mapRef.current;
     if (!map || !report) return;
-    if (suppressFetch) programmaticCameraUntilRef.current = Date.now() + 1500;
     map.panTo({ lat: Number(report.latitude), lng: Number(report.longitude) });
     if ((map.getZoom?.() || 0) < 15) map.setZoom?.(15);
     window.requestAnimationFrame(() => {
@@ -1034,11 +1092,11 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
   const handleOpenDetails = useCallback((report) => {
     runWorkspaceAction(() => {
       setSelectedAppraisal(report);
-      setPanelMode('detail');
+      setDetailReturnsToPreview(false);
+      setPanelMode('preview');
       setPanelOpen(true);
-      focusReportOnMap(report, { suppressFetch: true });
     });
-  }, [focusReportOnMap, runWorkspaceAction]);
+  }, [runWorkspaceAction]);
 
   const handleMarkerClick = useCallback((report) => {
     handleOpenDetails(report);
@@ -1371,7 +1429,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
 
   return (
     <main className="map-app">
-      <header className={`map-header am-ui${panelOpen && panelMode !== 'nearby' ? ' am-header--focused' : ''}`}>
+      <header className={`map-header am-ui${panelOpen && ['add', 'detail', 'compare'].includes(panelMode) ? ' am-header--focused' : ''}`}>
         <div className="map-brand" aria-label="Appraisal Map">
           <BrandLogo className="map-brand__logo" />
           <span className="map-brand__copy">
@@ -1381,7 +1439,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
             )}
           </span>
         </div>
-        <div className="am-research-search" hidden={panelOpen && panelMode !== 'nearby'}>
+        <div className="am-research-search" hidden={panelOpen && ['add', 'detail', 'compare'].includes(panelMode)}>
         <SubjectSearch
           value={searchTerm}
           onChange={requestAutocomplete}
@@ -1476,7 +1534,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
         )}
       </header>
 
-      <div className={`map-stage am-layout${panelOpen ? ' am-layout--reports' : ''}${panelMode === 'compare' ? ' am-layout--compare' : ''}${panelOpen && ['add', 'detail', 'compare'].includes(panelMode) ? ' am-layout--full' : ''}${manualPlacement.active ? ' am-layout--placing' : ''}`} >
+      <div className={`map-stage am-layout${panelOpen ? ' am-layout--reports' : ''}${panelOpen && panelMode === 'preview' ? ' am-layout--preview' : ''}${panelMode === 'compare' ? ' am-layout--compare' : ''}${panelOpen && ['add', 'detail', 'compare'].includes(panelMode) ? ' am-layout--full' : ''}${manualPlacement.active ? ' am-layout--placing' : ''}`} >
         <div className="am-map-canvas">
         {!isLoaded ? (
           <div className="map-loading" role="status">
@@ -1493,9 +1551,8 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 savedCameraRef.current = null;
                 map.setCenter(saved.center);
                 map.setZoom(saved.zoom);
-                // The restored camera fires idle; record bounds but skip the
-                // refetch because the in-memory results already cover them.
-                programmaticCameraUntilRef.current = Date.now() + 1500;
+                // Idle restores the visible list from cached coverage. User
+                // movement can resume immediately, with no suppression window.
               }
               // Some environments never fire `idle` (seen intermittently in
               // headless Chromium); attempt one bounds fetch anyway rather than
@@ -1508,6 +1565,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
             }}
             onUnmount={() => { mapRef.current = null; }}
             onIdle={handleMapIdle}
+            onBoundsChanged={handleMapBoundsChanged}
             onClick={handleMapClick}
             options={mapOptions}
           >
@@ -1517,7 +1575,6 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
               candidateIds={candidateIds}
               hoveredId={hoveredReportId}
               onMarkerClick={manualPlacement.active ? () => {} : handleMarkerClick}
-              onMarkerHover={setHoveredReportId}
             />
             {subject && (
               <Marker
@@ -1623,14 +1680,23 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                   onCancelManualPlacement={cancelManualPlacement}
                 />
               </Suspense>
-            ) : panelMode === 'detail' && selectedAppraisal ? (
+            ) : ['preview', 'detail'].includes(panelMode) && selectedAppraisal ? (
               <AppraisalDetailPanel
                 key={selectedAppraisal.id}
                 appraisal={selectedAppraisal}
                 getSignedUrl={getSignedUrl}
+                compact={panelMode === 'preview'}
+                onExpand={() => {
+                  setDetailReturnsToPreview(true);
+                  setPanelMode('detail');
+                }}
+                backToPreview={panelMode === 'detail' && detailReturnsToPreview}
                 onBack={() => runWorkspaceAction(() => {
-                  setSelectedAppraisal(null);
-                  setPanelMode('nearby');
+                  if (panelMode === 'detail' && detailReturnsToPreview) setPanelMode('preview');
+                  else {
+                    setSelectedAppraisal(null);
+                    setPanelMode('nearby');
+                  }
                 })}
                 onUpdated={handleUpdated}
                 onDeleted={handleDeleted}
@@ -1643,7 +1709,7 @@ function MapView({ session, onSessionChange = () => {}, showToast = () => {} }) 
                 onWorkspaceStateChange={handleWorkspaceStateChange}
               />
             ) : null}
-            <div hidden={panelMode === 'add' || panelMode === 'detail'}>
+            <div hidden={['add', 'detail', 'preview'].includes(panelMode)}>
               <NearbyWorkspace
                 subject={subject}
                 onSubjectFactChange={handleSubjectFactChange}

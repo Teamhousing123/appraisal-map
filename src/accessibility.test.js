@@ -117,7 +117,7 @@ test('the nearby workspace with fact filters has no automated accessibility viol
   await expectNoViolations(container);
 });
 
-test('the detail panel read view has no automated accessibility violations', async () => {
+test.each([false, true])('the detail panel read view has no automated accessibility violations (compact: %s)', async (compact) => {
   const { container } = render(
     <AppraisalDetailPanel
       appraisal={{
@@ -134,6 +134,8 @@ test('the detail panel read view has no automated accessibility violations', asy
         pdf_url: 'private/report.pdf',
       }}
       getSignedUrl={jest.fn(async () => null)}
+      compact={compact}
+      onExpand={jest.fn()}
       onBack={jest.fn()}
       onUpdated={jest.fn()}
       onDeleted={jest.fn()}

@@ -144,6 +144,9 @@ function AppraisalDetailPanel({
   metadataSupported,
   factsSupported = null,
   canMutate = true,
+  compact = false,
+  onExpand,
+  backToPreview = false,
   onWorkspaceStateChange,
   runWorkspaceAction = (action) => action?.(),
 }) {
@@ -165,7 +168,7 @@ function AppraisalDetailPanel({
       }
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [editing]);
+  }, [editing, compact]);
   const [form, setForm] = useState(() => initialFormState(appraisal));
   const formRef = useRef(form);
   const geocodeRequestRef = useRef(0);
@@ -251,6 +254,8 @@ function AppraisalDetailPanel({
       getSignedUrl('photos', appraisal.photo_url).then((url) => {
         if (!active) return;
         setPhotoState(url ? { status: 'ready', url } : { status: 'error', url: null });
+      }).catch(() => {
+        if (active) setPhotoState({ status: 'error', url: null });
       });
     }
     return () => { active = false; };
@@ -1042,12 +1047,19 @@ function AppraisalDetailPanel({
     : [];
   const hasDocument = hasPdf || folderPaths.length > 0;
   const openingDocument = openingReportId === appraisal.id;
+  const propertyPhoto = (
+    <div className={`detail-photo detail-photo--${photoState.status}`}>
+      {photoState.url ? <img src={photoState.url} alt={`Property at ${appraisal.address}`} onError={() => setPhotoState({ status: 'error', url: null })} /> : (
+        <span>{photoState.status === 'loading' ? 'Loading property photo…' : photoState.status === 'error' ? 'Photo unavailable' : 'No property photo'}</span>
+      )}
+    </div>
+  );
 
   return (
-    <section ref={screenRef} className="detail-panel" aria-labelledby="appraisal-detail-title">
+    <section ref={screenRef} className={`detail-panel${compact ? ' detail-panel--preview' : ''}`} aria-labelledby="appraisal-detail-title">
       <div className="workspace-heading workspace-heading--with-back detail-panel__heading">
-        <button type="button" className="button button--quiet" onClick={onBack} aria-label="Back to nearby reports"><BackIcon /> Back to reports</button>
-        <h2 id="appraisal-detail-title" tabIndex="-1">Report details</h2>
+        <button type="button" className="button button--quiet" onClick={onBack} aria-label={backToPreview ? 'Back to map preview' : 'Back to nearby reports'}><BackIcon /> {backToPreview ? 'Back to map preview' : 'Back to reports'}</button>
+        <h2 id="appraisal-detail-title" tabIndex="-1">{compact ? 'Report preview' : 'Report details'}</h2>
       </div>
 
       <div className="detail-panel__body">
@@ -1061,8 +1073,9 @@ function AppraisalDetailPanel({
         {appraisal.address_verification_status === 'manual' && (
           <p className="address-review-status">Manually placed · needs review</p>
         )}
-        <PrimaryFacts report={appraisal} variant="detail" includeReportDate />
-        <CopyActions report={appraisal} idPrefix="detail" />
+        {compact && propertyPhoto}
+        <PrimaryFacts report={appraisal} variant={compact ? 'preview' : 'detail'} includeReportDate={!compact} />
+        {!compact && <CopyActions report={appraisal} idPrefix="detail" />}
         {hasPdf ? (
           <div className="detail-document-actions">
             <button
@@ -1073,14 +1086,14 @@ function AppraisalDetailPanel({
             >
               <DocumentIcon /> {openingDocument ? 'Preparing…' : 'Open PDF'}
             </button>
-            <button
+            {!compact && <button
               type="button"
               className="button button--secondary"
               onClick={() => onOpenReport(appraisal, { action: 'download' })}
               disabled={openingDocument}
             >
               <DocumentIcon /> Download PDF
-            </button>
+            </button>}
           </div>
         ) : folderPaths.length === 1 ? (
           <button
@@ -1114,7 +1127,7 @@ function AppraisalDetailPanel({
           </div>
         )}
 
-        {canMutate && (
+        {canMutate && !compact && (
           <div className="maintenance-actions">
             <button type="button" className="button button--secondary" onClick={(event) => { editReturnFocusRef.current = event.currentTarget; setEditing(true); }}>Edit report</button>
             {!confirmDelete ? (
@@ -1131,12 +1144,13 @@ function AppraisalDetailPanel({
           </div>
         )}
 
-        <div className={`detail-photo detail-photo--${photoState.status}`}>
-          {photoState.url ? <img src={photoState.url} alt={`Property at ${appraisal.address}`} /> : (
-          <span>{photoState.status === 'loading' ? 'Loading property photo…' : photoState.status === 'error' ? 'Photo unavailable' : 'No property photo'}</span>
-        )}
-        </div>
+        {!compact && propertyPhoto}
       </div>
+      {compact && (
+        <div className="detail-panel__expand">
+          <button type="button" className="button button--primary button--full" onClick={onExpand}>Expand to full view</button>
+        </div>
+      )}
     </section>
   );
 }
