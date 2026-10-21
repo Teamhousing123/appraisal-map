@@ -31,3 +31,8 @@ yarn-debug.log*
 yarn-error.log*
 
 build-staging/
+
+# perf harness artifacts (local measurements)
+perf/results/
+perf/harness/node_modules/
+perf/data/

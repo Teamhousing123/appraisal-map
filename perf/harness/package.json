@@ -1,0 +1,9 @@
+{
+  "name": "appraisal-map-perf-harness",
+  "private": true,
+  "type": "module",
+  "description": "Temporary measurement harness. Not part of the production app.",
+  "dependencies": {
+    "playwright-core": "^1.56.0"
+  }
+}

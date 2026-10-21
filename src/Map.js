@@ -30,7 +30,7 @@ import {
   filterAndSortReports,
   getReportDistanceKm,
 } from './domain/filters';
-import { DEFAULT_PAGE_SIZE, fetchAppraisalsInBounds, restoreAppraisal } from './services/appraisalService';
+import { DEFAULT_PAGE_SIZE, fetchAppraisalsInBounds, restoreAppraisal, MAX_RECORDS_PER_BOUNDS_FETCH } from './services/appraisalService';
 import { recordTelemetryEvent } from './services/telemetry';
 import { createProtectedFileLink, isR2StorageEnabled } from './services/cloudflareStorage';
 import { describeDocument, showPendingDocument } from './services/documentLinks';
@@ -48,6 +48,8 @@ const MAP_CONTAINER_STYLE = { height: '100%', width: '100%' };
 const DEFAULT_CENTER = { lat: 43.7, lng: -79.4 };
 const DEFAULT_ZOOM = 9;
 const MAP_IDLE_DEBOUNCE_MS = 300;
+const MAX_CACHED_REGIONS = 10;
+const LOADED_ROWS_MAX = 30000;
 const AUTOCOMPLETE_DEBOUNCE_MS = 260;
 const GOOGLE_MAP_LIBRARIES = ['places'];
 const SIGNED_URL_TTL_SECONDS = isR2StorageEnabled() ? 600 : 3600;
@@ -172,6 +174,7 @@ const AppraisalMarker = React.memo(function AppraisalMarker({
   return (
     <Marker
       clusterer={clusterer}
+      noClustererRedraw
       position={position}
       icon={icon}
       zIndex={icon.zIndex}
@@ -191,6 +194,13 @@ const MarkerLayer = React.memo(function MarkerLayer({
   hoveredId,
   onMarkerClick,
 }) {
+  const clustererRef = useRef(null);
+  // Marker mount/remove suppresses per-marker clusterer redraws via
+  // noClustererRedraw; commit exactly one repaint per marker-set change so a
+  // replacement costs one recluster instead of remove*repaint + add*redraw.
+  useEffect(() => {
+    clustererRef.current?.repaint?.();
+  }, [appraisals]);
   return (
     <MarkerClusterer
       styles={CLUSTER_STYLES}
@@ -203,7 +213,9 @@ const MarkerLayer = React.memo(function MarkerLayer({
         return { text: String(count), index, title: `${count} stored appraisal reports` };
       }}
     >
-      {(clusterer) => (
+      {(clusterer) => {
+        clustererRef.current = clusterer;
+        return (
         <>
           {appraisals.map((appraisal) => (
               <AppraisalMarker
@@ -217,7 +229,8 @@ const MarkerLayer = React.memo(function MarkerLayer({
               />
           ))}
         </>
-      )}
+        );
+      }}
     </MarkerClusterer>
   );
 });
@@ -261,6 +274,47 @@ function boundsContain(outer, inner) {
     && outer.east >= inner.east
     && outer.west <= inner.west
   );
+}
+
+function boundsArea(bounds) {
+  return Math.max(0, bounds.north - bounds.south) * Math.max(0, bounds.east - bounds.west);
+}
+
+// `inner` minus `cut` → up to 4 remaining rects (top/bottom/left/right strips).
+function subtractBounds(inner, cut) {
+  if (!cut
+    || inner.west >= cut.east || inner.east <= cut.west
+    || inner.south >= cut.north || inner.north <= cut.south) {
+    return [inner];
+  }
+  const out = [];
+  if (inner.north > cut.north) out.push({ north: inner.north, south: cut.north, west: inner.west, east: inner.east });
+  if (inner.south < cut.south) out.push({ north: cut.south, south: inner.south, west: inner.west, east: inner.east });
+  const midNorth = Math.min(inner.north, cut.north);
+  const midSouth = Math.max(inner.south, cut.south);
+  if (inner.west < cut.west) out.push({ north: midNorth, south: midSouth, west: inner.west, east: cut.west });
+  if (inner.east > cut.east) out.push({ north: midNorth, south: midSouth, west: cut.east, east: inner.east });
+  return out.filter((r) => r.north > r.south && r.east > r.west);
+}
+
+// Part of `queryBounds` not covered by any proven (non-capped) region.
+function uncoveredRects(queryBounds, regions, filterKey) {
+  let remaining = [queryBounds];
+  for (const region of regions) {
+    if (region.filterKey !== filterKey || region.truncated) continue;
+    remaining = remaining.flatMap((r) => subtractBounds(r, region.bounds));
+    if (!remaining.length) break;
+  }
+  return remaining;
+}
+
+// Matches the service ordering (created_at desc, id asc) so merged results
+// look identical to a fresh fetch.
+function compareReportRows(a, b) {
+  const left = a.created_at || '';
+  const right = b.created_at || '';
+  if (left !== right) return left < right ? 1 : -1;
+  return String(a.id) < String(b.id) ? -1 : (String(a.id) > String(b.id) ? 1 : 0);
 }
 
 function isAbortError(error) {
@@ -332,10 +386,14 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const autocompleteSessionTokenRef = useRef(null);
   const reportRequestRef = useRef(null);
   const pendingQueryKeyRef = useRef(null);
-  const successfulFilterKeyRef = useRef(null);
   const lastBoundsRef = useRef(null);
-  const lastSuccessfulBoundsKeyRef = useRef(null);
-  const lastSuccessfulQueryBoundsRef = useRef(null);
+  // Recently fetched (padded) query regions. A non-capped region proves
+  // coverage of its whole area; a capped region only proves its exact key.
+  const successfulRegionsRef = useRef([]);
+  const lastFilterKeyRef = useRef(null);
+  // Every row ever fetched this session (id -> {row, filterKey}), feeding
+  // delta merges. Entries are pruned to rows inside still-tracked regions.
+  const loadedRowsRef = useRef(new Map());
   const hasCompleteResultRef = useRef(false);
   const localEditSinceFetchRef = useRef(false);
   const signedUrlCacheRef = useRef(new Map());
@@ -352,6 +410,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const discardReturnFocusRef = useRef(null);
   const savedCameraRef = useRef(null);
   const listContextRef = useRef(null);
+  const mapCanvasRef = useRef(null);
   const reportListButtonRef = useRef(null);
   const returnedFromListRef = useRef(false);
 
@@ -468,16 +527,17 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const fetchReports = useCallback(async (bounds, { force = false, serverFilters = null } = {}) => {
     if (!bounds) return;
     const filterKey = JSON.stringify(serverFilters);
-    if (!force && successfulFilterKeyRef.current === filterKey
-      && boundsContain(lastSuccessfulQueryBoundsRef.current, bounds)) {
+    const regions = successfulRegionsRef.current;
+    if (!force && regions.some((r) => !r.truncated && r.filterKey === filterKey
+      && boundsContain(r.bounds, bounds))) {
       setReportsError('');
       return;
     }
     const queryBounds = padBounds(bounds);
     const key = boundsKey(queryBounds);
     const queryKey = `${key}/${filterKey}`;
-    if (!force && successfulFilterKeyRef.current === filterKey
-      && lastSuccessfulBoundsKeyRef.current === key) return;
+    if (!force && regions.some((r) => r.filterKey === filterKey
+      && (r.truncated ? boundsKey(r.bounds) === key : boundsContain(r.bounds, queryBounds)))) return;
     if (!force && pendingQueryKeyRef.current === queryKey
       && !reportRequestRef.current?.signal.aborted) return;
 
@@ -490,24 +550,73 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     setLoadingReports(true);
     setReportsError('');
 
+    const onProgress = ({ data, count }) => {
+      if (controller.signal.aborted || reportRequestRef.current !== controller) return;
+      setLoadProgress({ loaded: data.length, total: count });
+      // Re-rendering thousands of markers for every intermediate page made
+      // completion ~7 s slower; the first page already gives the first
+      // useful results while the counter keeps reporting progress.
+      // Progressive rendering applies only until the first complete result
+      // exists; later fetches keep the last complete results on screen and
+      // replace them atomically on success.
+      if (!hasCompleteResultRef.current && data.length <= DEFAULT_PAGE_SIZE) {
+        setAppraisals(applySpiralOffset(data));
+      }
+    };
+    const poolRows = (rows) => {
+      const pool = loadedRowsRef.current;
+      for (const row of rows) { pool.delete(row.id); pool.set(row.id, { row, filterKey }); }
+      while (pool.size > LOADED_ROWS_MAX) pool.delete(pool.keys().next().value);
+    };
+
     try {
-      const result = await fetchAppraisalsInBounds(supabase, queryBounds, {
-        signal: controller.signal,
-        filters: serverFilters,
-        onProgress: ({ data, count }) => {
+      // When most of the padded query is already covered by proven regions,
+      // fetch only the uncovered strips and merge with pooled rows instead of
+      // re-downloading the whole area (the expensive path in capped areas).
+      const uncovered = force ? [queryBounds] : uncoveredRects(queryBounds, regions, filterKey);
+      const uncoveredArea = uncovered.reduce((area, r) => area + boundsArea(r), 0);
+      const useDeltaFetch = uncovered.length > 0 && uncovered.length <= 4
+        && uncoveredArea > 0 && uncoveredArea < boundsArea(queryBounds) * 0.6;
+
+      let result;
+      if (useDeltaFetch) {
+        const parts = [];
+        for (const rect of uncovered) {
           if (controller.signal.aborted || reportRequestRef.current !== controller) return;
-          setLoadProgress({ loaded: data.length, total: count });
-          // Re-rendering thousands of markers for every intermediate page made
-          // completion ~7 s slower; the first page already gives the first
-          // useful results while the counter keeps reporting progress.
-          // Progressive rendering applies only until the first complete result
-          // exists; later fetches keep the last complete results on screen and
-          // replace them atomically on success.
-          if (!hasCompleteResultRef.current && data.length <= DEFAULT_PAGE_SIZE) {
-            setAppraisals(applySpiralOffset(data));
+          const part = await fetchAppraisalsInBounds(supabase, rect, {
+            signal: controller.signal,
+            filters: serverFilters,
+            onProgress,
+          });
+          parts.push(part);
+          poolRows(part.data);
+        }
+        const merged = [];
+        for (const entry of loadedRowsRef.current.values()) {
+          if (entry.filterKey !== filterKey) continue;
+          const c = getCanonicalCoordinates(entry.row);
+          if (c && c.latitude <= queryBounds.north && c.latitude >= queryBounds.south
+            && c.longitude <= queryBounds.east && c.longitude >= queryBounds.west) {
+            merged.push(entry.row);
           }
-        },
-      });
+        }
+        merged.sort(compareReportRows);
+        const lastPart = parts[parts.length - 1] || {};
+        result = {
+          data: merged.slice(0, MAX_RECORDS_PER_BOUNDS_FETCH),
+          truncated: parts.some((p) => p.truncated)
+            || merged.length > MAX_RECORDS_PER_BOUNDS_FETCH,
+          metadataSupported: lastPart.metadataSupported,
+          factsSupported: lastPart.factsSupported,
+        };
+      } else {
+        result = await fetchAppraisalsInBounds(supabase, queryBounds, {
+          signal: controller.signal,
+          filters: serverFilters,
+          onProgress,
+        });
+        poolRows(result.data);
+      }
       if (controller.signal.aborted || reportRequestRef.current !== controller) return;
       const nextAppraisals = applySpiralOffset(result.data);
       hasCompleteResultRef.current = true;
@@ -529,11 +638,31 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setSelectedAppraisal((current) => (
         current ? nextAppraisals.find((report) => report.id === current.id) || current : null
       ));
-      lastSuccessfulBoundsKeyRef.current = key;
-      successfulFilterKeyRef.current = filterKey;
-      // A capped result cannot prove coverage of a smaller area. Zooming in
-      // must query again, including when it stays inside the padded bounds.
-      lastSuccessfulQueryBoundsRef.current = result.truncated ? null : queryBounds;
+      // Keep a bounded history of fetched regions so revisiting recent areas
+      // hits the cache instead of refetching. A capped result cannot prove
+      // coverage of a smaller area — it only satisfies an identical re-query.
+      lastFilterKeyRef.current = filterKey;
+      const regionList = successfulRegionsRef.current;
+      const existingRegionIndex = regionList.findIndex((r) => r.filterKey === filterKey
+        && boundsKey(r.bounds) === key);
+      if (existingRegionIndex >= 0) regionList.splice(existingRegionIndex, 1);
+      regionList.push({ bounds: queryBounds, filterKey, truncated: result.truncated });
+      if (regionList.length > MAX_CACHED_REGIONS) {
+        regionList.splice(0, regionList.length - MAX_CACHED_REGIONS);
+      }
+      // Pool only needs rows inside still-tracked regions; evict the rest so
+      // delta merges never miss rows that live regions claim to cover.
+      const activeRegions = successfulRegionsRef.current;
+      if (activeRegions.length) {
+        for (const [id, entry] of loadedRowsRef.current) {
+          const c = getCanonicalCoordinates(entry.row);
+          if (!c || !activeRegions.some((r) => r.filterKey === entry.filterKey
+            && c.latitude <= r.bounds.north && c.latitude >= r.bounds.south
+            && c.longitude <= r.bounds.east && c.longitude >= r.bounds.west)) {
+            loadedRowsRef.current.delete(id);
+          }
+        }
+      }
       setLastSuccessfulAt(new Date());
       recordTelemetryEvent('map_reports_load', {
         outcome: 'success',
@@ -572,8 +701,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const refreshCurrentBounds = useCallback(() => {
     const bounds = lastBoundsRef.current || boundsFromMap(mapRef.current);
     if (!bounds) return;
-    lastSuccessfulBoundsKeyRef.current = null;
-    lastSuccessfulQueryBoundsRef.current = null;
+    successfulRegionsRef.current = [];
     fetchReports(bounds, {
       force: true,
       serverFilters: areaTruncatedRef.current ? serverFiltersRef.current : null,
@@ -662,6 +790,36 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     if (reportRequestRef.current) reportRequestRef.current.abort();
   }, []);
 
+  // Keep map content anchored during workspace layout transitions. Panel
+  // mode changes move the canvas's leading edge while its trailing edge
+  // stays put; Maps keeps the centre lat/lng fixed across the resize, so
+  // markers visibly jump by half the width delta. Counter-pan by the
+  // measured centre drift so the same world point stays under the same
+  // screen pixel. A window resize moves the trailing edge instead — that
+  // case is left alone (normal centred resize).
+  useEffect(() => {
+    const canvas = mapCanvasRef.current;
+    if (!canvas || typeof ResizeObserver !== 'function') return undefined;
+    let last = canvas.getBoundingClientRect();
+    const observer = new ResizeObserver(() => {
+      const box = canvas.getBoundingClientRect();
+      const driftX = (box.left + box.width / 2) - (last.left + last.width / 2);
+      const driftY = (box.top + box.height / 2) - (last.top + last.height / 2);
+      const leadingMoved = Math.abs(box.left - last.left) > 0.5
+        || Math.abs(box.top - last.top) > 0.5;
+      last = box;
+      if (!leadingMoved || (Math.abs(driftX) < 1 && Math.abs(driftY) < 1)) return;
+      const map = mapRef.current;
+      if (!map) return;
+      // Wait for Maps to apply its own resize handling, then undo the drift.
+      window.requestAnimationFrame(() => {
+        window.requestAnimationFrame(() => map.panBy(driftX, driftY));
+      });
+    });
+    observer.observe(canvas);
+    return () => observer.disconnect();
+  }, []);
+
   useEffect(() => {
     const handleGoogleAuthFailure = () => {
       setGoogleAuthFailed(true);
@@ -737,18 +895,44 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     latitude: (viewport.north + viewport.south) / 2,
     longitude: (viewport.east + viewport.west) / 2,
   } : null), [subject, viewport]);
-  const preparedReports = useMemo(() => appraisals.filter((report) => {
-    if (!viewport) return true;
-    const coordinates = getCanonicalCoordinates(report);
-    return coordinates && coordinates.latitude >= viewport.south
-      && coordinates.latitude <= viewport.north
-      && coordinates.longitude >= viewport.west && coordinates.longitude <= viewport.east;
-  }).map((report) => ({
-    ...report,
-    _distanceKm: distanceOrigin ? getReportDistanceKm(report, distanceOrigin) : null,
-    _formattedEffectiveDate: formatDateOnly(report.effective_date),
-    _formattedReportDate: formatDateOnly(report.appraisal_date),
-  })), [appraisals, distanceOrigin, viewport]);
+  const derivedReportCacheRef = useRef(new WeakMap());
+  const preparedReports = useMemo(() => {
+    const cache = derivedReportCacheRef.current;
+    const originKey = distanceOrigin
+      ? `${distanceOrigin.latitude},${distanceOrigin.longitude}`
+      : '';
+    const out = [];
+    for (const report of appraisals) {
+      let derived = cache.get(report);
+      if (!derived) {
+        derived = {
+          canonical: getCanonicalCoordinates(report),
+          effectiveDate: formatDateOnly(report.effective_date),
+          reportDate: formatDateOnly(report.appraisal_date),
+          byOrigin: new Map(),
+        };
+        cache.set(report, derived);
+      }
+      if (viewport) {
+        const c = derived.canonical;
+        if (!c || c.latitude < viewport.south || c.latitude > viewport.north
+          || c.longitude < viewport.west || c.longitude > viewport.east) continue;
+      }
+      let prepared = derived.byOrigin.get(originKey);
+      if (!prepared) {
+        if (derived.byOrigin.size >= 8) derived.byOrigin.clear();
+        prepared = {
+          ...report,
+          _distanceKm: distanceOrigin ? getReportDistanceKm(report, distanceOrigin) : null,
+          _formattedEffectiveDate: derived.effectiveDate,
+          _formattedReportDate: derived.reportDate,
+        };
+        derived.byOrigin.set(originKey, prepared);
+      }
+      out.push(prepared);
+    }
+    return out;
+  }, [appraisals, distanceOrigin, viewport]);
 
   const filteredReports = useMemo(() => filterAndSortReports(
     preparedReports,
@@ -1113,11 +1297,12 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         created,
         ...current.filter((report) => String(report.id) !== String(created.id)),
       ]));
+      loadedRowsRef.current.delete(created.id);
+      loadedRowsRef.current.set(created.id, { row: created, filterKey: lastFilterKeyRef.current });
       setSelectedAppraisal(result.continueAdding ? null : created);
       setPanelMode(result.continueAdding ? 'add' : 'detail');
       setPanelOpen(true);
-      lastSuccessfulBoundsKeyRef.current = null;
-      lastSuccessfulQueryBoundsRef.current = null;
+      successfulRegionsRef.current = [];
       focusReportOnMap(created);
     } else {
       setPanelMode(result.continueAdding ? 'add' : 'nearby');
@@ -1139,6 +1324,12 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setAppraisals((current) => current.map((report) => (
         String(report.id) === String(updated.id) ? { ...report, ...updated } : report
       )));
+      const pooled = loadedRowsRef.current.get(updated.id);
+      loadedRowsRef.current.delete(updated.id);
+      loadedRowsRef.current.set(updated.id, {
+        row: pooled ? { ...pooled.row, ...updated } : updated,
+        filterKey: lastFilterKeyRef.current,
+      });
       setSelectedAppraisal((current) => current ? { ...current, ...updated } : updated);
       setCandidates((current) => current.map((candidate) => (
         String(candidate.id) === String(updated.id) ? { ...candidate, ...updated } : candidate
@@ -1178,11 +1369,12 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         restored,
         ...current.filter((report) => String(report.id) !== String(restored.id)),
       ]));
+      loadedRowsRef.current.delete(restored.id);
+      loadedRowsRef.current.set(restored.id, { row: restored, filterKey: lastFilterKeyRef.current });
       setSelectedAppraisal(restored);
       setPanelMode('detail');
       setPanelOpen(true);
-      lastSuccessfulBoundsKeyRef.current = null;
-      lastSuccessfulQueryBoundsRef.current = null;
+      successfulRegionsRef.current = [];
       focusReportOnMap(restored);
       showToast({ tone: 'success', recoveryId: String(archivedAppraisal.id), recoveryResolved: true, message: 'Report restored.' });
       recordTelemetryEvent('appraisal_mutation', {
@@ -1226,6 +1418,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setAppraisals((current) => current.filter(
         (report) => String(report.id) !== String(archivedAppraisal.id)
       ));
+      loadedRowsRef.current.delete(archivedAppraisal.id);
     }
     setSelectedAppraisal(null);
     setPanelMode('nearby');
@@ -1535,7 +1728,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       </header>
 
       <div className={`map-stage am-layout${panelOpen ? ' am-layout--reports' : ''}${panelOpen && panelMode === 'preview' ? ' am-layout--preview' : ''}${panelMode === 'compare' ? ' am-layout--compare' : ''}${panelOpen && ['add', 'detail', 'compare'].includes(panelMode) ? ' am-layout--full' : ''}${manualPlacement.active ? ' am-layout--placing' : ''}`} >
-        <div className="am-map-canvas">
+        <div className="am-map-canvas" ref={mapCanvasRef}>
         {!isLoaded ? (
           <div className="map-loading" role="status">
             <span aria-hidden="true" />

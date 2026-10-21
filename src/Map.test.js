@@ -15,7 +15,7 @@ let mockTriggerBoundsChanged;
 let mockSkipIdle = false;
 let mockBounds = { north: 44, south: 43, east: -78, west: -80 };
 let mockCenter = null;
-const mockClusterer = {};
+const mockClusterer = { repaint: jest.fn() };
 let mockMarkerRenders = [];
 
 const mockMap = {
@@ -951,3 +951,75 @@ test('expansion survives a same-area refresh but resets on filters and new-bound
   await waitFor(() =>
     expect(screen.getAllByRole('heading', { name: /Expanded Row/ })).toHaveLength(60));
 }, 30000);
+
+test('revisiting a fetched map area reuses the retained region instead of refetching', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [report], truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(1);
+
+  // Pan far outside the original coverage: a second region is fetched.
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // Returning to the first area is served by the retained region cache.
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+});
+
+test('an identical re-query of a capped area hits the cache', async () => {
+  fetchAppraisalsInBounds.mockResolvedValueOnce({ data: [report], truncated: true });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+
+  // A different area fetches as usual.
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  // The identical capped query bounds are still satisfied without a fetch.
+  mockBounds = { north: 44, south: 43, east: -78, west: -80 };
+  act(() => mockTriggerIdle());
+  await screen.findByRole('heading', { name: report.address });
+  expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2);
+});
+
+test('a mostly covered query fetches only the uncovered strip and keeps pooled rows', async () => {
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [report], truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: report.address });
+
+  // Pan east so ~78% of the padded query is already proven coverage; the
+  // uncovered strip is the sliver east of the first region's edge (-77.64).
+  const stripRow = { ...report, id: 'strip', address: '5 Strip Road', latitude: 43.8, longitude: -77.55 };
+  fetchAppraisalsInBounds.mockResolvedValue({ data: [stripRow], truncated: false });
+  mockBounds = { north: 44, south: 43, east: -77.5, west: -79.5 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+
+  const stripBounds = fetchAppraisalsInBounds.mock.calls[1][1];
+  expect(stripBounds.north).toBeCloseTo(44.18, 2);
+  expect(stripBounds.south).toBeCloseTo(42.82, 2);
+  expect(stripBounds.east).toBeCloseTo(-77.14, 2);
+  expect(stripBounds.west).toBeCloseTo(-77.64, 2);
+
+  // The merged result keeps the pooled row plus the newly fetched strip row.
+  await screen.findByRole('heading', { name: stripRow.address });
+  expect(screen.getByRole('heading', { name: report.address })).toBeInTheDocument();
+});
+
+test('marker-set changes commit one cluster repaint per data change', async () => {
+  const many = Array.from({ length: 60 }, (_, i) => ({ ...report, id: `batch-${i}`, address: `${i} Batch Road` }));
+  fetchAppraisalsInBounds.mockResolvedValue({ data: many, truncated: false });
+  render(<MapView session={editorSession} />);
+  await screen.findByRole('heading', { name: '0 Batch Road' });
+  const repaints = mockClusterer.repaint.mock.calls.length;
+
+  mockBounds = { north: 49, south: 48, east: -70, west: -72 };
+  act(() => mockTriggerIdle());
+  await waitFor(() => expect(fetchAppraisalsInBounds).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(mockClusterer.repaint.mock.calls.length).toBe(repaints + 1));
+});
