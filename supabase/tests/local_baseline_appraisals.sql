@@ -1,3 +1,6 @@
+-- LEGACY FIXTURE. The full migration chain now creates this table itself via
+-- 20260729000100_create_appraisals.sql. Do not load this fixture before that
+-- migration: doing so skips the verified baseline constraints and insert guard.
 -- LOCAL VERIFICATION ONLY. Never run in production: public.appraisals already
 -- exists there and was created before this migration history began.
 --

@@ -52,6 +52,10 @@ The app runs at `http://localhost:3000`. Use test accounts and non-production da
 
 ## Checks
 
+Database migrations also run against a fresh PostgreSQL database without
+automatic Data API grants in CI. See [explicit Data API grants](docs/data-api-grants.md)
+for the October 2026 audit, local test setup, and future migration rules.
+
 - `npm run lint` — ESLint checks for `src`.
 - `npm run test:ci` — runs the Jest suite once.
 - `npm run build` — creates the production bundle.
