@@ -68,8 +68,8 @@ jobs:
       - name: Run tests and accessibility checks
         run: npm run test:ci
 
-      - name: Verify storage admission limits
-        run: node --test worker/*.test.mjs
+      - name: Verify Worker runtime and admission limits
+        run: npm run test:worker
 
       - name: Verify database health recovery and watchdog
         run: python3 -m unittest discover -s scripts -p 'test_database_health.py' -v

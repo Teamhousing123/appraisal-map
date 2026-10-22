@@ -84,8 +84,29 @@ Do not delete source files or downgrade until live and recovery checks pass.
 
 ## Verification
 
-Run `npm run lint`, `npm run test:ci`, `node --test worker/*.test.mjs`,
+Run `npm run lint`, `npm run test:ci`, `npm run test:worker`,
 `npm run build`, and `npm run verify:build`. Run storage.integration.sql only
 against a local restored verification database. Its tests roll back all rows.
 Production cutover must also test a staff sign-in, protected file reads,
 upload/resume, map failure recovery, and the independent backup process.
+
+### Local runtime checks
+
+`npm run test:worker:runtime` runs the bundled Worker in real local `workerd`,
+with its SQLite Durable Object and a synthetic upstream. It needs no application
+credentials and never contacts the production database. It verifies response
+accounting, a client disconnect during an upstream read, daily-limit guidance,
+validation before reservation, and unauthenticated denial. CI runs these checks
+as part of `npm run test:worker`, alongside the handler and admission tests.
+
+The Miniflare 5 compatibility adapter loads only the entry module when given
+`modules: true` and `scriptPath`. It does not discover relative imports such as
+`./limits.mjs`. Passing that incomplete module graph can cause an opaque startup
+error. The runtime tests use esbuild to include relative modules in memory while
+leaving `cloudflare:workers` external, matching the production bundling model.
+
+Disconnect protection is bounded by the runtime lifetime. A crash, upstream
+timeout, or unconfirmed accounting write can still retain a conservative byte
+reservation for its original UTC day. Never release uncertain reservations based
+only on elapsed time. Legitimate usage can still reach the enforced daily limit;
+the interface reports the reason and reset time rather than a connection error.
