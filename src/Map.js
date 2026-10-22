@@ -33,6 +33,7 @@ import {
 } from './domain/filters';
 import { DEFAULT_PAGE_SIZE, fetchAppraisalsInBounds, restoreAppraisal, MAX_RECORDS_PER_BOUNDS_FETCH } from './services/appraisalService';
 import { recordTelemetryEvent } from './services/telemetry';
+import { reportLoadErrorMessage } from './services/reportLoadError';
 import { createProtectedFileLink, isR2StorageEnabled } from './services/cloudflareStorage';
 import { describeDocument, showPendingDocument } from './services/documentLinks';
 import SubjectSearch from './components/SubjectSearch';
@@ -794,9 +795,10 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       if (hasCompleteResultRef.current) {
         // Keep the last complete result on screen; it may be stale but it is
         // still the best information we have.
-        setReportsError('The refresh failed. Showing the last successful results, which may be out of date.');
+        const reason = reportLoadErrorMessage(error, 'The refresh failed.');
+        setReportsError(`${reason} Showing the last successful results, which may be out of date.`);
       } else {
-        setReportsError('Check your connection and retry this map area.');
+        setReportsError(reportLoadErrorMessage(error, 'Check your connection and retry this map area.'));
         // A partial initial page is not a last successful load — unless a
         // local edit landed mid-fetch, drop it rather than presenting it as
         // complete results.

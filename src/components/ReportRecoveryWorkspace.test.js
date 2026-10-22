@@ -80,6 +80,17 @@ test('searches server-side after a debounce and reports the total count', async 
   expect(screen.getByText(/matching “aurora”/)).toBeInTheDocument();
 });
 
+test('the report list explains daily exhaustion and a later retry recovers', async () => {
+  searchAppraisals.mockRejectedValueOnce({ code: 'APPRAISAL_DATA_BUDGET_EXHAUSTED' });
+  renderWorkspace();
+  const message = await screen.findByText(/Today's report data limit/);
+  expect(message).toHaveTextContent('midnight UTC');
+  expect(message).not.toHaveTextContent('connection');
+  fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+  await waitFor(() => expect(searchAppraisals).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.queryByText(/Today's report data limit/)).not.toBeInTheDocument());
+});
+
 test('Load 100 more requests the next offset and appends without duplicates', async () => {
   const firstPage = reports(100, 'page1');
   const overlap = firstPage[99];

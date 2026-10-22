@@ -4,6 +4,7 @@ import { DEFAULT_SEARCH_PAGE_SIZE, fetchAppraisalForMutation, normalizeSearchTer
 import { createProtectedFileLink, isR2StorageEnabled } from '../services/cloudflareStorage';
 import { describeDocument, showPendingDocument } from '../services/documentLinks';
 import { isAbortError } from '../services/operation';
+import { reportLoadErrorMessage } from '../services/reportLoadError';
 import BrandLogo from './BrandLogo';
 import AppraisalDetailPanel from './AppraisalDetailPanel';
 import ReportListRow from './ReportListRow';
@@ -149,16 +150,18 @@ export default function ReportRecoveryWorkspace({ onSignOut, onShowMap, reason, 
       if (seq !== requestSeqRef.current || isAbortError(failure)) return;
       if (refresh) {
         const loaded = reportsRef.current.length;
+        const reportLabel = loaded === 1 ? 'report' : 'reports';
         const at = lastUpdatedAtRef.current;
         const time = at
           ? new Intl.DateTimeFormat('en-CA', { timeStyle: 'short' }).format(at)
           : '';
+        const reason = reportLoadErrorMessage(failure, 'Refresh failed.');
         setError(time
-          ? `Refresh failed. Showing the ${loaded} reports loaded at ${time}, which may be out of date.`
-          : `Refresh failed. Showing the ${loaded} reports, which may be out of date.`);
+          ? `${reason} Showing the ${loaded} ${reportLabel} loaded at ${time}, which may be out of date.`
+          : `${reason} Showing the ${loaded} ${reportLabel}, which may be out of date.`);
         return;
       }
-      setError(failure?.message || 'Reports could not be loaded. Try again.');
+      setError(reportLoadErrorMessage(failure));
     } finally {
       if (seq === requestSeqRef.current) {
         setHasCompletedSearch(true);

@@ -69,7 +69,7 @@ jobs:
         run: npm run test:ci
 
       - name: Verify storage admission limits
-        run: node --test worker/limits.test.mjs
+        run: node --test worker/*.test.mjs
 
       - name: Verify database health recovery and watchdog
         run: python3 -m unittest discover -s scripts -p 'test_database_health.py' -v

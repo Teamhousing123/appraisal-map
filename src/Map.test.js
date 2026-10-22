@@ -764,6 +764,30 @@ test('a failed first load clears the partial page and shows the generic error', 
   expect(screen.queryByText(/Updated/)).not.toBeInTheDocument();
 });
 
+test('daily exhaustion shows its cause and reset guidance, and retry can recover', async () => {
+  fetchAppraisalsInBounds.mockRejectedValueOnce({
+    code: 'APPRAISAL_DATA_BUDGET_EXHAUSTED', hint: '2026-10-22T00:00:00.000Z',
+  });
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  const alert = await screen.findByRole('alert');
+  expect(alert).toHaveTextContent("Today's report data limit has been reached.");
+  expect(alert).toHaveTextContent('Try again after');
+  expect(alert).not.toHaveTextContent('Check your connection');
+  fireEvent.click(within(alert).getByRole('button', { name: 'Try again' }));
+  await screen.findByRole('heading', { name: '10 Example Road' });
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+test('daily exhaustion keeps cached reports with the specific failure reason', async () => {
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  await screen.findByRole('heading', { name: '10 Example Road' });
+  fetchAppraisalsInBounds.mockRejectedValueOnce({ code: 'APPRAISAL_DATA_BUDGET_EXHAUSTED' });
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh reports' }));
+  expect(await screen.findByText(/Today's report data limit/)).toHaveTextContent('midnight UTC');
+  expect(screen.getByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+  expect(screen.getByText(/Showing the last successful results/)).toBeInTheDocument();
+});
+
 const subjectLookup = () => {
   window.google = {
     maps: {

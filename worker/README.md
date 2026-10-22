@@ -49,6 +49,13 @@ Uploads pause if backup evidence is more than 72 hours old. Database writes
 pause at 450,000,000 database bytes. Metadata rows are limited to 8 KiB.
 Report data uses single-use gateway permits and a conservative daily transfer
 budget. Unknown transfer outcomes retain their full reservation for that day.
+The gateway keeps admitted report reads and their settlement alive with
+`waitUntil` when a browser request is cancelled. Request validation and upstream
+read/settlement admission happen before byte reservation. Confirmed responses
+settle their actual byte count; unknown transfers still retain the full charge.
+Daily limit responses use HTTP 429, a specific error code, a `Retry-After`
+header, and the next UTC reset in the PostgREST `hint`. The map and report list
+show the reason and reset time while retaining any last successful results.
 The file and request budgets are defined in limits.mjs. These limits assume a
 dedicated account. Worker calls to Supabase are also limited to 1,000 per UTC
 day so file metadata and authentication checks cannot grow without a bound.
@@ -77,7 +84,7 @@ Do not delete source files or downgrade until live and recovery checks pass.
 
 ## Verification
 
-Run `npm run lint`, `npm run test:ci`, `node --test worker/limits.test.mjs`,
+Run `npm run lint`, `npm run test:ci`, `node --test worker/*.test.mjs`,
 `npm run build`, and `npm run verify:build`. Run storage.integration.sql only
 against a local restored verification database. Its tests roll back all rows.
 Production cutover must also test a staff sign-in, protected file reads,

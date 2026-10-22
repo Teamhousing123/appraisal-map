@@ -28,17 +28,24 @@ async function boundedJson(response, maximum = 32768) {
   try { return JSON.parse(new TextDecoder().decode(bytes)); } catch { throw failure('A service returned an invalid response.', 502); }
 }
 
-async function rpc(env, name, body, bearer, privileged = false) {
+async function rpc(env, name, body, bearer, privileged = false, { admitted = false } = {}) {
   const credential = privileged ? env.SUPABASE_SERVICE_ROLE_KEY : env.SUPABASE_PUBLISHABLE_KEY;
   if (!credential) throw failure('Storage setup is incomplete.', 503);
-  await permit(env, 'upstreamRequest');
+  if (!admitted) await permit(env, 'upstreamRequest');
   const response = await fetch(`${env.SUPABASE_URL}/rest/v1/rpc/${name}`, {
     method: 'POST', headers: { apikey: credential, Authorization: `Bearer ${privileged ? credential : bearer}`, 'Content-Type': 'application/json', 'x-appraisal-storage-auth': env.STORAGE_RPC_SECRET || '' },
     body: JSON.stringify(body), signal: AbortSignal.timeout(12000),
   });
   if (response.status === 204) return null;
   const result = await boundedJson(response);
-  if (!response.ok) throw failure(result?.message || 'The storage request was not accepted.', response.status === 401 ? 401 : 400);
+  if (!response.ok) {
+    if (name === 'appraisal_data_reserve' && result?.message?.startsWith("Today's report data budget is exhausted.")) {
+      const error = failure("Today's report data limit has been reached. Existing file links remain available.", 429);
+      error.code = 'APPRAISAL_DATA_BUDGET_EXHAUSTED';
+      throw error;
+    }
+    throw failure(result?.message || 'The storage request was not accepted.', response.status === 401 ? 401 : response.status >= 500 ? 503 : 400);
+  }
   return result;
 }
 
@@ -70,7 +77,11 @@ async function authenticate(request, env, write = false) {
 async function permit(env, kind) {
   const budget = env.STORAGE_BUDGET.get(env.STORAGE_BUDGET.idFromName('appraisal-map-account-budget'));
   const response = await budget.fetch('https://budget/charge', { method: 'POST', body: JSON.stringify({ kind }) });
-  if (!response.ok) throw failure(kind === 'classA' ? 'Today’s upload budget is exhausted. Existing files remain available.' : 'Today’s online request budget is exhausted. Use the independent backup for recovery.', 429);
+  if (!response.ok) {
+    const error = failure(kind === 'classA' ? 'Today’s upload budget is exhausted. Existing files remain available.' : 'Today’s online request budget is exhausted. Use the independent backup for recovery.', 429);
+    error.code = kind === 'classA' ? 'APPRAISAL_UPLOAD_BUDGET_EXHAUSTED' : 'APPRAISAL_REQUEST_BUDGET_EXHAUSTED';
+    throw error;
+  }
 }
 
 async function hmacKey(env) {
@@ -227,17 +238,20 @@ async function proxyData(request, env, auth, url) {
   if (!Number.isInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 500) throw failure('The report page is too large.', 400);
   if (request.method === 'GET') target.searchParams.set('limit', String(requestedLimit));
   if (request.method === 'PATCH' && !/^eq\.[0-9a-f-]{36}$/i.test(target.searchParams.get('id') || '')) throw failure('Choose one report to update.', 400);
-  const reserveBytes = (request.method === 'GET' ? requestedLimit + 1 : 2) * 8192 + 16384;
-  const receipt = await rpc(env, 'appraisal_data_reserve', { p_owner_id: auth.user.id, p_bytes: reserveBytes }, null, true);
-  const headers = new Headers({ apikey: env.SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${auth.bearer}`, 'x-appraisal-data-permit': receipt });
-  for (const name of ['Accept', 'Prefer', 'Content-Type']) { const value = request.headers.get(name); if (value) headers.set(name, value); }
   let body;
   if (request.method !== 'GET') {
     const input = await boundedJson(request, 16384);
     if (!input || typeof input !== 'object' || (Array.isArray(input) && (request.method !== 'POST' || input.length !== 1))) throw failure('Save one report at a time.', 400);
     body = JSON.stringify(input);
   }
+  // Admit both the data fetch and its settlement before reserving bytes. A
+  // request-limit rejection must not strand a reservation or block settlement.
   await permit(env, 'upstreamRequest');
+  await permit(env, 'upstreamRequest');
+  const reserveBytes = (request.method === 'GET' ? requestedLimit + 1 : 2) * 8192 + 16384;
+  const receipt = await rpc(env, 'appraisal_data_reserve', { p_owner_id: auth.user.id, p_bytes: reserveBytes }, null, true);
+  const headers = new Headers({ apikey: env.SUPABASE_PUBLISHABLE_KEY, Authorization: `Bearer ${auth.bearer}`, 'x-appraisal-data-permit': receipt });
+  for (const name of ['Accept', 'Prefer', 'Content-Type']) { const value = request.headers.get(name); if (value) headers.set(name, value); }
   const response = await fetch(target, { method: request.method, headers, body, signal: AbortSignal.timeout(14000) });
   const reader = response.body?.getReader(); const chunks = []; let size = 0;
   if (reader) {
@@ -251,7 +265,7 @@ async function proxyData(request, env, auth, url) {
     } finally { reader.releaseLock(); }
   }
   // Leave the worst-case reservation in place if the provider outcome is unknown.
-  await rpc(env, 'appraisal_data_finish', { p_receipt_id: receipt, p_bytes: size }, null, true);
+  await rpc(env, 'appraisal_data_finish', { p_receipt_id: receipt, p_bytes: size }, null, true, { admitted: true });
   const bytes = new Uint8Array(size); let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
   const resultHeaders = new Headers({ 'Cache-Control': 'no-store' });
@@ -259,14 +273,20 @@ async function proxyData(request, env, auth, url) {
   return new Response(size ? bytes : null, { status: response.status, headers: resultHeaders });
 }
 
-async function handle(request, env) {
+async function handle(request, env, context) {
   const url = new URL(request.url);
   if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
   await permit(env, request.method === 'GET' || request.method === 'HEAD' || url.pathname === '/api/files/link' ? 'readRequest' : 'request');
   if (url.pathname === '/api/files/content' && ['GET', 'HEAD'].includes(request.method)) return readFile(request, env, url);
   const write = request.method !== 'GET' && url.pathname !== '/api/files/link';
   const auth = await authenticate(request, env, write);
-  if (url.pathname === '/api/data/appraisals') return proxyData(request, env, auth, url);
+  if (url.pathname === '/api/data/appraisals') {
+    const task = proxyData(request, env, auth, url);
+    // Panning, navigation and timeouts cancel browser requests. Keep the
+    // bounded upstream read and its accounting alive after that disconnect.
+    context.waitUntil(task.catch(() => {}));
+    return task;
+  }
   if (request.method === 'GET' && url.pathname === '/api/storage/status') return json(await rpc(env, 'appraisal_storage_status', {}, auth.bearer));
   if (request.method === 'POST' && url.pathname === '/api/files/link') {
     const input = await boundedJson(request, 4096);
@@ -286,11 +306,18 @@ async function handle(request, env) {
 }
 
 export default {
-  async fetch(request, env) {
-    try { return await handle(request, env); }
+  async fetch(request, env, context) {
+    try { return await handle(request, env, context); }
     catch (error) {
       const message = Number.isInteger(error.status) ? error.message : 'Storage is temporarily unavailable. Your existing files are preserved.';
-      return json({ error: message, message, code: 'APPRAISAL_STORAGE_GATEWAY' }, Number.isInteger(error.status) ? error.status : 503);
+      const response = json({ error: message, message, code: error.code || 'APPRAISAL_STORAGE_GATEWAY' }, Number.isInteger(error.status) ? error.status : 503);
+      if (error.status === 429) {
+        const reset = new Date();
+        reset.setUTCHours(24, 0, 0, 0);
+        response.headers.set('Retry-After', String(Math.max(1, Math.ceil((reset.getTime() - Date.now()) / 1000))));
+        return Response.json({ error: message, message, code: error.code, hint: reset.toISOString() }, { status: 429, headers: response.headers });
+      }
+      return response;
     }
   },
   async scheduled(_controller, env, context) {
