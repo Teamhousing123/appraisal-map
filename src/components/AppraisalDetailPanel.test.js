@@ -280,6 +280,39 @@ test('shows an actionable archive error without a fake support reference', async
   expect(JSON.stringify(telemetry)).not.toMatch(/synthetic-record|Example Road|Aurora/i);
 });
 
+test('the edit action is disabled while an archive is in flight', async () => {
+  let resolveDelete;
+  deleteAppraisal.mockReturnValue(new Promise((resolve) => {
+    resolveDelete = resolve;
+  }));
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Archive report' }));
+
+  const editButton = screen.getByRole('button', { name: 'Edit report' });
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Archiving…' })).toBeDisabled());
+  expect(editButton).toBeDisabled();
+  fireEvent.click(editButton);
+  expect(screen.queryByRole('form', { name: 'Edit appraisal form' })).not.toBeInTheDocument();
+
+  resolveDelete({ data: { id: appraisal.id }, error: null, deletedId: appraisal.id });
+  await waitFor(() => expect(deleteAppraisal).toHaveBeenCalled());
+});
+
+test('entering edit mode clears a pending archive confirmation', () => {
+  renderPanel();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Archive…' }));
+  expect(screen.getByText('Archive this report?')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Edit report' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Cancel editing' }));
+
+  expect(screen.queryByText('Archive this report?')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: 'Archive…' })).toBeInTheDocument();
+});
+
 test('exposes every legacy folder with privacy-safe labels', () => {
   const view = renderPanel({
     appraisal: {

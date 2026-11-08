@@ -134,8 +134,9 @@ function AddAppraisal({
 
   useEffect(() => () => {
     uploadControllerRef.current?.abort();
+    onCancelManualPlacement?.();
     onWorkspaceStateChange?.({ dirty: false, busy: false });
-  }, [onWorkspaceStateChange]);
+  }, [onCancelManualPlacement, onWorkspaceStateChange]);
 
   useEffect(() => {
     if (!error) return undefined;

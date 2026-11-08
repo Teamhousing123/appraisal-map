@@ -4,6 +4,7 @@ import React, {
   useCallback,
   useEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   useSyncExternalStore,
@@ -44,6 +45,14 @@ import ReportRecoveryWorkspace from './components/ReportRecoveryWorkspace';
 import DiscardChangesDialog from './components/DiscardChangesDialog';
 import useWorkspaceRoute from './hooks/useWorkspaceRoute';
 import useLiveLocation from './hooks/useLiveLocation';
+import {
+  initialWorkspacePanel,
+  transitionWorkspacePanel,
+  workspacePanelDetailEditing,
+  workspacePanelDetailReturnsToPreview,
+  workspacePanelPlacement,
+  workspacePanelSelection,
+} from './domain/workspacePanel';
 import './Map.css';
 import './presentation.css';
 
@@ -405,13 +414,12 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const [areaTruncated, setAreaTruncated] = useState(false);
   const [serverFiltered, setServerFiltered] = useState(false);
   const [unfilteredQueryKey, setUnfilteredQueryKey] = useState(null);
-  const [selectedAppraisal, setSelectedAppraisal] = useState(null);
   const [viewport, setViewport] = useState(null);
-  const [detailReturnsToPreview, setDetailReturnsToPreview] = useState(false);
-  const [detailEditing, setDetailEditing] = useState(false);
   const [hoverStore] = useState(createHoverStore);
-  const [panelMode, setPanelMode] = useState('nearby');
-  const [panelOpen, setPanelOpen] = useState(true);
+  // The whole workspace panel is one declared state: { open, view } where
+  // view is a discriminated union (see domain/workspacePanel.js). Manual pin
+  // placement lives only on the 'add' view, so it cannot outlive the form.
+  const [panel, dispatchPanel] = useReducer(transitionWorkspacePanel, undefined, initialWorkspacePanel);
   const [subject, setSubject] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [suggestions, setSuggestions] = useState([]);
@@ -423,11 +431,6 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const [openingReportId, setOpeningReportId] = useState(null);
   const [workspaceState, setWorkspaceState] = useState(EMPTY_WORKSPACE_STATE);
   const [discardAction, setDiscardAction] = useState(null);
-  const [manualPlacement, setManualPlacement] = useState({
-    active: false,
-    location: null,
-    confirmed: false,
-  });
   const [signingOut, setSigningOut] = useState(false);
   const [refreshingAccess, setRefreshingAccess] = useState(false);
   const [reportRevision, setReportRevision] = useState(0);
@@ -479,6 +482,19 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   const canMutate = access.canMutate;
   const isAdmin = access.role === 'admin';
   const candidateIds = useMemo(() => candidates.map((candidate) => candidate.id), [candidates]);
+
+  // Derived panel reads — every consumer goes through the machine's readers
+  // so a malformed view fails loudly instead of rendering an empty panel.
+  const panelMode = panel.view.mode;
+  const panelOpen = panel.open;
+  const selectedAppraisal = workspacePanelSelection(panel);
+  const detailEditing = workspacePanelDetailEditing(panel);
+  const detailReturnsToPreview = workspacePanelDetailReturnsToPreview(panel);
+  const manualPlacement = useMemo(() => workspacePanelPlacement(panel), [panel]);
+  const setDetailEditing = useCallback(
+    (editing) => dispatchPanel({ type: 'set-editing', editing }),
+    []
+  );
 
   const focusPanelHeading = useCallback(() => {
     const heading = workspacePanelRef.current?.querySelector('h2');
@@ -615,9 +631,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
     setCandidates((current) => current.map((candidate) => (
       nextAppraisals.find((report) => report.id === candidate.id) || candidate
     )));
-    setSelectedAppraisal((current) => (
-      current ? nextAppraisals.find((report) => report.id === current.id) || current : null
-    ));
+    dispatchPanel({ type: 'sync-selection', appraisals: nextAppraisals });
     setLastSuccessfulAt(new Date(region.fetchedAt));
   }, []);
 
@@ -1285,8 +1299,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         setCandidates([]);
         setSearchTerm(nextSubject.address);
         setFilters((current) => ({ ...current, radiusKm: '', sortBy: 'distance' }));
-        setPanelMode('nearby');
-        setPanelOpen(true);
+        dispatchPanel({ type: 'open-list' });
         fitMapToSubjectRadius(nextSubject, 10);
       });
       recordTelemetryEvent('address_lookup', {
@@ -1358,7 +1371,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setSearchError('');
       setCandidates([]);
       setFilters(DEFAULT_FILTERS);
-      setPanelMode('nearby');
+      dispatchPanel({ type: 'nearby' });
     });
   }, [runWorkspaceAction]);
 
@@ -1417,11 +1430,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
 
   const handleOpenDetails = useCallback((report) => {
     runWorkspaceAction(() => {
-      setSelectedAppraisal(report);
-      setDetailEditing(false);
-      setDetailReturnsToPreview(false);
-      setPanelMode('preview');
-      setPanelOpen(true);
+      dispatchPanel({ type: 'open-preview', appraisal: report });
     });
   }, [runWorkspaceAction]);
 
@@ -1431,7 +1440,6 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
 
   const handleAdded = useCallback((result = {}) => {
     setWorkspaceState(EMPTY_WORKSPACE_STATE);
-    setManualPlacement({ active: false, location: null, confirmed: false });
     listContextRef.current = null;
     localEditSinceFetchRef.current = true;
     const created = result.report || (Array.isArray(result.data) ? result.data[0] : result.data);
@@ -1440,14 +1448,13 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         created,
         ...current.filter((report) => String(report.id) !== String(created.id)),
       ]));
-      setSelectedAppraisal(result.continueAdding ? null : created);
-      setPanelMode(result.continueAdding ? 'add' : 'detail');
-      setPanelOpen(true);
+      dispatchPanel(result.continueAdding
+        ? { type: 'reset-add' }
+        : { type: 'open-detail', appraisal: created });
       forgetRegions();
       focusReportOnMap(created);
     } else {
-      setPanelMode(result.continueAdding ? 'add' : 'nearby');
-      setPanelOpen(true);
+      dispatchPanel(result.continueAdding ? { type: 'add' } : { type: 'open-list' });
       refreshCurrentBounds();
     }
     showToast({ tone: result.tone || 'success', message: result.message || 'Appraisal saved.' });
@@ -1465,12 +1472,11 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       setAppraisals((current) => current.map((report) => (
         String(report.id) === String(updated.id) ? { ...report, ...updated } : report
       )));
-      setSelectedAppraisal((current) => current && String(current.id) === String(updated.id) ? { ...current, ...updated } : updated);
       setCandidates((current) => current.map((candidate) => (
         String(candidate.id) === String(updated.id) ? { ...candidate, ...updated } : candidate
       )));
     }
-    setPanelMode('detail');
+    dispatchPanel({ type: 'show-detail', appraisal: updated?.id ? updated : null });
     refreshCurrentBounds();
     showToast({
       tone: 'success',
@@ -1505,9 +1511,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         restored,
         ...current.filter((report) => String(report.id) !== String(restored.id)),
       ]));
-      setSelectedAppraisal(restored);
-      setPanelMode('detail');
-      setPanelOpen(true);
+      dispatchPanel({ type: 'open-detail', appraisal: restored });
       forgetRegions();
       focusReportOnMap(restored);
       showToast({ tone: 'success', recoveryId: String(archivedAppraisal.id), recoveryResolved: true, message: 'Report restored.' });
@@ -1553,8 +1557,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         (report) => String(report.id) !== String(archivedAppraisal.id)
       ));
     }
-    setSelectedAppraisal(null);
-    setPanelMode('nearby');
+    dispatchPanel({ type: 'deselect' });
     refreshCurrentBounds();
     showToast({
       tone: 'success',
@@ -1645,11 +1648,11 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
 
   const handleRemoveCandidate = useCallback((id) => {
     setCandidates((current) => current.filter((candidate) => candidate.id !== id));
-    if (candidates.length <= 1) setPanelMode('nearby');
+    if (candidates.length <= 1) dispatchPanel({ type: 'nearby' });
   }, [candidates.length]);
 
   const beginManualPlacement = useCallback(() => {
-    setManualPlacement({ active: true, location: null, confirmed: false });
+    dispatchPanel({ type: 'begin-placement' });
     showToast({
       tone: 'info',
       title: 'Place the property pin',
@@ -1659,13 +1662,11 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   }, [showToast]);
 
   const cancelManualPlacement = useCallback(() => {
-    setManualPlacement({ active: false, location: null, confirmed: false });
+    dispatchPanel({ type: 'cancel-placement' });
   }, []);
 
   const confirmManualPlacement = useCallback(() => {
-    setManualPlacement((current) => (
-      current.location ? { ...current, active: true, confirmed: true } : current
-    ));
+    dispatchPanel({ type: 'confirm-placement' });
     showToast({
       tone: 'success',
       message: 'Location confirmed. Return to the form and save when ready.',
@@ -1673,7 +1674,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
   }, [showToast]);
 
   const changeManualPlacement = useCallback(() => {
-    setManualPlacement((current) => ({ ...current, active: true, confirmed: false }));
+    dispatchPanel({ type: 'change-pin' });
   }, []);
 
   const handleMapClick = useCallback((event) => {
@@ -1690,11 +1691,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       });
       return;
     }
-    setManualPlacement({
-      active: true,
-      location: { latitude, longitude },
-      confirmed: false,
-    });
+    dispatchPanel({ type: 'place-pin', location: { latitude, longitude } });
   }, [manualPlacement.active, showToast]);
 
   const handleManualPinDrag = useCallback((event) => {
@@ -1708,11 +1705,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       showToast({ tone: 'info', message: `Keep the pin inside ${SERVICE_AREA.name}.` });
       return;
     }
-    setManualPlacement({
-      active: true,
-      location: { latitude, longitude },
-      confirmed: false,
-    });
+    dispatchPanel({ type: 'place-pin', location: { latitude, longitude } });
   }, [showToast]);
 
   const resetMapView = useCallback(() => {
@@ -1811,20 +1804,14 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
             navigate('#reports', { confirmed: true });
           })}>Report list</button>
           <button type="button" className="button button--secondary am-map-toggle" onClick={() => {
-            runWorkspaceAction(() => {
-              setPanelOpen((open) => !open);
-              if (!panelOpen) setPanelMode('nearby');
-            });
+            runWorkspaceAction(() => dispatchPanel({ type: 'toggle' }));
           }}>
             <MapIcon /><span className="am-toggle-desktop">{panelOpen ? 'Hide reports' : 'Show reports'}</span><span className="am-toggle-narrow">{panelOpen ? 'Show map' : 'Show reports'}</span>
           </button>
           {canMutate && (
             <button type="button" className="button button--primary am-add-action" onClick={() => {
               if (panelMode === 'add') return;
-              runWorkspaceAction(() => {
-                setPanelMode('add');
-                setPanelOpen(true);
-              });
+              runWorkspaceAction(() => dispatchPanel({ type: 'add' }));
             }}>
               <span aria-hidden="true">＋</span> Add appraisal
             </button>
@@ -1991,7 +1978,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         )}
 
         {!panelOpen && (
-          <button type="button" className="map-panel-reopen" onClick={() => setPanelOpen(true)}>
+          <button type="button" className="map-panel-reopen" onClick={() => dispatchPanel({ type: 'reopen' })}>
             <MapIcon /> Show {filteredReports.length} reports
           </button>
         )}
@@ -2019,7 +2006,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
               <Suspense fallback={<div className="panel-loader" role="status">Loading form…</div>}>
                 <AddAppraisal
                   onAdded={handleAdded}
-                  onCancel={() => runWorkspaceAction(() => setPanelMode('nearby'))}
+                  onCancel={() => runWorkspaceAction(() => dispatchPanel({ type: 'nearby' }))}
                   metadataSupported={metadataSupported}
                   factsSupported={factsSupported}
                   subjectAddress={subject?.streetAddress ? {
@@ -2041,19 +2028,9 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 compact={panelMode === 'preview'}
                 initialEditing={detailEditing}
                 onEditingChange={setDetailEditing}
-                onExpand={(options = {}) => {
-                  setDetailEditing(Boolean(options.editing));
-                  setDetailReturnsToPreview(true);
-                  setPanelMode('detail');
-                }}
-                backToPreview={panelMode === 'detail' && detailReturnsToPreview}
-                onBack={() => runWorkspaceAction(() => {
-                  if (panelMode === 'detail' && detailReturnsToPreview) setPanelMode('preview');
-                  else {
-                    setSelectedAppraisal(null);
-                    setPanelMode('nearby');
-                  }
-                })}
+                onExpand={(options = {}) => dispatchPanel({ type: 'expand', editing: Boolean(options.editing) })}
+                backToPreview={detailReturnsToPreview}
+                onBack={() => runWorkspaceAction(() => dispatchPanel({ type: 'back' }))}
                 onUpdated={handleUpdated}
                 onDeleted={handleDeleted}
                 onOpenReport={handleOpenReport}
@@ -2086,7 +2063,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 onApplyFilters={handleApplyFilters}
                 onResetFilters={handleResetFilters}
                 onRefresh={refreshCurrentBounds}
-                onClose={() => runWorkspaceAction(() => setPanelOpen(false))}
+                onClose={() => runWorkspaceAction(() => dispatchPanel({ type: 'close' }))}
                 candidateIds={candidateIds}
                 candidates={decoratedCandidates}
                 onToggleCandidate={handleToggleCandidate}
@@ -2100,9 +2077,9 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
                 view={panelMode === 'compare' ? 'compare' : 'nearby'}
                 onCompare={() => {
                   if (!subject) showToast('Set a subject property before comparing reports.');
-                  else setPanelMode('compare');
+                  else dispatchPanel({ type: 'compare' });
                 }}
-                onBackFromCompare={() => setPanelMode('nearby')}
+                onBackFromCompare={() => dispatchPanel({ type: 'nearby' })}
                 onRemoveCandidate={handleRemoveCandidate}
                 onRetry={refreshCurrentBounds}
               />
