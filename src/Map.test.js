@@ -51,11 +51,13 @@ jest.mock('@react-google-maps/api', () => ({
     return <div data-testid="map-surface" onClick={() => onClick?.({})}>{children}</div>;
   },
   MarkerClusterer: ({ children }) => children(mockClusterer),
-  Marker: ({ title, onClick }) => {
+  Marker: ({ title, onClick, zIndex }) => {
     mockMarkerRenders.push(title);
+    // zIndex 999 is the selected-marker emphasis from markerIconFor.
+    const selected = zIndex === 999 ? 'true' : undefined;
     return onClick
-    ? <button type="button" aria-label={title} onClick={onClick}>marker</button>
-    : <span aria-label={title} />;
+    ? <button type="button" aria-label={title} data-selected={selected} onClick={onClick}>marker</button>
+    : <span aria-label={title} data-selected={selected} />;
   },
 }));
 
@@ -442,6 +444,24 @@ test('cancelling the add form ends manual pin placement instead of leaking it', 
   // The map must no longer treat clicks as pin placement.
   fireEvent.click(screen.getByTestId('map-surface'));
   expect(screen.queryByText(/Choose the property location|Pin selected|Location confirmed/)).not.toBeInTheDocument();
+});
+
+test('the selected report marker stays highlighted through add and cancel', async () => {
+  render(<MapView session={editorSession} showToast={jest.fn()} />);
+  const marker = await screen.findByRole('button', { name: /10 Example Road, Aurora/i });
+  expect(marker).not.toHaveAttribute('data-selected');
+  fireEvent.click(marker);
+  expect(screen.getByRole('complementary')).toHaveClass('workspace-panel--preview');
+  expect(screen.getByRole('button', { name: /10 Example Road, Aurora/i })).toHaveAttribute('data-selected', 'true');
+
+  fireEvent.click(screen.getByRole('button', { name: /Add appraisal/i }));
+  await screen.findByRole('region', { name: 'Test add form' });
+  expect(screen.getByRole('button', { name: /10 Example Road, Aurora/i })).toHaveAttribute('data-selected', 'true');
+
+  fireEvent.click(screen.getByRole('button', { name: 'Back to reports' }));
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Test add form' })).not.toBeInTheDocument());
+  expect(screen.getByRole('complementary')).toHaveClass('workspace-panel--nearby');
+  expect(screen.getByRole('button', { name: /10 Example Road, Aurora/i })).toHaveAttribute('data-selected', 'true');
 });
 
 test('closing the workspace panel while placing a pin cancels the placement', async () => {

@@ -13,16 +13,18 @@ const IDLE_PLACEMENT = Object.freeze({ status: 'idle', location: null });
 const IDLE_MANUAL_PLACEMENT = Object.freeze({ active: false, location: null, confirmed: false });
 
 // Panel views:
-//   { mode: 'nearby' }
-//   { mode: 'compare' }
+//   { mode: 'nearby',   appraisal|null }
+//   { mode: 'compare',  appraisal|null }
 //   { mode: 'preview',  appraisal, editing }
 //   { mode: 'detail',   appraisal, editing, returnsToPreview }
 //   { mode: 'add',      appraisal|null, placement: { status, location } }
-// The add view keeps the last-selected appraisal so the map marker stays
-// highlighted while the form is open; manual placement exists only here, so
-// leaving the view ends placement by construction.
+// Every view carries the selected appraisal (required on preview/detail,
+// retained-or-null elsewhere) so the map marker stays highlighted when the
+// panel moves to the list, compare or add views. Only explicit deselection
+// (`deselect`, Back to the list, `reset-add`) clears it. Manual placement
+// exists only on the add view, so leaving it ends placement by construction.
 export function initialWorkspacePanel() {
-  return { open: true, view: { mode: 'nearby' } };
+  return { open: true, view: { mode: 'nearby', appraisal: null } };
 }
 
 function isAppraisal(value) {
@@ -31,6 +33,12 @@ function isAppraisal(value) {
 
 function isLocation(value) {
   return Boolean(value) && Number.isFinite(value.latitude) && Number.isFinite(value.longitude);
+}
+
+function assertRetainedAppraisal(appraisal, mode) {
+  if (appraisal !== null && !isAppraisal(appraisal)) {
+    throw new Error(`Workspace panel "${mode}" carries a malformed appraisal.`);
+  }
 }
 
 function requireAppraisal(appraisal, context) {
@@ -56,15 +64,14 @@ export function assertWorkspacePanel(panel) {
   switch (view.mode) {
     case 'nearby':
     case 'compare':
+      assertRetainedAppraisal(view.appraisal, view.mode);
       return panel;
     case 'preview':
     case 'detail':
       requireAppraisal(view.appraisal, view.mode);
       return panel;
     case 'add':
-      if (view.appraisal !== null && view.appraisal !== undefined && !isAppraisal(view.appraisal)) {
-        throw new Error('Workspace panel "add" carries a malformed appraisal.');
-      }
+      assertRetainedAppraisal(view.appraisal, view.mode);
       assertPlacement(view.placement);
       return panel;
     default:
@@ -73,7 +80,7 @@ export function assertWorkspacePanel(panel) {
 }
 
 function viewAppraisal(view) {
-  return 'appraisal' in view ? view.appraisal : null;
+  return isAppraisal(view.appraisal) ? view.appraisal : null;
 }
 
 function transitionPlacement(panel, nextPlacement) {
@@ -90,10 +97,13 @@ export function transitionWorkspacePanel(panel, action) {
   let next;
   switch (type) {
     case 'nearby':
-      next = { ...panel, view: { mode: 'nearby' } };
+      next = { ...panel, view: { mode: 'nearby', appraisal: viewAppraisal(view) } };
       break;
     case 'open-list':
-      next = { ...panel, open: true, view: { mode: 'nearby' } };
+      next = { ...panel, open: true, view: { mode: 'nearby', appraisal: viewAppraisal(view) } };
+      break;
+    case 'deselect':
+      next = { ...panel, view: { mode: 'nearby', appraisal: null } };
       break;
     case 'open-preview':
       requireAppraisal(action.appraisal, type);
@@ -104,11 +114,15 @@ export function transitionWorkspacePanel(panel, action) {
       next = { ...panel, open: true, view: { mode: 'detail', appraisal: action.appraisal, editing: false, returnsToPreview: false } };
       break;
     case 'show-detail': {
-      requireAppraisal(action.appraisal, type);
+      // An update result without a report falls back to the current
+      // selection; with neither there is nothing to show, so stay put
+      // instead of throwing inside the reducer.
       const current = viewAppraisal(view);
-      const appraisal = isAppraisal(current) && String(current.id) === String(action.appraisal.id)
-        ? { ...current, ...action.appraisal }
-        : action.appraisal;
+      const target = isAppraisal(action.appraisal) ? action.appraisal : current;
+      if (!target) return panel;
+      const appraisal = current && String(current.id) === String(target.id)
+        ? { ...current, ...target }
+        : target;
       next = {
         ...panel,
         view: {
@@ -136,7 +150,7 @@ export function transitionWorkspacePanel(panel, action) {
     case 'back':
       next = view.mode === 'detail' && view.returnsToPreview
         ? { ...panel, view: { mode: 'preview', appraisal: view.appraisal, editing: view.editing } }
-        : { ...panel, view: { mode: 'nearby' } };
+        : { ...panel, view: { mode: 'nearby', appraisal: null } };
       break;
     case 'add':
       next = { ...panel, open: true, view: { mode: 'add', appraisal: viewAppraisal(view), placement: IDLE_PLACEMENT } };
@@ -145,7 +159,7 @@ export function transitionWorkspacePanel(panel, action) {
       next = { ...panel, open: true, view: { mode: 'add', appraisal: null, placement: IDLE_PLACEMENT } };
       break;
     case 'compare':
-      next = { ...panel, view: { mode: 'compare' } };
+      next = { ...panel, view: { mode: 'compare', appraisal: viewAppraisal(view) } };
       break;
     case 'close':
     case 'toggle':
@@ -155,7 +169,7 @@ export function transitionWorkspacePanel(panel, action) {
       next = view.mode === 'add'
         ? { ...panel, open: false, view: { ...view, placement: IDLE_PLACEMENT } }
         : { ...panel, open: false };
-      if (type === 'toggle' && !panel.open) next = { open: true, view: { mode: 'nearby' } };
+      if (type === 'toggle' && !panel.open) next = { open: true, view: { mode: 'nearby', appraisal: viewAppraisal(view) } };
       break;
     case 'reopen':
       next = { ...panel, open: true };

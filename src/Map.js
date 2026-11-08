@@ -1454,7 +1454,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
       forgetRegions();
       focusReportOnMap(created);
     } else {
-      dispatchPanel(result.continueAdding ? { type: 'reset-add' } : { type: 'open-list' });
+      dispatchPanel(result.continueAdding ? { type: 'add' } : { type: 'open-list' });
       refreshCurrentBounds();
     }
     showToast({ tone: result.tone || 'success', message: result.message || 'Appraisal saved.' });
@@ -1476,14 +1476,14 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         String(candidate.id) === String(updated.id) ? { ...candidate, ...updated } : candidate
       )));
     }
-    dispatchPanel({ type: 'show-detail', appraisal: updated?.id ? updated : selectedAppraisal });
+    dispatchPanel({ type: 'show-detail', appraisal: updated?.id ? updated : null });
     refreshCurrentBounds();
     showToast({
       tone: 'success',
       message: typeof result === 'string' ? result : result.message || 'Report updated.',
     });
     recordTelemetryEvent('appraisal_mutation', { outcome: 'success', operation: 'update' });
-  }, [refreshCurrentBounds, selectedAppraisal, showToast]);
+  }, [refreshCurrentBounds, showToast]);
 
   const handleRestoreArchived = useCallback(async function restoreArchived(archivedAppraisal) {
     if (!archivedAppraisal?.id) return;
@@ -1557,7 +1557,7 @@ function MapView({ session, onSessionChange = NOOP, showToast = NOOP }) {
         (report) => String(report.id) !== String(archivedAppraisal.id)
       ));
     }
-    dispatchPanel({ type: 'nearby' });
+    dispatchPanel({ type: 'deselect' });
     refreshCurrentBounds();
     showToast({
       tone: 'success',

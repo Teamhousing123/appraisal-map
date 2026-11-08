@@ -19,7 +19,7 @@ function reduce(panel, actions) {
 test('starts on the nearby report list with the panel open', () => {
   const panel = initialWorkspacePanel();
   expect(panel.open).toBe(true);
-  expect(panel.view).toEqual({ mode: 'nearby' });
+  expect(panel.view).toEqual({ mode: 'nearby', appraisal: null });
   expect(workspacePanelSelection(panel)).toBeNull();
   expect(workspacePanelPlacement(panel)).toEqual({ active: false, location: null, confirmed: false });
 });
@@ -130,10 +130,28 @@ test('preview and detail views require an appraisal payload', () => {
   const panel = initialWorkspacePanel();
   expect(() => transitionWorkspacePanel(panel, { type: 'open-preview' })).toThrow(/appraisal/);
   expect(() => transitionWorkspacePanel(panel, { type: 'open-detail' })).toThrow(/appraisal/);
-  expect(() => transitionWorkspacePanel(panel, { type: 'show-detail' })).toThrow(/appraisal/);
 });
 
-test('preview/detail always carry a selection; nearby and compare never do', () => {
+test('show-detail without any appraisal degrades to a no-op instead of throwing', () => {
+  const nearby = initialWorkspacePanel();
+  expect(transitionWorkspacePanel(nearby, { type: 'show-detail' })).toBe(nearby);
+  expect(transitionWorkspacePanel(nearby, { type: 'show-detail', appraisal: null })).toBe(nearby);
+
+  const adding = transitionWorkspacePanel(nearby, { type: 'add' });
+  expect(transitionWorkspacePanel(adding, { type: 'show-detail', appraisal: null })).toBe(adding);
+});
+
+test('show-detail without an update payload falls back to the current selection', () => {
+  const preview = transitionWorkspacePanel(initialWorkspacePanel(), { type: 'open-preview', appraisal: reportA });
+  const detail = transitionWorkspacePanel(preview, { type: 'show-detail', appraisal: null });
+  expect(detail.view.mode).toBe('detail');
+  expect(workspacePanelSelection(detail)).toEqual(reportA);
+
+  const updated = transitionWorkspacePanel(detail, { type: 'show-detail', appraisal: { id: reportA.id, city: 'Newmarket' } });
+  expect(workspacePanelSelection(updated)).toEqual({ ...reportA, city: 'Newmarket' });
+});
+
+test('preview/detail always carry a selection', () => {
   const preview = transitionWorkspacePanel(initialWorkspacePanel(), { type: 'open-preview', appraisal: reportA });
   expect(workspacePanelSelection(preview)).toEqual(reportA);
 
@@ -143,8 +161,57 @@ test('preview/detail always carry a selection; nearby and compare never do', () 
   expect(workspacePanelDetailEditing(detail)).toBe(true);
   expect(workspacePanelDetailReturnsToPreview(detail)).toBe(true);
 
-  const nearby = transitionWorkspacePanel(detail, { type: 'nearby' });
-  expect(workspacePanelSelection(nearby)).toBeNull();
+});
+
+describe('the selection survives moves to the list, compare and add views', () => {
+  const preview = () => transitionWorkspacePanel(initialWorkspacePanel(), { type: 'open-preview', appraisal: reportA });
+
+  test('add then cancel (nearby) keeps the highlighted report', () => {
+    const cancelled = reduce(preview(), [{ type: 'add' }, { type: 'begin-placement' }, { type: 'nearby' }]);
+    expect(cancelled.view.mode).toBe('nearby');
+    expect(workspacePanelSelection(cancelled)).toEqual(reportA);
+    expect(workspacePanelPlacement(cancelled).active).toBe(false);
+  });
+
+  test('an address search (open-list) keeps the highlighted report', () => {
+    const closed = transitionWorkspacePanel(preview(), { type: 'close' });
+    const searched = transitionWorkspacePanel(closed, { type: 'open-list' });
+    expect(searched.open).toBe(true);
+    expect(searched.view.mode).toBe('nearby');
+    expect(workspacePanelSelection(searched)).toEqual(reportA);
+  });
+
+  test('resetting filters (nearby) keeps the highlighted report', () => {
+    const reset = transitionWorkspacePanel(preview(), { type: 'nearby' });
+    expect(workspacePanelSelection(reset)).toEqual(reportA);
+  });
+
+  test('compare and back from compare keep the highlighted report', () => {
+    const comparing = transitionWorkspacePanel(preview(), { type: 'compare' });
+    expect(comparing.view.mode).toBe('compare');
+    expect(workspacePanelSelection(comparing)).toEqual(reportA);
+    const back = transitionWorkspacePanel(comparing, { type: 'nearby' });
+    expect(workspacePanelSelection(back)).toEqual(reportA);
+  });
+
+  test('reopening through the toggle keeps the highlighted report', () => {
+    const reopened = reduce(preview(), [{ type: 'toggle' }, { type: 'toggle' }]);
+    expect(reopened.view.mode).toBe('nearby');
+    expect(workspacePanelSelection(reopened)).toEqual(reportA);
+  });
+
+  test('only explicit deselection clears it', () => {
+    expect(workspacePanelSelection(transitionWorkspacePanel(preview(), { type: 'deselect' }))).toBeNull();
+    const direct = transitionWorkspacePanel(initialWorkspacePanel(), { type: 'open-detail', appraisal: reportA });
+    expect(workspacePanelSelection(transitionWorkspacePanel(direct, { type: 'back' }))).toBeNull();
+    const adding = transitionWorkspacePanel(preview(), { type: 'add' });
+    expect(workspacePanelSelection(transitionWorkspacePanel(adding, { type: 'reset-add' }))).toBeNull();
+  });
+
+  test('a retained selection must still be a real appraisal', () => {
+    expect(() => assertWorkspacePanel({ open: true, view: { mode: 'nearby', appraisal: { id: null } } })).toThrow(/malformed/);
+    expect(() => assertWorkspacePanel({ open: true, view: { mode: 'compare' } })).toThrow(/malformed/);
+  });
 });
 
 test('back returns to preview only for details opened from preview', () => {
