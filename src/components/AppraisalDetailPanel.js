@@ -41,6 +41,7 @@ import CopyActions from './CopyActions';
 import ReportCompletion from './ReportCompletion';
 import { uploadStorageObject } from '../services/resumableUpload';
 import { isAbortError } from '../services/operation';
+import { isFormBusyOperation, transitionDetailOperation } from '../domain/detailOperation';
 import { recordTelemetryEvent } from '../services/telemetry';
 
 function BackIcon() {
@@ -180,9 +181,9 @@ function AppraisalDetailPanel({
   const [fieldErrors, setFieldErrors] = useState({});
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-  const [verifyingAddress, setVerifyingAddress] = useState(false);
-  const [deleting, setDeleting] = useState(false);
+  // One declared operation replaces the old saving/verifyingAddress/deleting
+  // booleans; overlapping work (e.g. archiving while editing) is unreachable.
+  const [operation, setOperation] = useState('idle');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [newPhoto, setNewPhoto] = useState(null);
   const [uploadType, setUploadType] = useState(appraisal.folder_files?.length ? 'folder' : 'pdf');
@@ -198,7 +199,9 @@ function AppraisalDetailPanel({
   const storagePathsRef = useRef({ photo: null, pdf: null, folder: null });
   const hasExistingPhoto = Boolean(appraisal.photo_url);
   const hasExistingDocuments = Boolean(appraisal.pdf_url || appraisal.folder_files?.length);
-  const formBusy = saving || verifyingAddress;
+  const formBusy = isFormBusyOperation(operation);
+  const archiving = operation === 'archiving';
+  const setPanelOperation = (next) => setOperation((current) => transitionDetailOperation(current, next));
   const editDirty = Boolean(
     editing
     && (
@@ -219,9 +222,9 @@ function AppraisalDetailPanel({
   useEffect(() => {
     onWorkspaceStateChange?.({
       dirty: editDirty,
-      busy: formBusy || deleting,
+      busy: operation !== 'idle',
     });
-  }, [deleting, editDirty, formBusy, onWorkspaceStateChange]);
+  }, [operation, editDirty, onWorkspaceStateChange]);
 
   useEffect(() => {
     if (error) errorSummaryRef.current?.focus();
@@ -272,6 +275,8 @@ function AppraisalDetailPanel({
   }, [initialEditing, canMutate]);
 
   const beginEditing = (event) => {
+    if (operation !== 'idle') return;
+    setConfirmDelete(false);
     editReturnFocusRef.current = event.currentTarget;
     if (onEditingChange) onEditingChange(true);
     else setEditing(true);
@@ -428,7 +433,7 @@ function AppraisalDetailPanel({
     event?.preventDefault();
     if (formBusy || saveLockRef.current) return;
     saveLockRef.current = true;
-    setSaving(true);
+    setPanelOperation('saving');
     try {
 
     const formSnapshot = formRef.current;
@@ -491,7 +496,7 @@ function AppraisalDetailPanel({
 
     if (addressChanged && !verifiedAddressMatch) {
       const requestId = ++geocodeRequestRef.current;
-      setVerifyingAddress(true);
+      setPanelOperation('verifying');
       try {
         const result = await geocodeFullOntarioAddress(formSnapshot.address, formSnapshot.city);
         const currentKey = addressFingerprint(formRef.current.address, formRef.current.city);
@@ -552,7 +557,7 @@ function AppraisalDetailPanel({
         }
         return;
       } finally {
-        setVerifyingAddress(false);
+        setPanelOperation('saving');
       }
     }
 
@@ -795,16 +800,17 @@ function AppraisalDetailPanel({
     } finally {
       uploadControllerRef.current = null;
       setUploadProgress(null);
-      setSaving(false);
+      setPanelOperation('idle');
     }
     } finally {
       saveLockRef.current = false;
-      setSaving(false);
+      setPanelOperation('idle');
     }
   };
 
   const handleDelete = async () => {
-    setDeleting(true);
+    if (operation !== 'idle') return;
+    setPanelOperation('archiving');
     setError('');
     let rowArchived = false;
     try {
@@ -837,7 +843,7 @@ function AppraisalDetailPanel({
         setError('The report was not archived. Check your access, reload the report, and try again.');
       }
     } finally {
-      setDeleting(false);
+      setPanelOperation('idle');
     }
   };
 
@@ -859,7 +865,7 @@ function AppraisalDetailPanel({
         >
           <div className="detail-form__actions am-form-actions">
             <button type="submit" className="button button--primary" disabled={formBusy}>
-              {verifyingAddress ? 'Verifying address…' : saving ? 'Saving…' : 'Save changes'}
+              {operation === 'verifying' ? 'Verifying address…' : operation === 'saving' ? 'Saving…' : 'Save changes'}
             </button>
             <button type="button" className="button button--secondary" onClick={() => runWorkspaceAction(resetEditing)} disabled={formBusy}>Cancel</button>
           </div>
@@ -1102,7 +1108,7 @@ function AppraisalDetailPanel({
         <PrimaryFacts report={appraisal} variant={compact ? 'preview' : 'detail'} includeReportDate={!compact} />
         <ReportCompletion report={appraisal} />
         {canMutate && !compact && <div className="detail-edit-action">
-          <button type="button" className="button button--primary" onClick={beginEditing}>Edit report</button>
+          <button type="button" className="button button--primary" onClick={beginEditing} disabled={operation !== 'idle'}>Edit report</button>
           <p>Complete missing facts or correct report details. Use values from the source report.</p>
         </div>}
         {!canMutate && !compact && <p className="appraisal-field-hint">Your account has view-only access. Ask your administrator to enable editing.</p>}
@@ -1161,13 +1167,13 @@ function AppraisalDetailPanel({
         {canMutate && !compact && (
           <div className="maintenance-actions">
             {!confirmDelete ? (
-              <button type="button" className="button button--secondary" onClick={() => setConfirmDelete(true)}>Archive…</button>
+              <button type="button" className="button button--secondary" onClick={() => setConfirmDelete(true)} disabled={operation !== 'idle'}>Archive…</button>
             ) : (
               <div className="archive-confirmation" role="status">
                 <p><strong>Archive this report?</strong> It will leave the map, while its record and private files stay preserved.</p>
                 <div>
-                  <button type="button" className="button button--primary" onClick={handleDelete} disabled={deleting}>{deleting ? 'Archiving…' : 'Archive report'}</button>
-                  <button type="button" className="button button--quiet" onClick={() => setConfirmDelete(false)} disabled={deleting}>Keep visible</button>
+                  <button type="button" className="button button--primary" onClick={handleDelete} disabled={archiving}>{archiving ? 'Archiving…' : 'Archive report'}</button>
+                  <button type="button" className="button button--quiet" onClick={() => setConfirmDelete(false)} disabled={archiving}>Keep visible</button>
                 </div>
               </div>
             )}

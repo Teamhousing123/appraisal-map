@@ -450,6 +450,20 @@ test.each([
   expect(onRequestManualPlacement).toHaveBeenCalledTimes(1);
 });
 
+test('unmounting the form cancels an in-progress pin placement', () => {
+  const onCancelManualPlacement = jest.fn();
+  const { unmount } = render(
+    <AddAppraisal
+      onAdded={jest.fn()}
+      manualPlacement={{ active: true, location: { latitude: 43.9, longitude: -79.4 }, confirmed: false }}
+      onCancelManualPlacement={onCancelManualPlacement}
+    />
+  );
+
+  unmount();
+  expect(onCancelManualPlacement).toHaveBeenCalledTimes(1);
+});
+
 test('does not offer manual placement for a Google access configuration failure', async () => {
   geocodeFullOntarioAddress.mockRejectedValue(Object.assign(
     new Error('Address search access needs attention.'),

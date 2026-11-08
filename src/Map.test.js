@@ -83,7 +83,7 @@ jest.mock('./domain/serviceArea', () => {
   };
 });
 
-jest.mock('./AddAppraisal', () => function TestAddAppraisal({ onAdded }) {
+jest.mock('./AddAppraisal', () => function TestAddAppraisal({ onAdded, onCancel, onRequestManualPlacement }) {
   const created = {
     id: 'report-2',
     address: '20 Example Road',
@@ -99,6 +99,8 @@ jest.mock('./AddAppraisal', () => function TestAddAppraisal({ onAdded }) {
       <button type="button" onClick={() => onAdded({ report: created, continueAdding: false })}>
         Save normally
       </button>
+      <button type="button" onClick={onRequestManualPlacement}>Place pin manually</button>
+      <button type="button" onClick={onCancel}>Back to reports</button>
     </section>
   );
 });
@@ -415,6 +417,51 @@ test('keeps repeat entry open and preserves the normal save-to-detail behavior',
   fireEvent.click(screen.getByRole('button', { name: 'Save normally' }));
   expect(await screen.findByRole('heading', { name: 'Report details' })).toBeInTheDocument();
   expect(within(screen.getByRole('region', { name: 'Report details' })).getByText('20 Example Road')).toBeVisible();
+});
+
+test('cancelling the add form ends manual pin placement instead of leaking it', async () => {
+  render(
+    <MapView
+      session={{ user: { app_metadata: { role: 'editor' } } }}
+      showToast={jest.fn()}
+    />
+  );
+  await screen.findByRole('heading', { name: '10 Example Road' });
+
+  fireEvent.click(await screen.findByRole('button', { name: /Add appraisal/i }));
+  await screen.findByRole('region', { name: 'Test add form' });
+  fireEvent.click(screen.getByRole('button', { name: 'Place pin manually' }));
+  expect(await screen.findByText('Choose the property location')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Back to reports' }));
+
+  await waitFor(() => expect(screen.queryByText('Choose the property location')).not.toBeInTheDocument());
+  expect(screen.queryByRole('region', { name: 'Test add form' })).not.toBeInTheDocument();
+  expect(await screen.findByRole('heading', { name: '10 Example Road' })).toBeInTheDocument();
+
+  // The map must no longer treat clicks as pin placement.
+  fireEvent.click(screen.getByTestId('map-surface'));
+  expect(screen.queryByText(/Choose the property location|Pin selected|Location confirmed/)).not.toBeInTheDocument();
+});
+
+test('closing the workspace panel while placing a pin cancels the placement', async () => {
+  render(
+    <MapView
+      session={{ user: { app_metadata: { role: 'editor' } } }}
+      showToast={jest.fn()}
+    />
+  );
+
+  fireEvent.click(await screen.findByRole('button', { name: /Add appraisal/i }));
+  await screen.findByRole('region', { name: 'Test add form' });
+  fireEvent.click(screen.getByRole('button', { name: 'Place pin manually' }));
+  expect(await screen.findByText('Choose the property location')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: /Hide reports|Show map/i }));
+
+  await waitFor(() => expect(screen.queryByText('Choose the property location')).not.toBeInTheDocument());
+  fireEvent.click(screen.getByTestId('map-surface'));
+  expect(screen.queryByText(/Choose the property location|Pin selected|Location confirmed/)).not.toBeInTheDocument();
 });
 
 test('offers persistent Undo with the archived version and restores the report', async () => {
